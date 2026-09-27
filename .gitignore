@@ -6,6 +6,11 @@ dsh-office-frontend.zip
 logs/
 .browser-profile/
 
+# Micro-proxectos git de proba (repos anidados con .git propio) e os
+# worktrees efémeros que xera projects/teste-e2e.sh.
+projects/micro-*/
+projects/.worktrees/
+
 # Ruído de sistema
 .DS_Store
 Thumbs.db

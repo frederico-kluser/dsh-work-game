@@ -19,6 +19,39 @@
  *   §4  renderOffice(state) -> SVG (render.js) — versão autocontida, sem
  *       depender de assets/furniture.svg (inalcançável a partir da webapp).
  *
+ * Funcionalidades desta tarefa (verificadas no checkout deepseek-harness
+ * v0.1.6-alpha.2, read-only):
+ *
+ * (1) Botão "Modo jogo" imediatamente ao lado do botão de settings.
+ *     Achado do checkout: `sidebar.panellist` ordena as entradas pelo campo
+ *     `order` (ascendente, default 0, empates por ordem de registo; ver
+ *     packages/client/ui-sidebar/src/client/index.ts). MAS o item de settings
+ *     NÃO está na panellist: neste checkout o único registrante nativo é
+ *     `plugins` (order 0). Settings ocupa `sidebar.settings` no pé da barra,
+ *     e o slot que o contrato de ui-sidebar descreve como "Optional actions
+ *     beside Settings at the sidebar foot" é `sidebar.footer.action` —
+ *     também ordenado por `order` (regra geral das listas; ver
+ *     ui-renderer/src/client/scoped-slots.tsx). Por isso o botão registra-se
+ *     em `sidebar.footer.action` { order: 0 }: fica pegado à fila de settings
+ *     (wide e rail 56px), com ícone e tooltip "Modo jogo". O clique abre o
+ *     painel do escritório via `ctx.layout.selectPanel(PANEL_ID)` — API
+ *     pública do serviço `layout` (ui-layout/src/client/service.ts) que
+ *     seleciona o slot 'main' com a key 'dsh-work-game'.
+ *
+ * (2) Auto-associação: quando chega uma sessão/agente sem nome/estilo
+ *     associado, gera-se nome aleatório + estilo de avatar aleatório e
+ *     guarda-se a associação em localStorage (chave 'dsh-work-game:assoc'),
+ *     estável entre renders. Singleton a nível de módulo, tolerante a falhas
+ *     de armazenamento (modo privado -> só em memória).
+ *
+ * (3) Reações: o estado visual (emoji/expressão/ficha) deriva EXCLUSIVAMENTE
+ *     dos eventos recebidos do adaptador (applyEvent -> recalcular). Não há
+ *     temporizadores que mudem emoji/expressão/ficha: os indicadores
+ *     transitórios (retry, compactação) limpiam-se por eventos posteriores,
+ *     nunca por timer. O único setTimeout que resta é a expiração de
+ *     apresentação dos outputs (~1s, contrato §2): só retira balões e nunca
+ *     toca o estado visual da pessoa.
+ *
  * Um bundle servido não consegue importar ficheiros ESM irmãos (a resolução
  * do module table só conhece seed words, linhas do grafo e chunks
  * factory-form client.*.js). Quando a integração ganhar um canal host→browser
@@ -35,6 +68,83 @@ window.__ModuleLoader__.load({
 
     const react = require('react');
     const h = react.createElement;
+
+    /* ================================================================
+     * 0. Associação nome+estilo por sessão (tarefa 2)
+     * ================================================================ */
+
+    // Persistência simples no cliente (localStorage): a identidade de uma
+    // sessão é gerada uma única vez e não muda entre renders.
+    const CLAVE_ASSOC = 'dsh-work-game:assoc';
+
+    // Banco de nomes neutros (sem apelidos nem dados pessoais).
+    const NOMES = [
+      'Ada', 'Bruno', 'Carla', 'Dino', 'Elsa', 'Félix', 'Greta', 'Hugo',
+      'Iris', 'Júlio', 'Kira', 'Lino', 'Mara', 'Nuno', 'Olga', 'Pedro',
+      'Rita', 'Sofia', 'Tino', 'Vera', 'Yuki', 'Zane',
+    ];
+
+    // Banco de estilos: forma do avatar + paleta (fundo/borde/acento).
+    // Cada estilo identifica visualmente ao ocupante na sala.
+    const ESTILOS = [
+      { id: 'azul', forma: 'circulo', paleta: { fundo: '#2e5a86', borde: '#1d3a55', acento: '#4a90d9' } },
+      { id: 'bosque', forma: 'cuadrado', paleta: { fundo: '#2f6d4f', borde: '#1f4a35', acento: '#58b368' } },
+      { id: 'amanecer', forma: 'hexagono', paleta: { fundo: '#b3573a', borde: '#7a3826', acento: '#e08a4c' } },
+      { id: 'grafito', forma: 'circulo', paleta: { fundo: '#46525e', borde: '#2f3942', acento: '#8a97a5' } },
+      { id: 'lavanda', forma: 'cuadrado', paleta: { fundo: '#6d5a94', borde: '#4a3c66', acento: '#9a86c9' } },
+      { id: 'caramelo', forma: 'hexagono', paleta: { fundo: '#a0713f', borde: '#6e4c26', acento: '#c9996a' } },
+    ];
+
+    const aleatorioDe = (lista) => lista[Math.floor(Math.random() * lista.length)];
+
+    // Associador: cache em memória + localStorage. Cria uma associação
+    // { name, style } na primeira visita de cada id e reutiliza-a depois,
+    // mesmo após recargar a página.
+    function criarAssociador() {
+      let cache = null; // null = ainda não lido
+
+      const ler = () => {
+        try {
+          const bruto = window.localStorage.getItem(CLAVE_ASSOC);
+          const obj = bruto ? JSON.parse(bruto) : {};
+          cache = (typeof obj === 'object' && obj !== null) ? obj : {};
+        } catch {
+          // Acesso bloqueado (modo privado, iframe sandbox): só em memória.
+          cache = {};
+        }
+      };
+
+      const guardar = () => {
+        try {
+          window.localStorage.setItem(CLAVE_ASSOC, JSON.stringify(cache));
+        } catch {
+          // Persistência não disponível: a associação vive nesta página.
+        }
+      };
+
+      return {
+        // Associação estável para `id`; `dado` permite que o próprio evento
+        // (futuro transporte) traia nome/avatar explícitos se os houver.
+        para(id, dado = {}) {
+          if (cache === null) ler();
+          let a = cache[id];
+          if (typeof a !== 'object' || a === null) {
+            a = {
+              name: typeof dado.name === 'string' && dado.name ? dado.name : aleatorioDe(NOMES),
+              avatar: typeof dado.avatar === 'string' ? dado.avatar : null,
+              style: dado.style ?? aleatorioDe(ESTILOS),
+            };
+            cache[id] = a;
+            guardar();
+          }
+          return a;
+        },
+      };
+    }
+
+    // Singleton a nível de módulo: uma única associação por id em toda a
+    // vida da página, independente do número de apply() (HMR/recarga).
+    const associador = criarAssociador();
 
     /* ================================================================
      * 1. Estado do escritório — contrato §2 (projeção browser)
@@ -58,11 +168,13 @@ window.__ModuleLoader__.load({
 
     const nomeDe = (id) => `Agente ${String(id).slice(-5)}`;
 
-    function criarPessoa(id, modelo) {
+    function criarPessoa(id, modelo, a) {
+      const asoc = a ?? null; // { name, avatar, style } | null (tarefa 2)
       return {
         id,
-        name: nomeDe(id),
-        avatar: null, // o painel não inventa URLs; desenha círculo com iniciais
+        name: asoc ? asoc.name : nomeDe(id),
+        avatar: asoc ? asoc.avatar : null, // o painel não inventa URLs
+        style: asoc ? asoc.style : null,   // { forma, paleta } do avatar
         status: 'idle',
         emoji: '💤',
         expression: 'idle',
@@ -75,7 +187,7 @@ window.__ModuleLoader__.load({
         outputs: [],
         flags: {
           ocioso: true, concluido: false, erro: false, ferramenta: false,
-          retry: false, retryDesde: 0, compactacao: false, compactacaoDesde: 0,
+          retry: false, compactacao: false,
         },
       };
     }
@@ -104,7 +216,8 @@ window.__ModuleLoader__.load({
     // Outputs expiram em ~1s na UI (contrato §2); histórico limitado a 6.
     function adicionarOutput(p, kind, texto) {
       p.outputs.push({ kind, text: texto, expiraEm: Date.now() + 1000 });
-      if (p.outputs.length > 6) p.outputs.shift();
+      // Histórico limitado a 6: retira o mais antigo (Array.shift não existe).
+      if (p.outputs.length > 6) p.outputs.splice(0, 1);
     }
 
     const num = (v) => (Number.isFinite(Number(v)) ? Number(v) : 0);
@@ -123,40 +236,60 @@ window.__ModuleLoader__.load({
     }
 
     // Evento normalizado (vocabulário §1) -> NOVO estado (puro).
+    // Reações (tarefa 3): as únicas escrituras de emoji/status/expression
+    // acontecem aqui, derivadas do evento recebido — nunca de um timer. Os
+    // indicadores transitórios limpiam-se por eventos posteriores; o
+    // `associador` toca localStorage só ao criar uma pessoa nova.
     function applyEvent(estado, evento) {
       const pessoas = new Map(estado.people);
       const p = (id) => pessoas.get(id);
-      const agora = Date.now();
 
       switch (evento.type) {
         case 'session/added':
           if (!pessoas.has(evento.sessionId)) {
-            pessoas.set(evento.sessionId, criarPessoa(evento.sessionId, evento.model));
+            const asoc = associador.para(evento.sessionId, evento);
+            pessoas.set(evento.sessionId, criarPessoa(evento.sessionId, evento.model, asoc));
           }
           break;
         case 'session/removed':
+          // A associação fica em localStorage: se a sessão voltar, mantenga
+          // nome e estilo (identidade estável entre desconexões).
           pessoas.delete(evento.sessionId);
           break;
         case 'status': {
           const pessoa = p(evento.sessionId);
           if (!pessoa) break;
-          pessoa.flags.ocioso = evento.status === 'idle';
+          const emExecucion = evento.status === 'running';
+          pessoa.flags.ocioso = !emExecucion;
+          // Nova execução supera as marcas transitórias; arranque de turno
+          // também limpa o erro anterior.
           pessoa.flags.concluido = false;
+          pessoa.flags.ferramenta = false;
+          pessoa.flags.retry = false;
+          if (emExecucion) pessoa.flags.erro = false;
           break;
         }
         case 'turn/end': {
           const pessoa = p(evento.sessionId);
           if (!pessoa) break;
           const kind = evento.kind;
+          // Fin de turno: limpa os indicadores transitórios.
           pessoa.flags.ocioso = true;
+          pessoa.flags.ferramenta = false;
+          pessoa.flags.retry = false;
+          pessoa.flags.compactacao = false;
           if (kind === 'completed') {
+            pessoa.flags.erro = false;
             pessoa.flags.concluido = true;
             adicionarOutput(pessoa, 'result', 'turno concluído');
           } else if (kind === 'error' || kind === 'blocked' || kind === 'max-tokens') {
             pessoa.flags.erro = true;
+            pessoa.flags.concluido = false;
             adicionarOutput(pessoa, 'message', kind === 'error' ? 'erro no turno' : kind === 'blocked' ? 'bloqueado' : 'máx. de tokens');
           } else {
-            // aborted | interrupted
+            // aborted | interrupted — interrupção não é erro.
+            pessoa.flags.erro = false;
+            pessoa.flags.concluido = false;
             adicionarOutput(pessoa, 'message', 'interrompido');
           }
           break;
@@ -166,8 +299,12 @@ window.__ModuleLoader__.load({
           if (!pessoa) break;
           pessoa.flags.ocioso = false;
           pessoa.flags.concluido = false;
+          pessoa.flags.retry = false;
+          pessoa.flags.compactacao = false;
           if (evento.phase === 'call') {
+            // Nova chamada = progresso: supera o erro anterior (se o houver).
             pessoa.flags.ferramenta = true;
+            pessoa.flags.erro = false;
           } else {
             pessoa.flags.ferramenta = false;
             if (evento.ok === false) pessoa.flags.erro = true;
@@ -179,6 +316,7 @@ window.__ModuleLoader__.load({
           if (!pessoa) break;
           pessoa.question = evento.text ?? 'Pergunta';
           pessoa.flags.concluido = false;
+          pessoa.flags.retry = false;
           break;
         }
         case 'question/answered': {
@@ -190,6 +328,8 @@ window.__ModuleLoader__.load({
           const pessoa = p(evento.sessionId);
           if (!pessoa) break;
           pessoa.approvals = [...pessoa.approvals, { id: evento.id, toolName: evento.toolName ?? 'ferramenta' }];
+          pessoa.flags.concluido = false;
+          pessoa.flags.retry = false;
           break;
         }
         case 'approval/decided': {
@@ -199,7 +339,12 @@ window.__ModuleLoader__.load({
         }
         case 'subagent/start': {
           const pessoa = p(evento.sessionId);
-          if (pessoa) pessoa.subagents += 1;
+          if (!pessoa) break;
+          pessoa.subagents += 1;
+          // Subagente a correr = trabalho em curso, não conclusão.
+          pessoa.flags.ocioso = false;
+          pessoa.flags.concluido = false;
+          pessoa.flags.retry = false;
           break;
         }
         case 'subagent/end': {
@@ -244,15 +389,21 @@ window.__ModuleLoader__.load({
         case 'retry': {
           const pessoa = p(evento.sessionId);
           if (!pessoa) break;
+          // llm/retry-started: sem evento de fim no vocabulário, o seguinte
+          // evento para esta pessoa (status/tool/turn-end/...) supera o
+          // indicador — nunca um temporizador.
           pessoa.flags.retry = true;
-          pessoa.flags.retryDesde = agora;
+          pessoa.flags.ocioso = false;
+          pessoa.flags.concluido = false;
           break;
         }
         case 'compaction': {
           const pessoa = p(evento.sessionId);
           if (!pessoa) break;
+          // O vocabulário tem phase 'start'|'end': o indicador vive exatamente
+          // o tempo que os próprios eventos digam — sem temporizador.
           pessoa.flags.compactacao = evento.phase === 'start';
-          pessoa.flags.compactacaoDesde = agora;
+          if (evento.phase === 'start') pessoa.flags.ocioso = false;
           break;
         }
         default:
@@ -268,7 +419,7 @@ window.__ModuleLoader__.load({
       const p = estado.people.get(sessionId);
       if (!p) return null;
       return {
-        id: p.id, name: p.name, avatar: p.avatar, status: p.status,
+        id: p.id, name: p.name, avatar: p.avatar, style: p.style, status: p.status,
         emoji: p.emoji, expression: p.expression, ctx: p.ctx, model: p.model,
         cost: p.cost, question: p.question, approvals: p.approvals,
         subagents: p.subagents, outputs: p.outputs,
@@ -281,7 +432,9 @@ window.__ModuleLoader__.load({
       return { people, teams: estado.teams, alerts: estado.alerts };
     }
 
-    // Expiração (~1s) de outputs e de indicadores transitórios (retry/compacção).
+    // Expiração (~1s) só de outputs na UI (contrato §2). Presentação pura:
+    // nunca recalcula emoji/expressão/ficha — as reações visuais dependem
+    // somente de eventos (tarefa 3), este timer não as toca.
     function purgar(estado, agora = Date.now()) {
       const pessoas = new Map(estado.people);
       let mudou = false;
@@ -289,15 +442,6 @@ window.__ModuleLoader__.load({
         const antes = p.outputs.length;
         p.outputs = p.outputs.filter((o) => o.expiraEm > agora);
         if (p.outputs.length !== antes) mudou = true;
-        if (p.flags.retry && agora - p.flags.retryDesde > 1000) {
-          p.flags.retry = false;
-          mudou = true;
-        }
-        if (p.flags.compactacao && agora - p.flags.compactacaoDesde > 1000) {
-          p.flags.compactacao = false;
-          mudou = true;
-        }
-        if (mudou) recalcular(p);
       }
       return mudou ? { ...estado, people: pessoas } : estado;
     }
@@ -306,11 +450,52 @@ window.__ModuleLoader__.load({
      * 2. Adaptador — contrato §3 (projeção browser)
      * ================================================================ */
 
-    // createAdapter({ onEvent, sessions, projections }) -> { start, stop }.
-    // O transporte real host->browser pluga-se em start() (abaixo, o ponto de
-    // assinatura). Sem canal, o painel mostra "telemetria indisponível" —
-    // nunca inventa sessões nem eventos.
-    function createAdapter({ onEvent, sessions = [], projections = {} }) {
+    // createAdapter({ onEvent, sessions, projections, surface }) -> { start, stop }.
+    // `surface` é o transporte real host->browser (feature-detected em apply):
+    //   surface.catalogo() -> [{ id, model? }]
+    //   surface.assinar(fn) -> devolve função de libertação (ou null)
+    // Sem canal, o painel mostra "telemetria indisponível" — nunca inventa
+    // sessões nem eventos.
+
+    // Normaliza um evento bruto do DSH para o vocabulário do contrato §1.
+    // Tipos desconhecidos devolvem null (ignorados, nunca fabricados).
+    function normalizarEventoDSH(bruto) {
+      if (!bruto || typeof bruto !== 'object') return null;
+      const t = String(bruto.type ?? bruto.event ?? '');
+      const sid = bruto.sessionId ?? bruto.session?.id ?? bruto.agent?.session?.id;
+      const base = sid ? { sessionId: sid } : {};
+      switch (t) {
+        case 'turn/end': {
+          const r = bruto.reason ?? bruto.payload?.reason;
+          const kind = typeof r === 'string' ? r : (r?.kind ?? 'error');
+          return { type: 'turn/end', ...base, kind };
+        }
+        case 'agent/status':
+          return { type: 'status', ...base, status: bruto.status ?? bruto.payload?.status };
+        case 'tool/call':
+          return { type: 'tool', ...base, phase: 'call', name: bruto.name ?? bruto.payload?.name };
+        case 'tool/result':
+          return { type: 'tool', ...base, phase: 'result', name: bruto.name ?? bruto.payload?.name, ok: bruto.ok ?? bruto.payload?.ok };
+        case 'subagent/start':
+          return { type: 'subagent/start', ...base, childId: bruto.id ?? bruto.payload?.id, runId: bruto.runId ?? bruto.payload?.runId, local: bruto.local ?? bruto.payload?.local };
+        case 'subagent/end':
+          return { type: 'subagent/end', ...base, childId: bruto.id ?? bruto.payload?.id, runId: bruto.runId ?? bruto.payload?.runId, stopReason: bruto.stopReason ?? bruto.payload?.stopReason };
+        case 'approval/asked':
+          return { type: 'approval', ...base, id: bruto.id, toolName: bruto.toolName ?? bruto.payload?.toolName, callId: bruto.callId ?? bruto.payload?.callId, reason: bruto.reason ?? bruto.payload?.reason };
+        case 'approval/decided':
+          return { type: 'approval/decided', ...base, id: bruto.id, outcome: bruto.outcome ?? bruto.payload?.outcome };
+        case 'llm/retry-started':
+          return { type: 'retry', ...base };
+        case 'compaction/start':
+          return { type: 'compaction', ...base, phase: 'start' };
+        case 'compaction/end':
+          return { type: 'compaction', ...base, phase: 'end' };
+        default:
+          return null;
+      }
+    }
+
+    function createAdapter({ onEvent, sessions = [], projections = {}, surface = null }) {
       let ativo = false;
       const limpeza = [];
       return {
@@ -321,8 +506,25 @@ window.__ModuleLoader__.load({
           for (const sessao of sessions) {
             onEvent({ type: 'session/added', sessionId: sessao.id, model: sessao.model });
           }
-          // Ponto de assinatura do transporte real (eventos/projeções):
-          // assinaturas entram em `limpeza` para o stop() as libertar.
+          // Transporte real: assinar eventos brutos e normalizá-los.
+          if (surface && typeof surface.assinar === 'function') {
+            try {
+              const libertar = surface.assinar((bruto) => {
+                const ev = normalizarEventoDSH(bruto);
+                if (ev) onEvent(ev);
+              });
+              if (typeof libertar === 'function') limpeza.push(libertar);
+            } catch {
+              /* sem transporte utilizável: mantém "telemetria indisponível" */
+            }
+          }
+          // Projeções (ctx/model/uso) chegam já normalizadas quando o canal existe.
+          if (surface && typeof surface.assinarProjecoes === 'function') {
+            try {
+              const libertar = surface.assinarProjecoes(onEvent);
+              if (typeof libertar === 'function') limpeza.push(libertar);
+            } catch { /* idem */ }
+          }
           void projections;
         },
         stop() {
@@ -414,7 +616,26 @@ window.__ModuleLoader__.load({
       ].join('');
     }
 
-    // Pessoa: balão (se perguntar), emoji sobre a cabeça e avatar.
+    // Avatar desenhado a partir do estilo associado (tarefa 2): forma +
+    // paleta. O estilo vem da associação estável (localStorage), assim o
+    // ocupante não muda de aspecto entre renders. Sem estilo (seam com
+    // state.js, que não conhece `style`) -> círculo neutro.
+    function avatarPorEstilo(estilo, cx, cy) {
+      const paleta = estilo?.paleta ?? { fundo: '#2e5a86', borde: '#1d3a55', acento: '#4a90d9' };
+      const forma = estilo?.forma ?? 'circulo';
+      let corpo;
+      if (forma === 'cuadrado') {
+        corpo = `<rect x="${cx - 30}" y="${cy - 30}" width="60" height="60" rx="10" fill="${paleta.fundo}" stroke="${paleta.borde}" stroke-width="2.5"/>`;
+      } else if (forma === 'hexagono') {
+        const pts = `${cx},${cy - 36} ${cx + 31},${cy - 18} ${cx + 31},${cy + 18} ${cx},${cy + 36} ${cx - 31},${cy + 18} ${cx - 31},${cy - 18}`;
+        corpo = `<polygon points="${pts}" fill="${paleta.fundo}" stroke="${paleta.borde}" stroke-width="2.5"/>`;
+      } else {
+        corpo = `<circle cx="${cx}" cy="${cy}" r="40" fill="${paleta.fundo}" stroke="${paleta.borde}" stroke-width="2.5"/>`;
+      }
+      return corpo;
+    }
+
+    // Pessoa: balão (se perguntar), emoji sobre a cabeça e avatar com estilo.
     function renderPessoa(p, cx, selecionada) {
       const nome = p.name ?? 'Pessoa';
       const estado = `${p.emoji} ${ROTULOS[p.status] ?? p.status ?? '—'}`;
@@ -428,8 +649,8 @@ window.__ModuleLoader__.load({
         anel,
         p.avatar
           ? `<image href="${esc(p.avatar)}" x="${cx - 40}" y="112" width="80" height="80" preserveAspectRatio="xMidYMax meet"/>`
-          : `<circle cx="${cx}" cy="150" r="40" fill="#2e5a86" stroke="#1d3a55" stroke-width="2"/>` +
-            `<text x="${cx}" y="158" text-anchor="middle" font-size="20" fill="#f4f7fa">${esc(iniciais(nome))}</text>`,
+          : avatarPorEstilo(p.style, cx, 150) +
+            `<text x="${cx}" y="158" text-anchor="middle" font-size="20" fill="${p.style?.paleta?.acento ?? '#f4f7fa'}">${esc(iniciais(nome))}</text>`,
         '</g>',
       ].join('');
     }
@@ -559,6 +780,13 @@ window.__ModuleLoader__.load({
       '.wg-rodape .wg-chip{padding:2px 10px;border-radius:11px;background:#eef1f5;color:#3d4854}',
       '.wg-rodape .wg-chip-verde{background:#e9f2ea;color:#2f5d36}',
       '.wg-rodape .wg-dica{color:#8b958e;font-size:12px}',
+      // Botão "Modo jogo" do pé (tarefa 1): o contrato de ui-sidebar diz que
+      // cada ocupante de `sidebar.footer.action` possui a sua própria
+      // geometria e hover chrome. Cor neutra herdada de currentColor para se
+      // fundir com o resto do pé.
+      '.wg-jogar{display:inline-flex;align-items:center;gap:6px;height:28px;min-width:28px;padding:0 9px;border:0;background:transparent;border-radius:6px;color:currentColor;cursor:pointer}',
+      '.wg-jogar:hover{background:rgba(90,104,120,0.14)}',
+      '.wg-jogar .wg-jogar-rotulo{font-size:13px;color:currentColor}',
     ].join('');
 
     // Painel principal: sala SVG com zoom/pan mínimos e inspeção por pessoa.
@@ -696,6 +924,26 @@ window.__ModuleLoader__.load({
       );
     }
 
+    // Botão do pé da barra lateral (tarefa 1): abre o painel do escritório.
+    // Ocupa `sidebar.footer.action`, o slot que ui-sidebar define como
+    // "Optional actions beside Settings at the sidebar foot" — fica justo ao
+    // lado do botão de settings (wide e rail). Tooltip nativo no `title`,
+    // nome acessível no `aria-label`; em wide mostra também o rótulo, como a
+    // própria fila de settings faz.
+    function BotaoModoJogo(props) {
+      const { wide, abrir } = props; // abrir vem do inject (ctx.layout.selectPanel)
+      return h('button', {
+        type: 'button',
+        className: 'wg-jogar',
+        onClick: abrir,
+        title: 'Modo jogo',
+        'aria-label': 'Modo jogo',
+      },
+        IconeEscritorio({ size: wide ? 16 : 18 }),
+        wide ? h('span', { className: 'wg-jogar-rotulo' }, 'Modo jogo') : null,
+      );
+    }
+
     /* ================================================================
      * 5. Núcleo do painel e face do bundle
      * ================================================================ */
@@ -713,12 +961,14 @@ window.__ModuleLoader__.load({
 
       const temPendentes = () => {
         for (const p of estado.people.values()) {
-          if (p.outputs.length > 0 || p.flags.retry || p.flags.compactacao) return true;
+          if (p.outputs.length > 0) return true;
         }
         return false;
       };
 
-      // Expirações (~1s) de outputs e indicadores transitórios na UI.
+      // Expiração (~1s) só dos balões de output na UI (contrato §2): o timer
+      // jamais muda emoji/expressão/ficha — essas reações vêm dos eventos
+      // do adaptador (tarefa 3).
       const agendarPurga = () => {
         if (timerPurga !== null || !temPendentes()) return;
         timerPurga = setTimeout(() => {
@@ -741,16 +991,19 @@ window.__ModuleLoader__.load({
         },
         iniciar: () => {
           if (!adaptador) {
+            const transporte = superficieDSH;
             adaptador = createAdapter({
               onEvent: (evento) => {
                 estado = applyEvent(estado, evento);
                 notificar();
                 agendarPurga();
               },
-              // Catálogo de sessões e projeções: alimentados pelo futuro
-              // transporte host->browser (o plugin nunca simula sessões).
-              sessions: [],
+              // Catálogo real de sessões + transporte de eventos (feature-detected).
+              sessions: transporte && typeof transporte.catalogo === 'function'
+                ? (transporte.catalogo() ?? [])
+                : [],
               projections: {},
+              surface: transporte,
             });
           }
           adaptador.start();
@@ -785,13 +1038,59 @@ window.__ModuleLoader__.load({
       destino.head.append(el);
     }
 
-    // O id partilhado pela entrada da barra lateral e pelo painel em `main`.
+    // O id partilhado pela entrada do pé da barra e pelo painel em `main`.
     const PANEL_ID = 'dsh-work-game';
 
-    exports.inject = ['slots'];
+    // Superfície de transporte real (catálogo + eventos) — preenchida em apply().
+    // Fica null quando o runtime não expõe `sessions`; nesse caso o painel
+    // mostra "telemetria indisponível" e nada é inventado.
+    let superficieDSH = null;
+
+    // Extrai, com deteção defensiva, o catálogo e o fluxo de eventos que o
+    // runtime do DSH expõe ao cliente (ctx.sessions). Nomes de método variam
+    // entre versões: tentamos as formas conhecidas e ficamos sem canal se
+    // nenhuma existir.
+    function extrairSuperficie(ctx) {
+      const servico = ctx && (ctx.sessions ?? ctx.reflect?.get?.('sessions'));
+      if (!servico) return null;
+      const catalogo = () => {
+        try {
+          const lista = typeof servico.list === 'function' ? servico.list() : (servico.sessions ?? []);
+          const itens = Array.isArray(lista) ? lista : (lista && typeof lista === 'object' ? Object.values(lista) : []);
+          return itens
+            .map((s) => ({ id: s.sessionId ?? s.id, model: s.model ?? s.header?.config?.model }))
+            .filter((s) => !!s.id);
+        } catch {
+          return [];
+        }
+      };
+      const assinar = (fn) => {
+        // Formas conhecidas: servico.on('session/event', handler) ou
+        // servico.events.on(...) ou um eventSource por sessão (retain).
+        try {
+          if (typeof servico.on === 'function') {
+            const h = (a, b) => fn(b ?? a);
+            servico.on('session/event', h);
+            return () => { try { servico.off?.('session/event', h); } catch { /* já libertado */ } };
+          }
+          if (servico.events && typeof servico.events.on === 'function') {
+            const h = (a, b) => fn(b ?? a);
+            servico.events.on('session/event', h);
+            return () => { try { servico.events.off?.('session/event', h); } catch { /* idem */ } };
+          }
+        } catch { /* sem fluxo utilizável */ }
+        return null;
+      };
+      return { catalogo, assinar, assinarProjecoes: null };
+    }
+
+    // 'layout' é o serviço que ui-layout fornece via ctx.reflect.provide:
+    // dá a transição pública de painel (ui-layout/src/client/service.ts).
+    exports.inject = ['slots', 'layout'];
 
     // A função que o runtime do browser chama (padrão dos exemplos oficiais).
     exports.apply = function apply(ctx) {
+      superficieDSH = extrairSuperficie(ctx);
       injetarEstilos(document);
       const nucleo = criarNucleo();
 
@@ -799,6 +1098,7 @@ window.__ModuleLoader__.load({
       // do plugin for descartada (reload HMR, unload, dependência morta).
       ctx.effect(() => () => { nucleo.dispose(); }, 'dsh-work-game: escritório');
 
+      // Painel em `main`, keyed: a mesma key que o botão do pé seleciona.
       ctx.slots.inject('main', () =>
         ctx.slots.register({
           name: 'main',
@@ -807,13 +1107,26 @@ window.__ModuleLoader__.load({
         }, PainelEscritorio),
       );
 
-      ctx.slots.inject('sidebar.panellist', () =>
+      // Botão "Modo jogo" no pé, justo ao lado do botão de settings (tarefa 1).
+      // Achado do checkout (v0.1.6-alpha.2): o item de settings NÃO está em
+      // `sidebar.panellist` — essa lista ordena-se pelo campo `order`
+      // (ascendente, default 0; a única entrada nativa é `plugins` a order 0,
+      // ver ui-sidebar/src/client/index.ts). Settings é o ocupante de
+      // `sidebar.settings` no pé da barra, e o slot contiguo para ações é
+      // `sidebar.footer.action` (também ordenado por `order`). Com order 0
+      // — e sem outros registrantes — o botão fica pegado à fila de settings
+      // em wide e em rail (56px). O clique abre o painel do escritório via
+      // ctx.layout.selectPanel(PANEL_ID), que seleciona o slot 'main' com a
+      // key 'dsh-work-game' (lanza se a key não está registrada — nós a
+      // registramos acima, no mesmo apply).
+      ctx.slots.inject('sidebar.footer.action', () =>
         ctx.slots.register({
-          name: 'sidebar.panellist',
+          name: 'sidebar.footer.action',
           id: PANEL_ID,
           order: 0,
-          label: () => 'Escritório',
-        }, IconeEscritorio),
+          label: () => 'Modo jogo',
+          inject: () => ({ abrir: () => ctx.layout.selectPanel(PANEL_ID) }),
+        }, BotaoModoJogo),
       );
     };
 
