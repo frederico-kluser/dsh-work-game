@@ -1,0 +1,27 @@
+#!/usr/bin/env node
+/*
+ * dwg — CLI de controlo/debug do dsh-work-game.
+ * Contrato: docs/contratos-plugin.md §4 · manual: docs/terminal.md.
+ *
+ * Este ficheiro SÓ despacha: instala o filtro do aviso cosmético de módulo
+ * "typeless" do Node, carrega os comandos e entrega o exit code ao processo.
+ */
+
+// O pacote não declara "type":"module"; o Node volta a analisar os .js como
+// ESM por deteção de sintaxe e emite um aviso inofensivo (code
+// MODULE_TYPELESS_PACKAGE_JSON) sempre que um comando mantém o processo vivo
+// o suficiente para o event loop o entregar. Intercetar na origem — um
+// listener do evento "warning" não suprime a impressão por defeito.
+const emitirAvisoOriginal = process.emitWarning;
+process.emitWarning = function filtroAvisos(aviso, tipo, codigo) {
+  const chave =
+    (typeof aviso === 'object' && aviso !== null && aviso.code) ||
+    (typeof tipo === 'object' && tipo !== null ? tipo.code : codigo);
+  if (chave !== 'MODULE_TYPELESS_PACKAGE_JSON') {
+    emitirAvisoOriginal.call(process, aviso, tipo, codigo);
+  }
+};
+
+const { run } = await import('../lib/commands.js');
+
+process.exit(await run(process.argv.slice(2)));

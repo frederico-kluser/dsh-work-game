@@ -1,0 +1,16 @@
+# cordis.patch.yml — camada de ativação do bundle dsh-work-game-plugin
+#
+# Padrão de layers do DSH (verificado no checkout local 0.1.6-alpha.2,
+# packages/bundle/web-app/cordis.patch.yml):
+#   - a ativação só acontece porque package.json declara dsh.bundle.patch;
+#     um bloco dsh.bundle vazio não ativa nada;
+#   - `insert` cria uma linha com id PRÓPRIO: nunca apontar para o id de
+#     outra linha (a resolução é whole-entry replace, nunca merge);
+#   - `name` é o pacote a carregar, resolvido dos bundles instalados
+#     (ex.: "dsh plugin --profile web add dsh-work-game-plugin");
+#   - o lado browser é descoberto automaticamente: o módulo `modules` do
+#     web-app lê o bloco dsh.client do pacote (inject + platform) e serve o
+#     entrypoint exports["./client"] — por isso esta patch não declara client.
+- insert:
+    - id: dsh-work-game
+      name: 'dsh-work-game-plugin'
