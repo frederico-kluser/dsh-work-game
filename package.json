@@ -1,0 +1,14 @@
+{
+  "name": "dsh-work-game",
+  "version": "0.1.0",
+  "private": true,
+  "description": "A playful 2D virtual office for AI agents — SVG desks, Avataaars people, speech-bubble activity and expandable teams. Front-end demo, no backend.",
+  "license": "MIT",
+  "scripts": {
+    "start": "python3 -m http.server 4173 --bind 127.0.0.1",
+    "test": "node --test 'tests/**/*.test.mjs'"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

@@ -1,0 +1,86 @@
+{
+  "_doc": "Fontes do material do projeto para `coala.py ingest`. mode: markdown|text|whole|pdf · type: episodic|semantic|procedural · origin: owner|agent|untrusted|system · tags aceitam {stem} {name} {dir} {rule}. Primeira regra que apanha um ficheiro ganha. Ver references/instalar.md da coala-agent-skill.",
+  "version": 1,
+  "key_prefix": "proj",
+  "path_prefix": "",
+  "exclude": [
+    "dsh-office-frontend.zip",
+    "*.png"
+  ],
+  "rules": [
+    {
+      "name": "conhecimento",
+      "include": [
+        "docs/conhecimento/*.md"
+      ],
+      "mode": "markdown",
+      "type": "semantic",
+      "origin": "agent",
+      "tags": "conhecimento,sessao,{stem}"
+    },
+    {
+      "name": "readme",
+      "include": [
+        "README.md"
+      ],
+      "mode": "markdown",
+      "type": "semantic",
+      "origin": "agent",
+      "tags": "docs,readme"
+    },
+    {
+      "name": "plano-visual",
+      "include": [
+        "PLANO-VISUAL-DSH-OFFICE.md"
+      ],
+      "mode": "markdown",
+      "type": "semantic",
+      "origin": "agent",
+      "tags": "docs,design,planejamento"
+    },
+    {
+      "name": "prompts-design",
+      "include": [
+        "PROMPTS-DSH-OFFICE.md"
+      ],
+      "mode": "markdown",
+      "type": "semantic",
+      "origin": "agent",
+      "tags": "docs,prompts,design"
+    },
+    {
+      "name": "avataars-sources",
+      "include": [
+        "assets/AVATARS-SOURCES.md"
+      ],
+      "mode": "markdown",
+      "type": "semantic",
+      "origin": "agent",
+      "tags": "avataaars,proveniencia,licencas"
+    },
+    {
+      "name": "avataars-expressions",
+      "include": [
+        "assets/AVATARS-EXPRESSIONS.md"
+      ],
+      "mode": "markdown",
+      "type": "semantic",
+      "origin": "agent",
+      "tags": "avataaars,expressoes,assets"
+    },
+    {
+      "name": "third-party",
+      "include": [
+        "THIRD_PARTY_NOTICES.md"
+      ],
+      "mode": "markdown",
+      "type": "semantic",
+      "origin": "agent",
+      "tags": "licencas,terceiros"
+    }
+  ],
+  "graph": {
+    "entities": [],
+    "edges": []
+  }
+}

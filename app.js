@@ -380,11 +380,12 @@ function renderModule(mod, index) {
   const controls = isLeadTable
     ? sceneButton(548, 111, 149, 'Subagentes', 'more-children', attributes, 'plus') + sceneButton(710, 111, 151, 'Voltar à mesa', 'return', attributes, 'return')
     : sceneButton(721, 111, 140, 'Recrutar', 'recruit-slot', attributes, 'plus');
+  const leadInfo = leadName(mod);
   const title = mod.kind === 'delegation'
-    ? (isLeadTable ? `Equipe de ${esc(leadName(mod))}` : `Apoio de ${esc(leadName(mod))}`)
+    ? (leadInfo.coordination ? `Equipe de ${esc(leadInfo.name)}` : `Apoio de ${esc(leadInfo.name)}`)
     : team.name;
   const subtitle = mod.kind === 'delegation'
-    ? `${esc(leadName(mod))} + subagentes`
+    ? `${esc(leadInfo.name)} + subagentes`
     : (mod.kind === 'expansion' ? `Mais espaço do time ${esc(team.name)}` : team.path);
   return `<g class="desk-module" data-module="${mod.id}" data-team="${mod.teamId}" data-seats="4" transform="translate(${pos.x} ${pos.y})" style="${themeStyle(mod.kind === 'delegation' ? 'violet' : team.theme)}">
       ${controls}${chairs}${characters}${use('desk', 0, 365, W, 288)}
@@ -396,8 +397,16 @@ function renderModule(mod, index) {
     </g>`;
 }
 function leadName(mod) {
+  /* A delegation table is labelled by whoever sits at seat 0 of THAT module:
+     a root member coordinating (Equipe de …) or a child covering overflow (Apoio de …). */
+  const seat0 = mod.seats[0];
+  const owner = typeof seat0 === 'string' && seat0 !== 'reserved' ? personById(seat0) : null;
+  if (owner) {
+    const home = moduleById(owner.homeModuleId);
+    return { name: owner.name, coordination: !home || home.kind !== 'delegation' };
+  }
   const lead = state.people.find((p) => p.away && p.teamId === mod.teamId);
-  return lead ? lead.name : 'equipe';
+  return { name: lead ? lead.name : 'equipe', coordination: true };
 }
 function renderWorld() {
   const rows = Math.max(1, Math.ceil(state.modules.length / GRID.cols));
@@ -609,25 +618,31 @@ function delegate(personId, count) {
 }
 function returnTeam(teamId) {
   const team = teamById(teamId);
-  const lead = state.people.find((p) => p.away && p.teamId === teamId);
-  if (!team || !lead) return;
-  const before = $(`[data-character-id="${lead.id}"]`)?.getBoundingClientRect();
+  if (!team) return;
   const delegationModules = state.modules.filter((m) => m.teamId === teamId && m.kind === 'delegation');
-  const children = state.people.filter((p) => p.away && p.teamId === teamId && p.id !== lead.id);
+  const isSubagent = (p) => p.away && delegationModules.some((m) => m.id === p.homeModuleId);
+  const returning = state.people.filter((p) => p.away && p.teamId === teamId && !isSubagent(p));
+  const children = state.people.filter(isSubagent);
+  if (!returning.length && !children.length) return;
+  const before = $(`[data-character-id="${returning[0]?.id}"]`)?.getBoundingClientRect();
   team.completed += children.length;
-  lead.outputs.push({ text: `${children.length} resultados da equipe recebidos`, kind: 'result', at: Date.now() });
-  lead.away = false; lead.status = 'done';
-  lead.expressionPreset = null;
-  const home = moduleById(lead.homeModuleId);
-  if (home) home.seats[lead.homeSeat] = lead.id;
+  for (const lead of returning) {
+    lead.outputs.push({ text: `${children.length} resultados da equipe recebidos`, kind: 'result', at: Date.now() });
+    lead.away = false; lead.status = 'done'; lead.expressionPreset = null;
+    const home = moduleById(lead.homeModuleId);
+    if (home) home.seats[lead.homeSeat] = lead.id;
+  }
   state.people = state.people.filter((p) => !children.includes(p));
   state.modules = state.modules.filter((m) => !delegationModules.includes(m));
   for (const m of state.modules) m.seats = m.seats.map((s) => (children.some((c) => c.id === s) ? null : s));
-  if (children.some((c) => c.id === state.selected)) state.selected = lead.id;
+  if (children.some((c) => c.id === state.selected)) state.selected = returning[0]?.id || null;
   render({ fit: true });
-  animateTransfer(lead.id, before);
-  showBubble(lead, `${children.length} resultados da equipe recebidos`, 'result');
-  toast(`${lead.name} voltou ao lugar original. Equipe recolhida.`);
+  if (returning[0]) {
+    animateTransfer(returning[0].id, before);
+    showBubble(returning[0], `${children.length} resultados da equipe recebidos`, 'result');
+  }
+  const names = returning.map((p) => p.name).join(', ') || 'A equipe';
+  toast(`${names} voltou ao lugar original. Equipe recolhida.`);
 }
 function animateTransfer(id, before) {
   /* FRONTEND-ONLY MOTION: the ONE avatar element lifts and slides to its new
@@ -773,7 +788,7 @@ $('#viewport').addEventListener('wheel', (e) => {
 $('#viewport').addEventListener('pointerdown', (e) => {
   if (e.button !== 0 || e.target.closest('[data-action],button')) return;
   dragging = { id: e.pointerId, x: e.clientX, y: e.clientY, pan: { ...state.pan } };
-  $('#viewport').setPointerCapture(e.pointerId);
+  try { $('#viewport').setPointerCapture(e.pointerId); } catch { /* eventos sintéticos de teste */ }
   $('#viewport').classList.add('dragging');
 });
 $('#viewport').addEventListener('pointermove', (e) => {

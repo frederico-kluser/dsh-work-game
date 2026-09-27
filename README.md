@@ -85,17 +85,19 @@ O painel lateral traz um teste de expressões ao vivo: escolha um preset e veja 
 - Nada é persistido — recarregar a página ou clicar em **Recomeçar demo** restaura o exemplo.
 - Todos os assets são locais: nenhuma chamada externa em runtime.
 
-## Verificação manual
+## Testes
 
-Não há suíte de testes automatizados; a verificação foi manual, no navegador:
+A suíte cobre **todas as funcionalidades** — não linhas de código: cada comportamento visível da demo tem pelo menos um teste. Sem dependências npm: usa o runner nativo do Node e Chrome/Chromium headless via CDP.
 
-- seleção de pessoa e painéis de contexto e computador;
-- recrutamento (sorteio de nome e avatar, **Sortear outro**, escolha do time);
-- crescimento de mesa ao lotar os 4 lugares — nova mesa nascendo e as mesas seguintes deslizando;
-- delegação montada e recolhida, sem duplicar o avatar do coordenador;
-- zoom e *pan* (`+`/`−`/enquadrar, `Ctrl` + scroll, arraste e setas);
-- layout mobile em **390 × 844**, sem overflow horizontal;
-- assets carregando offline, via HTTP local.
+```bash
+node --test 'tests/**/*.test.mjs'   # ou: npm test
+```
+
+- **`tests/functional.test.mjs`** — 18 testes funcionais contra a página real: arranque e cena-semente; ausência de sidebar/cabeçalho de sala; fichas sem cargo; seleção e inspetor; contexto simulado (`~`, `CTX —`, mapa); computador e primeira tarefa; os 6 estados com rótulo/ícone/marcador; os 14 presets de expressão com troca real do rosto; recrutamento aleatório com "Sortear outro"; crescimento de mesa com empurrão da mesa de equipe; criação de time; delegação com cadeira reservada e sem avatar duplicado; retorno com resultados preservados; balões (substituição e expiração ~1s); câmera (zoom, enquadrar, arraste, teclado, sem scroll nativo); recomeçar demo; mobile 390×844; e offline (zero requisições externas e zero erros de consola).
+- **`tests/static-assets.test.mjs`** e **`tests/contracts.test.mjs`** — validação dos 160 SVGs (XML, viewBox, sem scripts/recursos externos), contratos de `data.js` e `expressions.js` (incluindo os enums reais do Avataaars e a cadeia de fallback), estrutura do `index.html` e links do README.
+- **`tests/helpers/`** — servidor HTTP estático e driver CDP, ambos apenas com stdlib do Node.
+
+Para correr os testes funcionais é preciso um Chrome/Chromium no sistema (`CHROME_PATH` aponta para o executável quando não está no `PATH`).
 
 ## Roadmap
 
