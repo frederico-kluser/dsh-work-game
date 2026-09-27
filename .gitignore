@@ -1,0 +1,11 @@
+# Artefatos locais de empacotamento — regenerados sob demanda, não versionados.
+dsh-office-frontend.zip
+*.zip
+
+# Logs e perfis de automação de navegador usados nos testes locais.
+logs/
+.browser-profile/
+
+# Ruído de sistema
+.DS_Store
+Thumbs.db

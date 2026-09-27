@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#f8f7f2">
+  <meta name="description" content="dsh-work-game — uma sala 2D de trabalho para agentes. Protótipo de frontend em SVG, sem backend.">
+  <title>dsh-work-game — o escritório dos seus agentes</title>
+  <link rel="icon" href="assets/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="styles.css">
+  <script src="data.js" defer></script>
+  <script src="expressions.js" defer></script>
+  <script src="app.js" defer></script>
+</head>
+<body>
+  <div class="app">
+    <header class="app-header">
+      <a class="brand" href="./" aria-label="dsh-work-game, início">
+        <span class="brand-mark"><svg aria-hidden="true"><use href="assets/furniture.svg#icon-browser"/></svg></span>
+        <span><strong>dsh<span>·</span>work<span>·</span>game</strong><small>Uma sala. Muitas ideias.</small></span>
+      </a>
+      <div class="header-stats" id="header-stats" aria-live="polite"><span class="live-dot"></span><span id="stats-people">0 pessoas</span><span class="stats-divider">·</span><span id="stats-teams">0 times</span><span class="stats-divider">·</span><span id="stats-tables">0 mesas</span></div>
+      <div class="header-actions">
+        <button class="button button-quiet" id="reset-demo" title="Restaurar a cena inicial"><svg aria-hidden="true"><use href="assets/furniture.svg#icon-return"/></svg><span>Recomeçar</span></button>
+        <button class="button button-light" id="new-workspace"><svg aria-hidden="true"><use href="assets/furniture.svg#icon-plus"/></svg>Novo time</button>
+        <button class="button button-primary" id="recruit-agent"><svg aria-hidden="true"><use href="assets/furniture.svg#icon-team"/></svg>Recrutar pessoa</button>
+      </div>
+    </header>
+
+    <main class="room">
+      <section id="viewport" class="viewport" tabindex="0" aria-label="Sala de trabalho interativa. Arraste para mover, use os botões de zoom e clique nas pessoas.">
+        <div id="world" class="world"></div>
+        <div class="scene-label"><span class="live-dot"></span><span id="scene-summary">montando a sala…</span><span class="scene-label-divider"></span><span>atividade simulada</span></div>
+        <div class="canvas-help"><svg aria-hidden="true"><use href="assets/furniture.svg#icon-hand"/></svg><span>Arraste para explorar <b>·</b> Clique numa pessoa <b>·</b> <kbd>Ctrl</kbd>+scroll para zoom</span></div>
+        <div class="zoom-controls" aria-label="Controles de zoom">
+          <button id="zoom-out" aria-label="Diminuir zoom" title="Diminuir zoom"><svg aria-hidden="true"><use href="assets/furniture.svg#icon-minus"/></svg></button>
+          <output id="zoom-value" aria-live="polite">65%</output>
+          <button id="zoom-in" aria-label="Aumentar zoom" title="Aumentar zoom"><svg aria-hidden="true"><use href="assets/furniture.svg#icon-plus"/></svg></button>
+          <span></span><button id="fit-scene" aria-label="Enquadrar a sala" title="Enquadrar a sala"><svg aria-hidden="true"><use href="assets/furniture.svg#icon-fit"/></svg></button>
+        </div>
+      </section>
+      <aside id="inspector" class="inspector" aria-label="Computador, contexto e expressões da pessoa selecionada" hidden></aside>
+    </main>
+  </div>
+
+  <dialog id="workspace-dialog" class="modal">
+    <form id="workspace-form">
+      <button class="modal-close icon-button" type="button" data-close-dialog aria-label="Fechar"><svg aria-hidden="true"><use href="assets/furniture.svg#icon-close"/></svg></button>
+      <span class="modal-symbol"><svg aria-hidden="true"><use href="assets/furniture.svg#icon-browser"/></svg></span>
+      <span class="eyebrow">UM NOVO COMEÇO</span><h2>Uma mesa para sua ideia.</h2><p class="modal-description">O time nasce com uma mesa de quatro lugares na sala.</p>
+      <label for="workspace-name">Nome do time</label><input id="workspace-name" name="name" required maxlength="28" placeholder="Ex.: Aplicativo mobile" autocomplete="off">
+      <label for="workspace-folder">Workspace <span class="field-optional">apenas um rótulo visual</span></label><input id="workspace-folder" name="path" maxlength="80" placeholder="~/workspaces/meu-projeto" autocomplete="off">
+      <fieldset class="color-field"><legend>Cor da mesa</legend><div class="color-options">
+        <label title="Azul"><input type="radio" name="color" value="blue" checked><span style="--swatch:#2869a6"></span></label>
+        <label title="Verde"><input type="radio" name="color" value="teal"><span style="--swatch:#408a80"></span></label>
+        <label title="Violeta"><input type="radio" name="color" value="violet"><span style="--swatch:#8064ae"></span></label>
+        <label title="Terracota"><input type="radio" name="color" value="coral"><span style="--swatch:#bb7861"></span></label>
+      </div></fieldset>
+      <div class="form-note">Quatro lugares, nenhuma tarefa real. A sala cresce sozinha conforme o time.</div>
+      <div class="modal-actions"><button type="button" class="button button-light" data-close-dialog>Cancelar</button><button class="button button-primary" type="submit">Criar time <svg aria-hidden="true"><use href="assets/furniture.svg#icon-arrow"/></svg></button></div>
+    </form>
+  </dialog>
+
+  <dialog id="recruit-dialog" class="modal">
+    <form id="recruit-form">
+      <button class="modal-close icon-button" type="button" data-close-dialog aria-label="Fechar"><svg aria-hidden="true"><use href="assets/furniture.svg#icon-close"/></svg></button>
+      <span class="eyebrow">MAIS UMA BOA COMPANHIA</span><h2>Quem chega para o time?</h2>
+      <p class="modal-description">Nome e avatar são sorteados. A pessoa entra sem computador, esperando a primeira tarefa.</p>
+      <div class="random-preview">
+        <div class="preview-avatar"><img id="recruit-avatar" alt="Avatar sorteado"></div>
+        <div class="preview-copy"><strong id="recruit-name">—</strong><small>sorteio automático</small></div>
+        <button class="button button-light" type="button" data-action="reroll"><svg aria-hidden="true"><use href="assets/furniture.svg#icon-return"/></svg>Sortear outro</button>
+      </div>
+      <label for="recruit-team">Time</label><select id="recruit-team" name="team"></select>
+      <div class="form-note">Quando os quatro lugares estiverem cheios, uma nova mesa nasce ao lado da mesa principal e as mesas seguintes deslizam para a direita.</div>
+      <div class="modal-actions"><button type="button" class="button button-light" data-close-dialog>Cancelar</button><button class="button button-primary" type="submit">Adicionar à mesa <svg aria-hidden="true"><use href="assets/furniture.svg#icon-plus"/></svg></button></div>
+    </form>
+  </dialog>
+
+  <dialog id="delegate-dialog" class="modal modal-small">
+    <form id="delegate-form">
+      <button class="modal-close icon-button" type="button" data-close-dialog aria-label="Fechar"><svg aria-hidden="true"><use href="assets/furniture.svg#icon-close"/></svg></button>
+      <span class="modal-symbol violet"><svg aria-hidden="true"><use href="assets/furniture.svg#icon-team"/></svg></span>
+      <span class="eyebrow">JUNTOS VAI MAIS LONGE</span><h2 id="delegate-title">Uma equipe para alguém.</h2>
+      <p class="modal-description">A pessoa se levanta, ocupa a mesa de equipe e recebe colegas novos. A cadeira original fica reservada.</p>
+      <label for="subagent-count">Quantos subagentes?</label><input id="subagent-count" name="count" type="number" min="1" max="24" value="3" required>
+      <div class="form-note">A mesa de equipe é empurrada para a direita quando o time cresce. Sempre quatro lugares por mesa.</div>
+      <div class="modal-actions"><button type="button" class="button button-light" data-close-dialog>Cancelar</button><button class="button button-violet" type="submit">Montar equipe <svg aria-hidden="true"><use href="assets/furniture.svg#icon-arrow"/></svg></button></div>
+    </form>
+  </dialog>
+
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+</body>
+</html>

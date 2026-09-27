@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 500" width="900" height="500" role="img" aria-labelledby="title desc">
+  <title id="title">Mesa modular DSH Office — quatro lugares</title>
+  <desc id="desc">Módulo vetorial independente. Para estender a bancada, repetir a geometria com deslocamento horizontal de 900 unidades. Cores personalizáveis por variáveis CSS.</desc>
+  <!-- ORIGINAL SVG. Connection pitch: 900 units. No raster, gradient, filter or external dependency. -->
+  <defs><g id="chair"><path d="M24 190L14 70Q11 9 56 5Q88-2 122 5Q166 8 162 70L153 190Z" fill="#254e77" stroke="#273b50" stroke-width="3"/><path d="M32 166L25 71Q22 20 61 17H114Q153 19 151 70L144 166Z" fill="#2e5a86"/><rect x="22" y="166" width="132" height="23" rx="10" fill="#22446a" stroke="#273b50" stroke-width="2.5"/></g></defs>
+  <use href="#chair" x="26" y="20"/><use href="#chair" x="251" y="20"/><use href="#chair" x="476" y="20"/><use href="#chair" x="701" y="20"/>
+  <g transform="translate(0 210)" stroke-linejoin="round" stroke-width="2.5">
+    <path d="M21 137H879V278H21Z" fill="var(--desk-color, #2869a6)" stroke="var(--desk-stroke, #234b70)"/>
+    <path d="M42 153H858V251H42Z" fill="var(--desk-panel, #25629b)" stroke="var(--desk-stroke, #234b70)"/>
+    <rect x="17" y="138" width="19" height="148" rx="3" fill="var(--desk-color, #2869a6)" stroke="var(--desk-stroke, #234b70)"/>
+    <rect x="864" y="138" width="19" height="148" rx="3" fill="var(--desk-color, #2869a6)" stroke="var(--desk-stroke, #234b70)"/>
+    <path d="M27 10H873L898 118V128Q898 141 885 141H15Q2 141 2 128V118Z" fill="#bf9c77" stroke="#8a735d"/>
+    <path d="M1 1H899V111Q900 125 884 125H16Q0 125 2 111Z" fill="#f0cca5" stroke="#92785e"/>
+    <path d="M30 7H870" fill="none" stroke="#fbe3c9" stroke-width="3"/>
+  </g>
+  <g fill="#fffaf2" font-family="Trebuchet MS, sans-serif"><text x="72" y="416" font-size="36" font-weight="bold">Uma mesa. Muitas ideias.</text><text x="75" y="448" font-size="18">4 lugares · encaixe lateral de 900 unidades</text></g>
+</svg>
