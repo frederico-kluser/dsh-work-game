@@ -3,10 +3,15 @@
   "version": "0.1.0",
   "license": "MIT",
   "type": "module",
+  "main": "./src/index.js",
   "exports": {
+    ".": {
+      "default": "./src/index.js"
+    },
     "./client": {
       "default": "./src/client.js"
-    }
+    },
+    "./package.json": "./package.json"
   },
   "dsh": {
     "client": {
