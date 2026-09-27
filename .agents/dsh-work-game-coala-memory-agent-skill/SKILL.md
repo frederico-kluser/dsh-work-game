@@ -67,7 +67,13 @@ Flags globais em qualquer posição: `--json` (saída estruturada) e `--db <cami
 
 Fontes definidas em `ingest.json` (é teu: o instalador nunca o reescreve):
 
+- `conhecimento` — `docs/conhecimento/*.md` → markdown · semantic · origem `agent` · tags `conhecimento,sessao,{stem}`
 - `readme` — `README.md` → markdown · semantic · origem `agent` · tags `docs,readme`
+- `plano-visual` — `PLANO-VISUAL-DSH-OFFICE.md` → markdown · semantic · origem `agent` · tags `docs,design,planejamento`
+- `prompts-design` — `PROMPTS-DSH-OFFICE.md` → markdown · semantic · origem `agent` · tags `docs,prompts,design`
+- `avataars-sources` — `assets/AVATARS-SOURCES.md` → markdown · semantic · origem `agent` · tags `avataaars,proveniencia,licencas`
+- `avataars-expressions` — `assets/AVATARS-EXPRESSIONS.md` → markdown · semantic · origem `agent` · tags `avataaars,expressoes,assets`
+- `third-party` — `THIRD_PARTY_NOTICES.md` → markdown · semantic · origem `agent` · tags `licencas,terceiros`
 - chaves de supersessão: `proj/<ficheiro>#<segmento>` (estáveis → re-ingestão idempotente)
 
 - `$COALA ingest` é idempotente: conteúdo e metadados iguais = NO-OP · mudou (texto, tipo, origem ou tags) =

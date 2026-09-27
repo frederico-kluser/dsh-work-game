@@ -53,8 +53,12 @@ Use HTTP local em vez de abrir o `index.html` por `file://` — navegadores rest
 ## Estrutura do repositório
 
 - [index.html](index.html), [styles.css](styles.css) e [app.js](app.js) — o app completo, sem build.
+- [package.json](package.json) — conveniência: `npm test` e `npm start`, sem qualquer dependência.
 - [data.js](data.js) — nomes e frases simuladas.
 - [expressions.js](expressions.js) — presets de expressão (enums do Avataaars) e resolução dos assets.
+- [tests/](tests/) — suíte de testes (funcionais em Chrome headless + estáticos/contratos) com helpers sem dependências.
+- [docs/conhecimento/](docs/conhecimento/) — dossiês do projeto: decisões, arquitetura, pipeline de avatares, design, qualidade, publicação e as features futuras especificadas.
+- [AGENTS.md](AGENTS.md) — bloco que liga os agentes à memória CoALA local do projeto.
 - [assets/furniture.svg](assets/furniture.svg) — móveis e ícones SVG reutilizáveis.
 - [assets/desk-module.svg](assets/desk-module.svg) — módulo de mesa independente, com 4 cadeiras.
 - [assets/avatars/](assets/avatars/) — as 8 identidades nomeadas de avatar, em SVG.
