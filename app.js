@@ -150,9 +150,10 @@ const DATA = window.DSH_DEMO_DATA || {
 const state = {
   teams: [], modules: [], people: [], archived: [],
   selected: null, tab: 'context', zoom: 0.5, pan: { x: 0, y: 0 },
-  bubbles: new Map(), feed: [], feedOpen: true
+  bubbles: new Map(), feed: [], feedOpen: true,
+  confirmEliminate: null, cardMetrics: 'full'
 };
-let seq = 20, toastTimer, activityTimer, telemetryTimer, recruitRoll = null, delegateTarget = null, papersTarget = null, questionTarget = null, dragging = null;
+let seq = 20, toastTimer, activityTimer, telemetryTimer, saveChipTimer, recruitRoll = null, delegateTarget = null, papersTarget = null, questionTarget = null, dragging = null;
 let worldSize = { width: 2820, height: 730 };
 
 const uid = (p) => `${p}-${++seq}`;
@@ -228,7 +229,7 @@ function paintLiveValues() {
     const seat = $(`g.seat[role="button"][data-agent="${p.id}"]`);
     if (!seat) continue;
     const role = seat.querySelector('.seat-card-role');
-    if (role) role.textContent = seatRoleLine(p);
+    if (role) role.innerHTML = seatRoleLineHtml(p);
     seat.classList.toggle('context-over', overContextWarn(p));
   }
   const found = findSelected();
@@ -459,6 +460,7 @@ function seed() {
   }
   state.feed.sort((a, b) => b.at - a.at);
   state.selected = null; state.tab = 'context';
+  state.confirmEliminate = null; state.cardMetrics = 'full';
 }
 
 /* ---------- speech bubbles: latest output only, ~1s, animated ---------- */
@@ -568,7 +570,18 @@ function scheduleActivity() {
 /* ---------- rendering ---------- */
 function seatRoleLine(person) {
   if (!person.hasComputer) return `CTX — · ${person.outputs.length ? 'último output' : 'sem output'}`;
-  return `CTX ~${pct(person)}% · ${formatUSD(costOf(person))} · ${Math.round(person.tokenSpeed)} tok/s`;
+  const parts = [`CTX ~${pct(person)}%`];
+  if (state.cardMetrics !== 'velocidade') parts.push(formatUSD(costOf(person)));
+  if (state.cardMetrics !== 'custo') parts.push(`${Math.round(person.tokenSpeed)} tok/s`);
+  return parts.join(' · ');
+}
+/* Same line with colour-coded metrics: separates faster at office density. */
+function seatRoleLineHtml(person) {
+  if (!person.hasComputer) return `<tspan class="metric-ctx">CTX —</tspan> · ${esc(person.outputs.length ? 'último output' : 'sem output')}`;
+  const chunks = [`<tspan class="metric-ctx">CTX ~${pct(person)}%</tspan>`];
+  if (state.cardMetrics !== 'velocidade') chunks.push(`<tspan class="metric-cost">${formatUSD(costOf(person))}</tspan>`);
+  if (state.cardMetrics !== 'custo') chunks.push(`<tspan class="metric-speed">${Math.round(person.tokenSpeed)} tok/s</tspan>`);
+  return chunks.join(' · ');
 }
 function pendingQuestionOf(person) {
   return person.questions.find((q) => q.status === 'pending') || null;
@@ -581,7 +594,7 @@ function questionFlagSvg(person, cx) {
     <circle class="question-flag-dot" cx="${cx - 72}" cy="205" r="17"/>
     <circle class="question-flag-pulse" cx="${cx - 72}" cy="205" r="17"/>
     <text class="question-flag-glyph" x="${cx - 72}" y="212" text-anchor="middle">?</text>
-    <rect x="${cx - 104}" y="173" width="64" height="64" fill="transparent" pointer-events="all"/></g>`;
+    <rect class="hit-area" x="${cx - 104}" y="173" width="64" height="64" fill="transparent" pointer-events="all"/></g>`;
 }
 function contextWarnSvg(person, cx) {
   return `<g class="context-warn-marker" aria-hidden="true"><title>Contexto acima de ${CONTEXT_WARN_K}k</title>
@@ -637,7 +650,7 @@ function renderSeat(mod, person, index) {
     ${paperStackSvg(person, cx)}
     <rect class="seat-card" x="${cx - 99}" y="426" width="198" height="77" rx="9"/>
     <text class="seat-card-name" x="${cx}" y="450" text-anchor="middle">${esc(person.name)}</text>
-    <text class="seat-card-role" x="${cx}" y="469" text-anchor="middle">${esc(seatRoleLine(person))}</text>
+    <text class="seat-card-role" x="${cx}" y="469" text-anchor="middle">${seatRoleLineHtml(person)}</text>
     <circle cx="${cx - 73}" cy="487" r="5.5" fill="${info.color}"/><text class="seat-card-status" x="${cx - 60}" y="492" fill="${info.color}">${esc(info.label)}</text>
     <rect class="selection-line" x="${cx - 33}" y="415" width="66" height="4" rx="2" fill="#3881b4"/>
     ${questionFlagSvg(person, cx)}
@@ -715,6 +728,11 @@ function updateStats() {
   $('#stats-people').textContent = `${state.people.length} pessoas`;
   $('#stats-teams').textContent = `${state.teams.length} times`;
   $('#stats-tables').textContent = `${state.modules.length} mesas`;
+  const metrics = $('#card-metrics');
+  if (metrics) {
+    metrics.textContent = { full: 'Métricas: todas', custo: 'Métricas: contexto + custo', velocidade: 'Métricas: contexto + velocidade' }[state.cardMetrics];
+    metrics.setAttribute('aria-label', `Fichas mostram ${metrics.textContent.replace('Métricas: ', '')}. Clique para alternar.`);
+  }
 }
 function sceneButton(x, y, width, label, action, attributes = '', name = 'plus') {
   return `<g class="scene-action" role="button" tabindex="0" aria-label="${esc(label)}" data-action="${action}" ${attributes} transform="translate(${x} ${y})"><rect width="${width}" height="37" rx="9" fill="#faf8f0" stroke="#d8dbcf"/>${glyph(name, 12, 10, 16, '#85939b')}<text x="36" y="24">${esc(label)}</text></g>`;
@@ -756,8 +774,10 @@ function contextView(person) {
     <div class="context-bar" role="meter" aria-label="Ocupação simulada do contexto" aria-valuemin="0" aria-valuemax="${win}" aria-valuenow="${Math.round(person.context)}">${parts.map((p) => `<span style="width:${(p.value / win) * 100}%;background:${p.color}" title="${p.name}"></span>`).join('')}</div>
     <div class="context-scale"><span>0</span><span>${win}k</span></div>
     <div class="context-legend">${parts.map((p) => `<div class="context-legend-row"><i style="background:${p.color}"></i><span>${p.name}</span><strong>~${formatK(p.value)}</strong></div>`).join('')}</div>
-    <div class="context-map" aria-hidden="true">${cells}</div><div class="token-map-caption">Um mapa visual do espaço ocupado.</div>
-    <div class="context-message">${icon('check')}<span>Ocupação de contexto, não custo nem progresso. Os números desta demo são fictícios.</span></div>
+    <details class="disclosure"><summary>Ver detalhe: mapa do espaço ocupado</summary>
+      <div class="context-map" aria-hidden="true">${cells}</div><div class="token-map-caption">Um mapa visual do espaço ocupado.</div>
+      <div class="context-message">${icon('check')}<span>Ocupação de contexto, não custo nem progresso. Os números desta demo são fictícios.</span></div>
+    </details>
     <div class="inspector-rule"></div>
     <div class="section-heading"><h3>Telemetria em tempo real</h3><span class="estimated-tag">SIMULADO</span></div>
     <div class="telemetry-grid">
@@ -767,7 +787,9 @@ function contextView(person) {
       <div class="telemetry-cell"><small>Último turno</small><strong>${person.finish ? esc(person.finish.label) : '—'}</strong></div>
     </div>
     <p class="simulation-label">Atualizado a cada segundo. ${PRICE_UNIT} · tabela simulada.</p>
-    <div class="cost-table">${usageRows.map((r) => `<div class="cost-row"><span>${r.label}</span><code>${(person.usage[r.key] || 0).toLocaleString('pt-BR')} × US$ ${r.price.toFixed(3)}</code><strong>${formatUSD(((person.usage[r.key] || 0) * r.price) / 1e6)}</strong></div>`).join('')}</div>
+    <details class="disclosure"><summary>Ver detalhe: custo por bucket de tokens</summary>
+      <div class="cost-table">${usageRows.map((r) => `<div class="cost-row"><span>${r.label}</span><code>${(person.usage[r.key] || 0).toLocaleString('pt-BR')} × US$ ${r.price.toFixed(3)}</code><strong>${formatUSD(((person.usage[r.key] || 0) * r.price) / 1e6)}</strong></div>`).join('')}</div>
+    </details>
     <div class="model-row"><label for="model-select">Modelo</label>
       <select id="model-select" aria-label="Modelo da pessoa">${MODEL_IDS.map((id) => `<option value="${id}" ${person.model === id ? 'selected' : ''}>${MODELS[id].label}</option>`).join('')}</select></div>
     <p class="inspector-note">Trocar de modelo recalcula a janela e o preço. Sem preço conhecido, o custo seria "indisponível" — nunca zero.</p>`;
@@ -853,19 +875,25 @@ function renderInspector() {
       ${state.tab === 'context' ? contextView(person) : state.tab === 'computer' ? computerView(person) : state.tab === 'activity' ? activityView(person) : expressionsView(person)}
       <div class="inspector-actions">
         <div class="inspector-rule"></div>
-        <div class="section-heading"><h3>Simulador de eventos DSH</h3><span class="estimated-tag">DEMO</span></div>
-        <p class="simulation-label">A cena obedece ao DSH: o utilizador não move pessoas. Mesa de equipe e retorno acontecem apenas quando chega um evento real de subagente.</p>
-        <div class="simulation-controls">
-          <button data-action="sim-event" data-event="subagent-start">${icon('team')}subagent/start</button>
-          <button data-action="sim-event" data-event="subagent-end">${icon('return')}subagent/end</button>
-          <button data-action="sim-event" data-event="turn-end">${icon('check')}turn/end · completed</button>
-          <button data-action="sim-event" data-event="turn-error">${icon('alert')}turn/end · error</button>
-          <button data-action="sim-event" data-event="turn-abort">${icon('close')}turn/end · aborted</button>
-          <button data-action="sim-event" data-event="question">${icon('hand')}user-questions</button>
-          <button data-action="sim-event" data-event="context-pressure">${icon('context')}contextPressure &gt; 200k</button>
-          <button data-action="sim-event" data-event="tool-call">${icon('code')}tool/call</button>
+        <details class="disclosure" id="sim-disclosure"><summary>Simulador de eventos DSH <span class="estimated-tag">DEMO</span></summary>
+          <p class="simulation-label">A cena obedece ao DSH: o utilizador não move pessoas. Mesa de equipe e retorno acontecem apenas quando chega um evento real de subagente.</p>
+          <div class="simulation-controls">
+            <button data-action="sim-event" data-event="subagent-start">${icon('team')}subagent/start</button>
+            <button data-action="sim-event" data-event="subagent-end">${icon('return')}subagent/end</button>
+            <button data-action="sim-event" data-event="turn-end">${icon('check')}turn/end · completed</button>
+            <button data-action="sim-event" data-event="turn-error">${icon('alert')}turn/end · error</button>
+            <button data-action="sim-event" data-event="turn-abort">${icon('close')}turn/end · aborted</button>
+            <button data-action="sim-event" data-event="question">${icon('hand')}user-questions</button>
+            <button data-action="sim-event" data-event="context-pressure">${icon('context')}contextPressure &gt; 200k</button>
+            <button data-action="sim-event" data-event="tool-call">${icon('code')}tool/call</button>
+          </div>
+        </details>
+        <div class="confirm-row">
+          ${state.confirmEliminate === person.id
+            ? `<button class="button button-danger" data-action="eliminate-confirm" data-agent="${person.id}">${icon('alert')}Confirmar eliminação de ${esc(person.name)}</button>
+               <button class="button button-quiet" data-action="eliminate-cancel">Cancelar</button>`
+            : `<button class="button button-danger button-full" data-action="eliminate-agent" data-agent="${person.id}">${icon('close')}Eliminar pessoa (guarda o histórico)</button>`}
         </div>
-        <button class="button button-danger button-full" data-action="eliminate-agent" data-agent="${person.id}">${icon('close')}Eliminar pessoa (guarda o histórico)</button>
       </div>
       <p class="inspector-note">Só frontend. Custos, tokens e velocidade são estimativas simuladas — sem agentes nem chamadas reais.</p>
     </div>`;
@@ -881,6 +909,8 @@ function render({ fit = false } = {}) {
 /* ---------- camera ---------- */
 function updateTransform() {
   $('#world').style.transform = `translate(${state.pan.x}px, ${state.pan.y}px) scale(${state.zoom})`;
+  /* hit areas grow as the camera zooms out, keeping click targets ≥24px CSS (Fitts) */
+  $('#world').style.setProperty('--hit-scale', String(Math.min(2.8, Math.max(1, 1 / state.zoom))));
   $('#zoom-value').textContent = Math.round(state.zoom * 100) + '%';
   $('#zoom-out').disabled = state.zoom <= 0.16;
   $('#zoom-in').disabled = state.zoom >= 1.5;
@@ -910,6 +940,7 @@ function selectAgent(id) {
   if (!person) return;
   const wasOpen = !$('#inspector').hidden;
   state.selected = id;
+  state.confirmEliminate = null;
   render();
   if (!wasOpen && innerWidth > 800) requestAnimationFrame(fitScene);
 }
@@ -1160,7 +1191,7 @@ function renderPapersDialog() {
   $('#papers-list').innerHTML = person.taskQueue.length
     ? [...person.taskQueue].reverse().map((t) => `
       <li class="paper-row paper-${t.status}" data-paper="${t.id}">
-        <div class="paper-row-head"><span class="paper-chip">${labels[t.status] || t.status}</span><small>criado ${ago(t.createdAt)}</small></div>
+        <div class="paper-row-head"><span class="paper-chip">${labels[t.status] || t.status}</span><span class="paper-saved" hidden>guardado</span><small>criado ${ago(t.createdAt)}</small></div>
         <textarea class="paper-text" data-paper-edit="${t.id}" maxlength="300" ${t.status === 'queued' ? '' : 'readonly'} aria-label="Prompt do papel">${esc(t.text)}</textarea>
         <div class="paper-row-actions">
           ${t.status === 'queued' ? `<button class="button button-violet" data-action="submit-paper" data-paper="${t.id}">${icon('play')}Submeter agora</button>
@@ -1361,8 +1392,30 @@ function handleAction(el) {
       break;
     }
     case 'eliminate-agent': {
+      /* Error prevention: elimination is a two-step action — arm, then confirm. */
       const person = personById(d.agent) || (found && found.person);
+      if (!person) break;
+      if (state.confirmEliminate !== person.id) {
+        state.confirmEliminate = person.id;
+        renderInspector();
+        toast(`Clique em "Confirmar eliminação" para remover ${person.name}.`);
+      }
+      break;
+    }
+    case 'eliminate-confirm': {
+      const person = personById(d.agent) || (found && found.person);
+      state.confirmEliminate = null;
       if (person) eliminatePerson(person);
+      break;
+    }
+    case 'eliminate-cancel': {
+      state.confirmEliminate = null;
+      renderInspector();
+      break;
+    }
+    case 'toggle-card-metrics': {
+      state.cardMetrics = state.cardMetrics === 'full' ? 'custo' : state.cardMetrics === 'custo' ? 'velocidade' : 'full';
+      render();
       break;
     }
   }
@@ -1396,6 +1449,16 @@ document.addEventListener('input', (e) => {
   const person = personById(papersTarget && papersTarget.personId);
   const paper = person && person.taskQueue.find((t) => t.id === edit.dataset.paperEdit);
   if (paper && paper.status === 'queued') paper.text = edit.value;
+  /* feedback: silent save becomes visible with a small 'guardado' chip */
+  const chip = edit.closest('.paper-row')?.querySelector('.paper-saved');
+  if (chip) {
+    clearTimeout(saveChipTimer);
+    chip.hidden = true;
+    saveChipTimer = setTimeout(() => {
+      chip.hidden = false;
+      setTimeout(() => { chip.hidden = true; }, 1600);
+    }, 400);
+  }
 });
 for (const dialog of $$('dialog')) {
   dialog.addEventListener('click', (e) => {

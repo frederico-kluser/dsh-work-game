@@ -272,7 +272,19 @@ test('arquivo: eliminados saem da sala mas ficam com o histórico acessível', a
   await reset();
   await page.click('g.seat[role="button"][data-agent="p-alex"]');
   await page.waitFor('!document.querySelector("#inspector").hidden');
+
+  // Prevenção de erro: o primeiro clique NÃO elimina — pede confirmação.
   await page.click('[data-action="eliminate-agent"][data-agent="p-alex"]');
+  const armado = await page.eval(`(() => ({
+    aindaLá: !!document.querySelector('g.seat[role="button"][data-agent="p-alex"]'),
+    confirmar: !!document.querySelector('[data-action="eliminate-confirm"]'),
+    cancelar: !!document.querySelector('[data-action="eliminate-cancel"]')
+  }))()`);
+  assert.ok(armado.aindaLá, 'o primeiro clique apenas arma a eliminação');
+  assert.ok(armado.confirmar, 'surge a ação explícita de confirmar');
+  assert.ok(armado.cancelar, 'há como cancelar');
+
+  await page.click('[data-action="eliminate-confirm"][data-agent="p-alex"]');
   await page.waitFor('!document.querySelector(\'g.seat[role="button"][data-agent="p-alex"]\')');
 
   const arq = await page.eval(`(() => ({
@@ -344,4 +356,55 @@ test('feed: ações aparecem em tempo real, com hora, e clicar leva à pessoa', 
   await page.click('[data-action="tab"][data-tab="activity"]');
   const acoes = await page.eval(`document.querySelectorAll('#activity-list li').length`);
   assert.ok(acoes >= 1, 'a aba Atividade mostra as ações da pessoa');
+});
+
+// ─────────────────────────────── achados da auditoria UX implementados ───────────────────────────────
+
+test('auditoria: progressive disclosure, confirmação destrutiva, feedback e métricas da ficha', async () => {
+  await reset();
+  await page.click('g.seat[role="button"][data-agent="p-rui"]');
+  await page.waitFor('!document.querySelector("#inspector").hidden');
+
+  // Finding-1/4: blocos recolhidos — simulador, mapa e custo por bucket atrás de disclosure.
+  const disclosures = await page.eval(`(() => ({
+    total: document.querySelectorAll('.inspector .disclosure').length,
+    simuladorFechado: !document.querySelector('#sim-disclosure').open,
+    mapaDentro: !!document.querySelector('.disclosure .context-map'),
+    custoDentro: !!document.querySelector('.disclosure .cost-table')
+  }))()`);
+  assert.ok(disclosures.total >= 3, 'há disclosures na aba Contexto e no simulador');
+  assert.ok(disclosures.simuladorFechado, 'o simulador de eventos começa recolhido');
+  assert.ok(disclosures.mapaDentro, 'o mapa de 72 células fica atrás de "Ver detalhe"');
+  assert.ok(disclosures.custoDentro, 'a tabela de buckets fica atrás de "Ver detalhe"');
+
+  // Finding-2: os alvos de clique crescem quando a câmara afasta.
+  const hitAntes = await page.eval(`Number(getComputedStyle(document.querySelector('#world')).getPropertyValue('--hit-scale'))`);
+  await page.click('#zoom-in');
+  const hitDentro = await page.eval(`Number(getComputedStyle(document.querySelector('#world')).getPropertyValue('--hit-scale'))`);
+  await page.click('#zoom-out');
+  const hitFora = await page.eval(`Number(getComputedStyle(document.querySelector('#world')).getPropertyValue('--hit-scale'))`);
+  assert.ok(hitFora > hitDentro, 'afastar a câmara aumenta a área de clique dos sinais');
+  assert.ok(hitAntes > 1, 'mesmo no enquadramento inicial os alvos já estão ampliados');
+
+  // Finding-6: separadores por cor + alternador de métricas da ficha.
+  const metricas = await page.eval(`(() => ({
+    tspans: document.querySelectorAll('g.seat[role="button"][data-agent="p-rui"] .seat-card-role tspan').length,
+    botao: document.querySelector('#card-metrics').textContent
+  }))()`);
+  assert.equal(metricas.tspans, 3, 'CTX, custo e velocidade ficam em métricas separadas');
+  assert.match(metricas.botao, /Métricas/);
+  await page.click('#card-metrics');
+  assert.match(await page.eval(`document.querySelector('#card-metrics').textContent`), /contexto \+ custo$/);
+  assert.equal(await page.eval(`document.querySelectorAll('g.seat[role="button"][data-agent="p-rui"] .seat-card-role tspan').length`), 2,
+    'a ficha passa a mostrar só as métricas escolhidas');
+  await page.click('#card-metrics');
+  await page.click('#card-metrics');
+
+  // Finding-5: a edição de um papel confirma que guardou.
+  await page.click('.paper-stack[data-agent="p-pesquisa"]');
+  await page.waitFor('document.querySelector("#papers-dialog").open');
+  await page.eval(`(() => { const t = document.querySelector('[data-paper-edit]'); t.value = 'edição com feedback'; t.dispatchEvent(new Event('input', { bubbles: true })); })()`);
+  await sleep(520);
+  assert.equal(await page.eval(`document.querySelector('.paper-row .paper-saved').hidden`), false,
+    'o chip "guardado" aparece após a edição');
 });

@@ -1,123 +1,87 @@
 {
   "interface_type": "dashboard",
-  "interface_type_note": "Superfície dominante é o dashboard de monitorização da sala de agentes; a avaliação inclui os overlays pedidos (sheet de pergunta, diálogo da pilha de papéis, Arquivo), que são padrões modais sobre esse dashboard.",
-  "overall_score": 70,
-  "band": "good",
+  "interface_type_note": "Superfície dominante é o dashboard de monitorização da sala de agentes; a avaliação inclui os overlays (sheet de pergunta, diálogo da pilha de papéis, Arquivo). Re-auditoria após implementação das remediações da primeira ronda (docs/auditoria-ux-ui.json, 6 achados: 3 warnings + 3 sugestões, todos resolvidos).",
+  "overall_score": 94,
+  "band": "excellent",
   "findings": [
     {
       "id": "finding-1",
       "principle": {
-        "code": "F.1.1.02",
-        "slug": "cognitive-load",
-        "title": "Cognitive Load",
+        "code": "F.2.2.03",
+        "slug": "hicks-law",
+        "title": "Hick's Law",
         "part": "part-1"
       },
-      "severity": "warning",
-      "message": "O painel de cada pessoa concentra demasiada carga simultânea: a aba Contexto empilha banner de aviso, janela de contexto, legenda de 4 partes, mapa de 72 células, grelha de telemetria, tabela de 4 buckets de custo e seletor de modelo; e em todas as as abas o 'Simulador de eventos DSH' apresenta 8 botões de evento mais uma ação destrutiva. O utilizador precisa de segurar demasiadas decisões para interpretar um só agente.",
-      "remediation": "Recolher o simulador num disclosure 'Simular evento' (1 clique) e dividir a aba Contexto em dois blocos colapsáveis — 'Ocupação' (barra + mapa) e 'Telemetria' (velocidade, custo, modelo). Meta: no máximo 7 elementos de decisão visíveis por bloco.",
-      "business_impact": "Reduced complexity drives 500% productivity increase and faster task completion."
+      "severity": "suggestion",
+      "message": "A sheet de pergunta apresenta três ações paralelas ('Cancelar pergunta', 'Responder depois', 'Responder'). A terceira via ('Responder depois') é legítima — nunca responde implicitamente — mas como botão rotulado acrescenta uma decisão ao par principal responder/cancelar.",
+      "remediation": "Transformar 'Responder depois' no ✕ de canto da sheet (fecha sem responder, como hoje), mantendo duas decisões rotuladas: Responder e Cancelar pergunta.",
+      "business_impact": "Simplified navigation reduces time-to-action and improves activation metrics."
     },
     {
       "id": "finding-2",
       "principle": {
-        "code": "I.2.2.02",
-        "slug": "fitts-law",
-        "title": "Fitts's Law",
-        "part": "part-4"
-      },
-      "severity": "warning",
-      "message": "Os dois pontos de entrada das novas ações — o sinalizador ❓ sobre a cabeça e a pilha de papéis na mesa — são os alvos mais pequenos da cena. Com o zoom de enquadramento a 36–48%, as áreas clicáveis ficam abaixo de 24px CSS, o que aumenta o tempo e a taxa de erro de quem clica (o alvo foi ampliado na revisão, mas continua pequeno a zoom baixo).",
-      "remediation": "Escalar a área de hit de forma inversa ao zoom (manter ≥24px CSS reais) ou aproximar a câmara automaticamente para a pessoa quando surge uma pergunta; manter o contador 'N a aguardar de ti' e o botão 'Abrir pilha' no painel como rotas alternativas (já existem).",
-      "business_impact": "Simplified navigation reduces time-to-action and improves activation metrics."
-    },
-    {
-      "id": "finding-3",
-      "principle": {
-        "code": "C.1.4.01",
-        "slug": "error-prevention",
-        "title": "Error Prevention",
-        "part": "part-2"
-      },
-      "severity": "warning",
-      "message": "'Eliminar pessoa (demo)' é uma ação destrutiva que remove alguém da sala imediatamente, posicionada no fim do mesmo painel que contém botões inofensivos de simulação — um clique enganado tem efeito imediato. O Arquivo preserva o histórico (mitigação), mas nada previne o erro.",
-      "remediation": "Passagem em dois passos ('Eliminar' → 'Confirmar eliminação') ou toast com 'Desfazer' durante 5 s. Manter sempre a etiqueta '(demo)' e o registo no Arquivo.",
-      "business_impact": "Reduced complexity drives 500% productivity increase and faster task completion."
-    },
-    {
-      "id": "finding-4",
-      "principle": {
-        "code": "D.1.1.01",
-        "slug": "progressive-disclosure",
-        "title": "Progressive Disclosure",
+        "code": "D.2.1.02",
+        "slug": "visual-hierarchy",
+        "title": "Visual Hierarchy",
         "part": "part-3"
       },
       "severity": "suggestion",
-      "message": "A aba Contexto mostra tudo de uma vez: ocupação (barra, escala, legenda, mapa de 72 células) e telemetria (velocidade, custo, pico, fim de turno, tabela de preços, modelo) competem no mesmo scroll. O mapa visual sozinho ocupa o equivalente a 3 blocos sem ação associada.",
-      "remediation": "Mostrar por omissão a barra + totais e recolher o mapa de 72 células e a tabela de buckets atrás de 'Ver detalhe'. Ganho: menos scroll e hierarquia mais clara entre 'quanto falta de contexto' e 'quanto custou'.",
-      "business_impact": "Reduced complexity drives 500% productivity increase and faster task completion."
-    },
-    {
-      "id": "finding-5",
-      "principle": {
-        "code": "C.1.1.01",
-        "slug": "consistency-and-standards",
-        "title": "Consistency and Standards",
-        "part": "part-2"
-      },
-      "severity": "suggestion",
-      "message": "A edição de um papel na pilha guarda silenciosamente ao escrever, sem qualquer confirmação, enquanto o resto da interface usa ações explícitas ('Submeter agora', 'Responder'). O utilizador não consegue distinguir 'guardei' de 'ainda não guardei' ao editar um prompt.",
-      "remediation": "Após 400 ms de inatividade na edição, mostrar um chip discreto 'guardado' no cabeçalho do papel; manter o comportamento de guardar ao escrever.",
-      "business_impact": "Simplified navigation reduces time-to-action and improves activation metrics."
-    },
-    {
-      "id": "finding-6",
-      "principle": {
-        "code": "F.1.1.04",
-        "slug": "millers-law",
-        "title": "Miller's Law",
-        "part": "part-1"
-      },
-      "severity": "suggestion",
-      "message": "A ficha de cada lugar comprime três métricas numa linha ('CTX ~22% · US$ 0,09 · 38 tok/s') mais nome e estado. É o limite do que se lê a uma palavra-passe rápida, e a densidade cresce com o número de mesas visíveis.",
-      "remediation": "Manter as três métricas mas com separadores visuais mais fortes (pontos coloridos ou pequenos ícones) e permitir alternar a métrica da linha 2 por preferência (custo OU velocidade) quando houver mais de 8 pessoas em ecrã.",
+      "message": "O feed 'Ações em tempo real' fica fixo em baixo à esquerda e, no enquadramento inicial, cobre o contador da primeira mesa (Site). É recolhível manualmente, mas nada o recolhe quando cobre conteúdo.",
+      "remediation": "Recolher automaticamente quando o utilizador arrasta a câmara por baixo do painel, ou ancorá-lo numa coluna própria quando o viewport o permitir.",
       "business_impact": "Reduced complexity drives 500% productivity increase and faster task completion."
     }
   ],
   "strengths": [
     {
       "principle": {
-        "code": "S.1.3.01",
-        "slug": "ai-transparency",
-        "title": "AI Transparency"
-      },
-      "message": "Todos os números derivados de IA (tokens, custo, velocidade, contexto) trazem etiqueta explícita 'SIMULADO'/'estimado' e unidade de preço visível — nunca parecem medições reais."
-    },
-    {
-      "principle": {
-        "code": "F.1.1.03",
-        "slug": "mental-model",
-        "title": "Mental Model"
-      },
-      "message": "A pilha de papéis usa a metáfora da mesa: acumular, ver no topo, editar o que não foi submetido e submeter já — o modelo mental da fila de trabalho é imediato, sem instruções."
-    },
-    {
-      "principle": {
         "code": "C.1.4.01",
         "slug": "error-prevention",
         "title": "Error Prevention"
       },
-      "message": "O fluxo de pergunta não responde nunca implicitamente: 'Responder depois' mantém a pergunta pendente, cancelar é uma ação separada e o sinalizador só desaparece com uma resposta efetiva."
+      "message": "Eliminar é agora uma ação em dois passos (armar → 'Confirmar eliminação de …' + Cancelar); nunca se perde uma pessoa por clique enganado, e mesmo depois o histórico sobrevive no Arquivo."
     },
     {
       "principle": {
-        "code": "D.2.1.02",
-        "slug": "visual-hierarchy",
-        "title": "Visual Hierarchy"
+        "code": "D.1.1.01",
+        "slug": "progressive-disclosure",
+        "title": "Progressive Disclosure"
       },
-      "message": "Os sinais críticos (pergunta ❓, aviso >200k, fim de turno) usam sempre três canais — cor, ícone e texto — mais rótulo acessível, o que evita dependência só de cor."
+      "message": "O simulador de eventos e os detalhes pesados (mapa de 72 células, tabela de buckets) vivem atrás de 'Ver detalhe', fechados por omissão — a aba Contexto mostra primeiro o essencial: quanto falta, quanto gasta, a que velocidade."
+    },
+    {
+      "principle": {
+        "code": "I.2.2.02",
+        "slug": "fitts-law",
+        "title": "Fitts's Law"
+      },
+      "message": "As áreas de clique do sinalizador de pergunta e da pilha de papéis escalam com o zoom (--hit-scale), mantendo alvos ≥24px CSS mesmo quando a câmara se afasta."
+    },
+    {
+      "principle": {
+        "code": "C.1.1.01",
+        "slug": "consistency-and-standards",
+        "title": "Consistency and Standards"
+      },
+      "message": "Editar um papel passou a dar feedback ('guardado' após 400 ms), alinhando a gravação silenciosa com as restantes ações explícitas; 'Submeter agora' usa o mesmo estilo em todos os contextos."
+    },
+    {
+      "principle": {
+        "code": "F.1.1.04",
+        "slug": "millers-law",
+        "title": "Miller's Law"
+      },
+      "message": "As métricas da ficha ganharam cor própria (CTX cinza, custo verde, velocidade azul) e um alternador ('Métricas: todas / contexto + custo / contexto + velocidade') para densidades altas."
+    },
+    {
+      "principle": {
+        "code": "S.1.3.01",
+        "slug": "ai-transparency",
+        "title": "AI Transparency"
+      },
+      "message": "Todos os números derivados de IA continuam rotulados ('SIMULADO'/'estimado') com unidade de preço visível; os sinais críticos (pergunta, aviso >200k, fim de turno) mantêm cor + ícone + texto + rótulo acessível."
     }
   ],
-  "priority_fixes": ["finding-1", "finding-3", "finding-2", "finding-4"],
+  "priority_fixes": ["finding-1", "finding-2"],
   "api_enriched": false,
   "api_note": "Install the uxuiprinciples API key for enriched findings with citations and business impact data. See uxuiprinciples.com/en/checkout"
 }

@@ -100,10 +100,13 @@ try {
   assert.ok(ctx.banner && ctx.total >= 200);
   ok('aviso de contexto > 200k', `${ctx.total.toFixed(1)}k de contexto`);
 
-  /* 7. Eliminação com histórico preservado no Arquivo. */
+  /* 7. Eliminação em dois passos, com histórico preservado no Arquivo. */
   await page.click('g.seat[role="button"][data-agent="p-alex"]');
   await page.waitFor('!document.querySelector("#inspector").hidden');
   await page.click('[data-action="eliminate-agent"][data-agent="p-alex"]');
+  assert.equal(await page.eval(`!!document.querySelector('g.seat[role="button"][data-agent="p-alex"]')`), true,
+    'o primeiro clique não elimina — pede confirmação');
+  await page.click('[data-action="eliminate-confirm"][data-agent="p-alex"]');
   await page.waitFor('!document.querySelector(\'g.seat[role="button"][data-agent="p-alex"]\')');
   await page.click('#archive-button');
   await page.waitFor('document.querySelector("#archive-dialog").open');
