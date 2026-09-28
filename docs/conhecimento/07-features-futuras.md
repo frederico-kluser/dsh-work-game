@@ -1,9 +1,12 @@
 # Features futuras — especificação pronta para implementação
 
-> **Estado: PLANEADO.** Nada disto está implementado hoje. A demo atual é simulada em memória;
-> cada feature abaixo declara o **sinal real de origem** no DeepSeek Harness (DSH) que a vai alimentar
-> quando fizermos a integração. Este documento existe para que, no dia em que construirmos, as decisões
-> já estejam tomadas e as armadilhas já estejam registadas.
+> **Estado: IMPLEMENTADO NA DEMO (simulado) — 2026-09-28.** As features 1, 2, 4 e 5 (e as novas
+> pedidas depois: histórico de eliminados, ações em tempo real, velocidade de tokens e pilha de
+> papéis) existem hoje na demo, **100% simuladas em memória**, com a mesma forma de dados dos
+> sinais reais para a migração ser direta. O que continua por fazer é **ligar cada apresentação ao
+> sinal real do DSH** — até lá, todos os números trazem etiqueta "SIMULADO". A feature 3 (emojis)
+> continua planeada. Este documento continua a registar os sinais de origem verificados e as
+> armadilhas, que valem para a integração real.
 >
 > Origem do pedido: utilizador, 2026-09-27. **Factos DSH verificados no checkout local nessa data**
 > (`deepseek-harness`, versão declarada `0.1.6-alpha.2`), com arquivo:linha; os documentos de análise
@@ -174,15 +177,19 @@ custo(sessão) = ΔuncachedInput × preço.input
 5. **Acessibilidade:** emojis com `aria-label`; perguntas navegáveis por teclado; som sempre opcional.
 6. **Waterfall ≠ log:** perguntas e `approval/request` vivem em runtime; a UI tem de capturá-los ao vivo (e decidir o que persistir) porque a sessão não os reproduz.
 
-## Matriz de implementação (quando chegarmos aí)
+## Matriz de implementação
 
 | Feature | Dados novos | UI nova | Dependência crítica | Estado |
 |---|---|---|---|---|
-| Perguntas | fila de questões + estados (persistida no plugin) | balão persistente, aba Pergunta, contador | handler de `user-questions/request` (waterfall); filhos não perguntam | planeado |
-| Fim de turno | `reason.kind` por turno | estados ✅/⏹️/🚫/⚠️, animação, badge | distinguir `turn/end` de fim de streaming | planeado |
+| Perguntas | fila de questões + estados (persistida no plugin) | sinalizador ❓ na pessoa, sheet inferior com opções+input, boneco+nome embaixo, sombreado, contador "N a aguardar de ti" | handler de `user-questions/request` (waterfall); filhos não perguntam | **demo simulada** · falta ligar ao waterfall |
+| Fim de turno | `reason.kind` por turno | fita "Concluído · resultado pronto" + variantes (aborted/error/blocked/max-tokens), registo na aba Atividade | distinguir `turn/end` de fim de streaming | **demo simulada** · falta consumir `turn/end` |
 | Emojis | tabela estado→emoji | glifo por pessoa + tooltip | tabela de precedência | planeado |
-| Modelo/capacidade | `{provider, model, contextWindow, effort}` | chip de modelo, CTX por janela | `request/header` + `request/context` | planeado |
-| Custo | snapshots + tabela de preços | chips de custo | tabela versionada + filtro `seq >= inheritedEventCount` | planeado |
+| Modelo/capacidade | `{provider, model, contextWindow, effort}` | janela por modelo (128k/200k/256k), troca de modelo recalcula CTX e preço, aviso **>200k** | `request/header` + `request/context` | **demo simulada** · falta consumir `request/*` |
+| Custo | snapshots + tabela de preços | chips `US$` na ficha, 4 buckets por pessoa, total por mesa | tabela versionada + filtro `seq >= inheritedEventCount` | **demo simulada** · falta `tokenUsage` + preços reais |
+| Velocidade de tokens | derivada dos deltas de `tokenUsage` | `tok/s` na ficha e no painel, atualizado por segundo | snapshots periódicos | **demo simulada** · falta `tokenUsage` |
+| Ações em tempo real | log por pessoa + feed global | painel "Ações em tempo real" (clique leva à pessoa), aba Atividade | agregador observacional no host | **demo simulada** · falta o agregador |
+| Histórico de eliminados | snapshot completo no fim (`agent/disposed`, `subagent/end`) | **Arquivo** no cabeçalho: gastos, tokens, pico de contexto, ações e papéis preservados | persistência no plugin (a sessão não reproduz) | **demo simulada** · falta persistir |
+| Pilha de papéis | fila de prompts por pessoa (`agent/inbox/inserted`) | papel na mesa acumulando, pilha clicável, edição enquanto não submetido, **Submeter agora** | contrato de sessão (fila por padrão; submissão é ação diferenciada) | **demo simulada** · falta o inbox real |
 
 ## Fontes verificadas (2026-09-27)
 

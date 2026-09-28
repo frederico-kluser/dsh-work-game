@@ -34,6 +34,13 @@ Lógica real — e uma eventual integração com agentes de verdade — é traba
 - **Crescer o escritório** — cada mesa tem exatamente 4 lugares. Quando todos os lugares do time estão ocupados e você adiciona mais uma pessoa, nasce uma nova mesa ao lado da mesa principal do time e as mesas seguintes (inclusive a de equipe) são empurradas para a direita, abrindo mais 4 lugares.
 - **Ler os balões de output** — a última saída de cada pessoa aparece como balão acima da cabeça: somente a mais nova substitui a anterior, ela fica 1 segundo e some com animação de entrada e saída.
 - **Abrir o painel de uma pessoa** — clique nela para ver o visualizador de contexto (janela de tokens simulada, com composição e mapa) e a aba **Computador** (tarefa simulada, atividade e controles de estado visual).
+- **Ver quanto cada agente gasta** — cada ficha traz `CTX ~22% · US$ 0,09 · 38 tok/s`; o painel detalha os 4 buckets de tokens (`entrada`, `saída`, `cache de leitura`, `cache de escrita`), o gasto acumulado, a velocidade de tokens, o pico de contexto e o modelo (a troca de modelo recalcula a janela e o preço). Cada mesa também mostra o gasto total dos seus lugares.
+- **Acompanhar o contexto com aviso de 200k** — quando alguém passa de **200k de contexto**, a ficha ganha um marcador ⚠, o rótulo acessível avisa e o painel mostra o banner "compactação recomendada".
+- **Responder perguntas** — quem pergunta recebe um **sinalizador ❓ sobre a cabeça**; ao clicar, a pergunta abre **embaixo da tela** com as opções, um campo de resposta livre, **o boneco e o nome de quem perguntou embaixo**, e um **sombreado sobre o resto da tela**. "Responder depois" não responde; cancelar é uma ação explícita.
+- **Ver quem terminou** — o fim de turno aparece com uma **fita verde "Concluído · resultado pronto"** na ficha (e variantes para interrompido, erro, bloqueado e máx. tokens), além de ficar registado na aba **Atividade**. Uma tarefa nova aposenta o sinal.
+- **Montar a pilha de papéis** — mais uma tarefa entra na fila como um **papel na mesa**, acumulando em cima. Clicar na pilha abre os prompts: **editáveis enquanto não forem submetidos**, com **Submeter agora** por papel e mais um campo para empilhar outro.
+- **Consultar o Arquivo** — quem é eliminado sai da sala mas fica no **Arquivo** do cabeçalho, com gastos, tokens, pico de contexto, ações e papéis preservados (incluindo subagentes recolhidos no fim de uma delegação).
+- **Ver as ações em tempo real** — o painel **Ações em tempo real** mostra cada evento assim que acontece (com hora e quem fez); clicar numa ação abre a pessoa. A aba **Atividade** traz o mesmo histórico por pessoa.
 - **Testar expressões ao vivo** — o painel permite trocar a expressão e conferir cada preset no rosto da pessoa.
 - **Montar uma equipe** — o diálogo **Montar equipe** pergunta quantos subagentes você quer. O coordenador sai da cadeira original (que fica reservada, sem duplicar o avatar) e vai para a mesa de equipe encostada, onde os subagentes ocupam os outros lugares. Ao retornar, a mesa de equipe recolhe e os resultados ficam registrados na demo.
 - **Recomeçar demo** — o botão do cabeçalho restaura o exemplo inicial.
@@ -42,7 +49,7 @@ O painel de contexto — números fictícios, sempre rotulados como simulados:
 
 ![Painel lateral de uma pessoa com o visualizador de contexto simulado](demo-contexto.png)
 
-O cabeçalho global traz a marca e as ações **Novo time**, **Recrutar pessoa** e **Recomeçar demo**. Não há sidebar lateral nem cabeçalho por sala.
+O cabeçalho global traz a marca e as ações **Novo time**, **Recrutar pessoa**, **Recomeçar demo**, o contador **N a aguardar de ti** (perguntas pendentes) e o **Arquivo** dos eliminados. Não há sidebar lateral nem cabeçalho por sala.
 
 ## Como rodar
 
@@ -63,6 +70,7 @@ Use HTTP local em vez de abrir o `index.html` por `file://` — navegadores rest
 - [data.js](data.js) — nomes e frases simuladas.
 - [expressions.js](expressions.js) — presets de expressão (enums do Avataaars) e resolução dos assets.
 - [tests/](tests/) — suíte de testes (funcionais em Chrome headless + estáticos/contratos) com helpers sem dependências.
+- [scripts/demo-session.mjs](scripts/demo-session.mjs) — sessão simulada de ponta a ponta (tarefas, pergunta, pilha de papéis, fim de turno, aviso de 200k e Arquivo) com capturas de evidência: `node scripts/demo-session.mjs`.
 - [docs/conhecimento/](docs/conhecimento/) — dossiês do projeto: decisões, arquitetura, pipeline de avatares, design, qualidade, publicação e as features futuras especificadas.
 - [AGENTS.md](AGENTS.md) — bloco que liga os agentes à memória CoALA local do projeto.
 - [assets/furniture.svg](assets/furniture.svg) — móveis e ícones SVG reutilizáveis.
@@ -91,8 +99,9 @@ O painel lateral traz um teste de expressões ao vivo: escolha um preset e veja 
 
 - Tudo é simulado em memória: nomes, avatares, tarefas, ocupação de contexto e resultados de delegação. Um pequeno motor de atividade emite linhas de output (arquivos, ferramentas, testes, resultados) para dar vida à cena.
 - Os números do visualizador de contexto são **fictícios e rotulados como simulados** no próprio painel; não representam consumo real de tokens.
+- **Gasto, velocidade de tokens, custo por mesa e custo por bucket são estimativas simuladas** (tabela de preços própria, rotulada no painel). Os buckets seguem o vocabulário real do DSH (`input` não-cacheado, `output`, `cacheRead`, `cacheWrite`) para a migração futura ser direta — mas nada é cobrado.
 - Nome e avatar são totalmente aleatórios: não há conceito de cargo ou função.
-- Nada é persistido — recarregar a página ou clicar em **Recomeçar demo** restaura o exemplo.
+- Nada é persistido — recarregar a página ou clicar em **Recomeçar demo** restaura o exemplo (inclusive o Arquivo e o feed).
 - Todos os assets são locais: nenhuma chamada externa em runtime.
 
 ## Testes
@@ -104,6 +113,7 @@ node --test 'tests/**/*.test.mjs'   # ou: npm test
 ```
 
 - **`tests/functional.test.mjs`** — 18 testes funcionais contra a página real: arranque e cena-semente; ausência de sidebar/cabeçalho de sala; fichas sem cargo; seleção e inspetor; contexto simulado (`~`, `CTX —`, mapa); computador e primeira tarefa; os 6 estados com rótulo/ícone/marcador; os 14 presets de expressão com troca real do rosto; recrutamento aleatório com "Sortear outro"; crescimento de mesa com empurrão da mesa de equipe; criação de time; delegação com cadeira reservada e sem avatar duplicado; retorno com resultados preservados; balões (substituição e expiração ~1s); câmera (zoom, enquadrar, arraste, teclado, sem scroll nativo); recomeçar demo; mobile 390×844; e offline (zero requisições externas e zero erros de consola).
+- **`tests/features.test.mjs`** — 7 testes das features de telemetria e pipeline: gasto/velocidade por agente e acumulação real do contador; aviso de contexto acima de 200k (cena + painel + rótulo acessível); pergunta (sinalizador → sheet com opções, input, quem perguntou embaixo e sombreado; responder/cancelar/responder depois); fim de turno (fita de conclusão, razões de `turn/end`, aposentadoria do sinal); pilha de papéis (fila editável, submeter agora, remover); Arquivo de eliminados (histórico preservado, inclusive subagentes recolhidos); e feed de ações em tempo real.
 - **`tests/static-assets.test.mjs`** e **`tests/contracts.test.mjs`** — validação dos 160 SVGs (XML, viewBox, sem scripts/recursos externos), contratos de `data.js` e `expressions.js` (incluindo os enums reais do Avataaars e a cadeia de fallback), estrutura do `index.html` e links do README.
 - **`tests/helpers/`** — servidor HTTP estático e driver CDP, ambos apenas com stdlib do Node.
 
@@ -124,4 +134,4 @@ Para correr os testes funcionais é preciso um Chrome/Chromium no sistema (`CHRO
 
 ## English summary
 
-**dsh-work-game** is a pure front-end prototype (HTML, CSS, JavaScript and SVG — no dependencies, no build step) that renders a 2D "agent office": one single room where teams sit at modular 4-seat desks arranged in a 3-column grid with infinite rows. People are created with fully random names and Avataaars busts; a small simulated activity engine emits output lines shown as speech bubbles that are replaced only by the newest one and fade after a second; faces change with each person's state using the real Avataaars enums (`eyeType`, `eyebrowType`, `mouthType`) with local SVG variants per identity; clicking a person opens a side panel with a simulated token-context viewer (composition and map, numbers labelled as simulated) and a computer tab; a coordinator can delegate to an attached team desk and return. Everything is in-memory and simulated: this is a demonstration front-end, not a DeepSeek Harness plugin, with no backend and no real agent execution — real logic and any future integration are future work. Run `python3 -m http.server 4173 --bind 127.0.0.1` and open http://127.0.0.1:4173. Code is MIT-licensed; avatars come from the MIT-licensed Avataaars library by Pablo Stanley and Fang-Pen Lin.
+**dsh-work-game** is a pure front-end prototype (HTML, CSS, JavaScript and SVG — no dependencies, no build step) that renders a 2D "agent office": one single room where teams sit at modular 4-seat desks arranged in a 3-column grid with infinite rows. People are created with fully random names and Avataaars busts; a small simulated activity engine emits output lines shown as speech bubbles that are replaced only by the newest one and fade after a second; faces change with each person's state using the real Avataaars enums (`eyeType`, `eyebrowType`, `mouthType`) with local SVG variants per identity; clicking a person opens a side panel with a simulated token-context viewer (composition and map, numbers labelled as simulated), a computer tab and a live activity tab. Each person carries simulated telemetry — spend (four token buckets priced by model), token speed and context window with a >200k warning — shown on the seat card, the inspector and the desk total; a live action feed streams every event; an agent that asks a question gets a clickable ❓ flag that opens a bottom sheet with options, a free-text input, the asker's avatar and name below, and a shade over the rest of the screen; turn endings are explicit ribbons ("Concluído · resultado pronto" and variants for aborted/error/blocked/max-tokens); queued tasks stack up as paper piles on the desk, editable until "Submeter agora"; and eliminated agents keep their full history in the Arquivo. A coordinator can delegate to an attached team desk and return. Everything is in-memory and simulated: this is a demonstration front-end, not a DeepSeek Harness plugin, with no backend and no real agent execution — real logic and any future integration are future work. Run `python3 -m http.server 4173 --bind 127.0.0.1` and open http://127.0.0.1:4173. Code is MIT-licensed; avatars come from the MIT-licensed Avataaars library by Pablo Stanley and Fang-Pen Lin.
