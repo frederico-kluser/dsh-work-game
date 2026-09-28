@@ -162,3 +162,18 @@ eventos para o mesmo cenário (guarda contra drift).
 Futuro (lado host, `adapter.js`): eventos de fio em tempo real (turn/end, tool/*,
 user-questions, approval/*) via `SessionReference` + `eventSource` (modelo
 `retain(target, {source})`, como `ui-workspace` faz com `source: 'mainView'`).
+
+### Armadilhas do runtime verificadas ao vivo (macmini, 2026-09-28)
+
+1. **`ctx.sessions` só existe se declarado em `exports.inject`.** O client-runner
+   injecta apenas os serviços pedidos (catálogo: `layout`, `locale`, `sessions`,
+   `slots`) — sem `'sessions'` na lista, `extrairSuperficie` devolve `null` e o
+   painel mostra "à espera do host" mesmo com o DSH cheio de sessões.
+2. **Subscrever antes de iniciar.** A explosão inicial de eventos (catálogo +
+   projeções) acontece dentro de `iniciar()`; se os ouvintes da UI só forem
+   registados depois, essa explosão perde-se e a sala fica presa no estado vazio
+   até ao próximo evento. O efeito do painel subscreve primeiro e `iniciar()`
+   termina com `notificar()`.
+
+Validação: `node scripts/verify-dsh-panel.mjs <url-de-um-dsh-web>` — ativação,
+abertura do painel, canal real, pessoas do catálogo e chips de telemetria.
