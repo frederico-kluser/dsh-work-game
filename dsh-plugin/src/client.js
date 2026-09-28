@@ -1241,6 +1241,15 @@ window.__ModuleLoader__.load({
         const snap = ler();
         if (!snap) return;
         const linhas = linhasDoSnapshot(snap);
+        /* Diagnóstico para leitura headless (mesmo padrão de __wgDiag). */
+        try {
+          window.__wgSnap = JSON.stringify({
+            n: linhas.length,
+            fase: snap.phase ?? null,
+            byId: snap.byId ? Object.keys(snap.byId).length : 0,
+            sub: snap.subagentsByParent ? Object.keys(snap.subagentsByParent).length : 0,
+          });
+        } catch { /* sem window */ }
         const atuais = new Map(linhas.map((l) => [l.id, l]));
 
         for (const [id, antes] of [...anterior]) {

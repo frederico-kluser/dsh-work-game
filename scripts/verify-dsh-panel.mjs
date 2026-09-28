@@ -42,23 +42,39 @@ try {
   ok('bundle do plugin ativado no DSH', diag.slice(0, 120));
 
   // Botão "Modo jogo" (slot sidebar.footer.action) → abre o painel do escritório.
-  await page.click('button[aria-label="Modo jogo"]');
-  await page.waitFor('!!document.querySelector(".wg-painel")', 15000);
-  await sleep(400);
-  await page.screenshot(join(OUT, '01-painel.png'));
+  await page.eval(`(() => { const b = document.querySelector('button[aria-label="Modo jogo"]'); if (!b) throw new Error('botão Modo jogo ausente'); b.click(); return true; })()`);
+  await sleep(700);
+  const diagApos = await page.eval('window.__wgDiag');
+  assert.ok(/abrir:chamado/.test(diagApos), `clique em "Modo jogo" não chegou ao handler: ${diagApos}`);
+  ok('botão "Modo jogo" abriu o painel', diagApos.split('|').slice(-1)[0]);
 
-  const painel = await page.eval(`(() => {
-    const t = (s) => { const el = document.querySelector(s); return el ? el.textContent.trim() : null; };
-    return {
-      banner: t('.wg-banner'),
-      conta: t('.wg-conta'),
-      pessoas: document.querySelectorAll('[data-session-id]').length,
-      diag: window.__wgDiag,
-    };
-  })()`);
+  await page.waitFor('!!document.querySelector(".wg-painel")', 15000);
+
+  // O catálogo do host carrega de forma assíncrona: dar-lhe tempo e observar.
+  let painel = null;
+  for (let tentativa = 0; tentativa < 15; tentativa += 1) {
+    await sleep(1000);
+    painel = await page.eval(`(() => {
+      const t = (s) => { const el = document.querySelector(s); return el ? el.textContent.trim() : null; };
+      const p = document.querySelector('.wg-painel');
+      return {
+        banner: t('.wg-banner'),
+        conta: t('.wg-conta'),
+        pessoas: document.querySelectorAll('[data-session-id]').length,
+        snap: window.__wgSnap ?? null,
+        visivel: !!p && p.offsetParent !== null,
+      };
+    })()`);
+    if (painel.pessoas > 0) break;
+  }
+  await page.screenshot(join(OUT, '01-painel.png'));
+  console.log(`   · diagnóstico: pessoas=${painel.pessoas} visível=${painel.visivel} snap=${painel.snap} banner="${painel.banner ?? ''}"`);
 
   assert.ok(!/à espera do host/.test(painel.banner ?? ''), `o painel continua sem canal: ${painel.banner}`);
   ok('painel ligado ao canal real do DSH', painel.banner ? `estado honesto: "${painel.banner}"` : `${painel.pessoas} pessoas na sala`);
+  const snap = painel.snap ? JSON.parse(painel.snap) : null;
+  assert.ok(!(snap && snap.n > 0 && painel.pessoas === 0),
+    `o catálogo tem ${snap.n} linha(s) mas a sala mostra 0 pessoas — falha de renderização`);
 
   // Telemetria ao vivo: clicar numa pessoa e ler os chips do rodapé.
   if (painel.pessoas > 0) {
