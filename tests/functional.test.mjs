@@ -305,11 +305,8 @@ test('delegação: cadeira reservada, sem avatar duplicado, mesa de equipe preen
   await reset();
   const antes = await page.eval(scene);
   await page.click('g.seat[role="button"][data-agent="p-rui"]');
-  await page.click('[data-action="delegate-agent"]');
-  await page.waitFor('document.querySelector("#delegate-dialog").open');
-  await page.type('#subagent-count', '2');
-  await page.click('#delegate-form button[type="submit"]');
-  await page.waitFor('state.people.filter((p) => p.away).length === 4');
+  await page.click('[data-action="sim-event"][data-event="subagent-start"]');
+  await page.waitFor('state.people.filter((p) => p.away).length === 5');
 
   const r = await page.eval(`(() => {
     const ids = [...document.querySelectorAll('[data-character-id]')].map((e) => e.dataset.characterId);
@@ -337,7 +334,7 @@ test('delegação: cadeira reservada, sem avatar duplicado, mesa de equipe preen
 test('retorno: equipe recolhida, coordenadores voltam e resultados preservados', async () => {
   // Continuação do teste anterior: Rui e Lia estão em delegação.
   const antes = await page.eval(`state.teams.find((t) => t.id === 'site').completed`);
-  await page.click('g.desk-module[data-team="site"] g[data-action="return"]');
+  await page.click('[data-action="sim-event"][data-event="subagent-end"]');
   await page.waitFor('!document.querySelector("g.desk-module[data-team=\'site\']") || [...document.querySelectorAll("g.desk-module")].filter((m) => m.dataset.team === "site").length === 1');
 
   const r = await page.eval(`(() => {

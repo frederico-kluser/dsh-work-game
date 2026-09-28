@@ -351,7 +351,7 @@ function renderSeat(mod, person, index) {
       <text class="seat-card-name" x="${cx}" y="450" text-anchor="middle">${esc(label)}</text><text class="seat-card-role" x="${cx}" y="469" text-anchor="middle">Lugar reservado</text><text class="seat-card-status" x="${cx}" y="492" text-anchor="middle" fill="#919ea4">Em delegação ↗</text></g>`;
   }
   if (!person) {
-    return `<g class="seat slot-free" role="button" tabindex="0" aria-label="Recrutar pessoa no lugar ${index + 1} desta mesa" data-action="recruit-slot" data-workspace="${mod.teamId}" data-slot="${index}" data-module="${mod.id}">
+    return `<g class="seat slot-free" role="button" tabindex="0" aria-label="Abrir nova sessão no lugar ${index + 1} desta mesa" data-action="recruit-slot" data-workspace="${mod.teamId}" data-slot="${index}" data-module="${mod.id}">
       ${hit}<circle class="empty-seat-plus" cx="${cx}" cy="307" r="24"/><text class="empty-seat-plus-sign" x="${cx}" y="318" text-anchor="middle">+</text>
       <rect class="seat-card" x="${cx - 99}" y="426" width="198" height="77" rx="9"/><text class="seat-card-name" x="${cx}" y="451" text-anchor="middle" style="font-size:18px;fill:#8b958e">Lugar livre</text><text class="seat-card-role" x="${cx}" y="473" text-anchor="middle">Clique para recrutar</text></g>`;
   }
@@ -378,8 +378,8 @@ function renderModule(mod, index) {
   const attributes = `data-workspace="${mod.teamId}" data-module-id="${mod.id}"`;
   const isLeadTable = mod.kind === 'delegation' && teamModules(mod.teamId).filter((m) => m.kind === 'delegation')[0] === mod;
   const controls = isLeadTable
-    ? sceneButton(548, 111, 149, 'Subagentes', 'more-children', attributes, 'plus') + sceneButton(710, 111, 151, 'Voltar à mesa', 'return', attributes, 'return')
-    : sceneButton(721, 111, 140, 'Recrutar', 'recruit-slot', attributes, 'plus');
+    ? sceneButton(721, 111, 140, 'Nova sessão', 'recruit-slot', attributes, 'plus')
+    : sceneButton(721, 111, 140, 'Nova sessão', 'recruit-slot', attributes, 'plus');
   const leadInfo = leadName(mod);
   const title = mod.kind === 'delegation'
     ? (leadInfo.coordination ? `Equipe de ${esc(leadInfo.name)}` : `Apoio de ${esc(leadInfo.name)}`)
@@ -471,7 +471,7 @@ function computerView(person) {
   const logs = person.outputs.slice(-6).reverse();
   return `<div class="section-heading"><h3>${person.hasComputer ? 'O que está acontecendo' : 'A primeira tarefa começa aqui.'}</h3><span class="estimated-tag">DEMO</span></div>
     <textarea id="demo-task" class="task-textarea" maxlength="300" placeholder="Ex.: criar a tela inicial do projeto…" aria-label="Tarefa de demonstração">${esc(person.task)}</textarea>
-    <button class="button button-primary button-full" data-action="simulate-task">${icon('play')}Simular tarefa</button>
+    <button class="button button-primary button-full" data-action="simulate-task">${icon('play')}Enviar tarefa</button>
     <p class="simulation-label">Nada é enviado. Apenas muda a cena e o balão de output.</p>
     <div class="inspector-rule"></div>
     <div class="section-heading"><h3>Outputs recentes</h3><span class="estimated-tag">${person.outputs.length} itens</span></div>
@@ -513,10 +513,15 @@ function renderInspector() {
     <div class="inspector-content" role="tabpanel">
       ${state.tab === 'context' ? contextView(person) : state.tab === 'computer' ? computerView(person) : expressionsView(person)}
       <div class="inspector-actions">
-        ${!person.away ? `<button class="button button-violet button-full" data-action="delegate-agent" data-agent="${person.id}">${icon('team')}Montar uma equipe</button>` : ''}
-        ${mod.kind === 'delegation' ? `<button class="button button-light button-full" data-action="add-module" data-workspace="${team.id}">${icon('plus')}Encaixar mais uma mesa</button>
-        <button class="button button-light button-full" data-action="return" data-workspace="${team.id}">${icon('return')}Recolher equipe e voltar</button>` : ''}
-        ${person.hasComputer ? `<button class="button button-light button-full" data-action="set-status" data-status="done">${icon('check')}Simular conclusão</button>` : ''}
+        <div class="inspector-rule"></div>
+        <div class="section-heading"><h3>Simulador de eventos DSH</h3><span class="estimated-tag">DEMO</span></div>
+        <p class="simulation-label">A cena obedece ao DSH: o utilizador não move pessoas. Mesa de equipe e retorno acontecem apenas quando chega um evento real de subagente.</p>
+        <div class="simulation-controls">
+          <button data-action="sim-event" data-event="subagent-start">${icon('team')}subagent/start</button>
+          <button data-action="sim-event" data-event="subagent-end">${icon('return')}subagent/end</button>
+          <button data-action="sim-event" data-event="turn-end">${icon('check')}turn/end</button>
+          <button data-action="sim-event" data-event="question">${icon('hand')}pergunta</button>
+        </div>
       </div>
       <p class="inspector-note">Só frontend. Sem agentes, ferramentas ou custos reais.</p>
     </div>`;
@@ -697,6 +702,27 @@ function handleAction(el) {
     case 'set-expression': {
       if (!found) break;
       setExpression(found.person, d.expression || null);
+      break;
+    }
+    case 'sim-event': {
+      // FIDELIDADE AO DSH: o utilizador não move pessoas — só injeta o MESMO
+      // evento que o harness emite. Mesa de equipe e retorno nascem daqui.
+      const atual = findSelected();
+      if (!atual) break;
+      const p = atual.person;
+      if (d.event === 'subagent-start' && !p.away) {
+        delegate(p.id, 3);
+      } else if (d.event === 'subagent-end') {
+        returnTeam(p.teamId);
+      } else if (d.event === 'turn-end') {
+        p.status = 'done';
+        emitOutput(p, 'turn/end · completed', 'result');
+        render();
+      } else if (d.event === 'question') {
+        p.status = 'waiting';
+        emitOutput(p, 'pergunta: qual é o próximo passo?', 'message');
+        render();
+      }
       break;
     }
     case 'simulate-task': {

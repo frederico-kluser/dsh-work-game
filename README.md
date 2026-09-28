@@ -20,6 +20,12 @@ Para não criar expectativas erradas:
 
 Lógica real — e uma eventual integração com agentes de verdade — é trabalho futuro, sem prazo prometido (ver [Roadmap](#roadmap)).
 
+### Fidelidade ao DSH — a UI adapta-se ao harness, nunca o contrário
+
+- **Nova sessão** e **Enviar tarefa** existem porque o DSH suporta essas ações de verdade.
+- **Ninguém é movido à mão.** Uma pessoa só vai para a mesa de equipe quando a sessão **realmente chama subagentes** (`subagent/start`), e volta quando a delegação termina (`subagent/end`).
+- Estados, expressões, balões, contexto e custo derivam sempre de eventos reais. O **Simulador de eventos DSH** existe só na demo offline e injeta exatamente os eventos que o harness emite — para você ver a cena responder sem inventar interações impossíveis.
+
 ## Como experimentar
 
 - **Enquadrar a sala** — arraste o fundo para dar *pan*; use `+`, `−`, **Enquadrar**, `Ctrl` + scroll e as setas do teclado para o zoom. A sala é uma só: todas as mesas de todos os times numa grade de 3 colunas que continua para baixo, linha após linha.

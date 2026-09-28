@@ -59,14 +59,27 @@
  * src/state.js, src/adapter.js e src/render.js sem mudar a wiring do apply().
  */
 window.__ModuleLoader__.load({
-  id: 'dsh-work-game',
+  // O id TEM de ser o nome do pacote: é a chave com que o boot data
+  // (window.__DSH_BOOT__.entries) regista o módulo — um id diferente faz o
+  // loader não encontrar o factory e o pacote falhar com "import failed".
+  id: 'dsh-work-game-plugin',
   factory: (require) => {
     'use strict';
     var module = { exports: {} };
     var exports = module.exports;
     Object.defineProperty(exports, Symbol.toStringTag, { value: 'Module' });
 
-    const react = require('react');
+    // Diagnóstico de ativação: fica em window.__wgDiag para leitura headless
+    // (o loader apenas reporta "import failed" e manda ver a consola).
+    try { window.__wgDiag = 'factory:start'; } catch { /* sem window */ }
+    let react;
+    try {
+      react = require('react');
+      try { window.__wgDiag = 'factory:react-ok'; } catch { /* sem window */ }
+    } catch (erro) {
+      try { window.__wgDiag = 'factory:react-erro: ' + String(erro && erro.message).slice(0, 180); } catch { /* sem window */ }
+      react = { createElement: () => null };
+    }
     const h = react.createElement;
 
     /* ================================================================
@@ -930,12 +943,24 @@ window.__ModuleLoader__.load({
     // lado do botão de settings (wide e rail). Tooltip nativo no `title`,
     // nome acessível no `aria-label`; em wide mostra também o rótulo, como a
     // própria fila de settings faz.
+    // Ação de abertura do painel, preenchida em apply(). Vive em closure para o
+    // botão não depender da forma como o slot injeta props (que varia entre
+    // versões do runtime).
+    let abrirPainel = () => {};
+
     function BotaoModoJogo(props) {
-      const { wide, abrir } = props; // abrir vem do inject (ctx.layout.selectPanel)
+      const wide = props && props.wide;
       return h('button', {
         type: 'button',
         className: 'wg-jogar',
-        onClick: abrir,
+        onClick: () => {
+          try {
+            abrirPainel();
+            window.__wgDiag = (window.__wgDiag || '') + '|abrir:chamado';
+          } catch (erro) {
+            try { window.__wgDiag = (window.__wgDiag || '') + '|abrir-erro: ' + String(erro && erro.message).slice(0, 220); } catch { /* sem window */ }
+          }
+        },
         title: 'Modo jogo',
         'aria-label': 'Modo jogo',
       },
@@ -1051,7 +1076,15 @@ window.__ModuleLoader__.load({
     // entre versões: tentamos as formas conhecidas e ficamos sem canal se
     // nenhuma existir.
     function extrairSuperficie(ctx) {
-      const servico = ctx && (ctx.sessions ?? ctx.reflect?.get?.('sessions'));
+      // Qualquer acesso a serviço pode lançar (serviço não injetado): aqui a
+      // falha TEM de ser silenciosa, senão o apply morre na 1.ª linha e o
+      // pacote inteiro fica "import failed".
+      let servico = null;
+      try {
+        servico = ctx && (ctx.sessions ?? ctx.reflect?.get?.('sessions'));
+      } catch {
+        servico = null;
+      }
       if (!servico) return null;
       const catalogo = () => {
         try {
@@ -1086,11 +1119,22 @@ window.__ModuleLoader__.load({
 
     // 'layout' é o serviço que ui-layout fornece via ctx.reflect.provide:
     // dá a transição pública de painel (ui-layout/src/client/service.ts).
+    // Serviços exigidos ao runner do cliente. NOTA: só pedir nomes de serviço
+    // comprovadamente injetáveis ('sessions', 'slots', 'locale' são os do
+    // exemplo oficial) — um nome desconhecido faz a ATIVAÇÃO inteira falhar
+    // ("1 entry did not activate / import failed") mesmo com o bundle válido.
     exports.inject = ['slots', 'layout'];
 
     // A função que o runtime do browser chama (padrão dos exemplos oficiais).
     exports.apply = function apply(ctx) {
       superficieDSH = extrairSuperficie(ctx);
+      // Ação de abertura do painel, capturada em closure pelo botão: não
+      // depende da forma como o slot injeta props (varia entre runtimes).
+      abrirPainel = () => {
+        const lay = ctx.layout ?? (typeof ctx.get === 'function' ? ctx.get('layout') : null);
+        if (lay && typeof lay.selectPanel === 'function') lay.selectPanel(PANEL_ID);
+        else { window.__wgDiag = (window.__wgDiag || '') + '|abrir:sem-layout'; }
+      };
       injetarEstilos(document);
       const nucleo = criarNucleo();
 
@@ -1098,14 +1142,20 @@ window.__ModuleLoader__.load({
       // do plugin for descartada (reload HMR, unload, dependência morta).
       ctx.effect(() => () => { nucleo.dispose(); }, 'dsh-work-game: escritório');
 
-      // Painel em `main`, keyed: a mesma key que o botão do pé seleciona.
-      ctx.slots.inject('main', () =>
-        ctx.slots.register({
-          name: 'main',
-          key: PANEL_ID,
-          inject: () => nucleo,
-        }, PainelEscritorio),
-      );
+      // Painel em `main`, keyed: a mesma key que os botões selecionam.
+      // Protegido por try/catch para um slot inválido não matar a ativação.
+      try {
+        ctx.slots.inject('main', () =>
+          ctx.slots.register({
+            name: 'main',
+            key: PANEL_ID,
+            inject: () => nucleo,
+          }, PainelEscritorio),
+        );
+      } catch (erro) {
+        try { window.__wgDiag = (window.__wgDiag || '') + '|slot-main-erro: ' + String(erro && erro.message).slice(0, 220); } catch { /* sem window */ }
+        console.warn('[dsh-work-game] slot main indisponível:', String(erro && erro.message || erro));
+      }
 
       // Botão "Modo jogo" no pé, justo ao lado do botão de settings (tarefa 1).
       // Achado do checkout (v0.1.6-alpha.2): o item de settings NÃO está em
@@ -1115,21 +1165,35 @@ window.__ModuleLoader__.load({
       // `sidebar.settings` no pé da barra, e o slot contiguo para ações é
       // `sidebar.footer.action` (também ordenado por `order`). Com order 0
       // — e sem outros registrantes — o botão fica pegado à fila de settings
-      // em wide e em rail (56px). O clique abre o painel do escritório via
-      // ctx.layout.selectPanel(PANEL_ID), que seleciona o slot 'main' com a
-      // key 'dsh-work-game' (lanza se a key não está registrada — nós a
-      // registramos acima, no mesmo apply).
-      ctx.slots.inject('sidebar.footer.action', () =>
-        ctx.slots.register({
-          name: 'sidebar.footer.action',
-          id: PANEL_ID,
-          order: 0,
-          label: () => 'Modo jogo',
-          inject: () => ({ abrir: () => ctx.layout.selectPanel(PANEL_ID) }),
-        }, BotaoModoJogo),
-      );
+      // em wide e em rail (56px).
+      // DEFESA DE ATIVAÇÃO: nomes de slot são tipados (SlotMap) e um nome
+      // inválido rebenta o apply inteiro — por isso cada inject é protegido e há
+      // fallback para `sidebar.panellist` (slot comprovado nos exemplos oficiais).
+      const registarBotao = (slot, Componente) => {
+        try {
+          return ctx.slots.inject(slot, () => ctx.slots.register({
+            name: slot,
+            id: PANEL_ID,
+            order: 0,
+            label: () => 'Modo jogo',
+            inject: () => ({}),
+          }, Componente));
+        } catch (erro) {
+          try { window.__wgDiag = (window.__wgDiag || '') + '|slot-' + slot + '-erro: ' + String(erro && erro.message).slice(0, 180); } catch { /* sem window */ }
+          console.warn('[dsh-work-game] slot indisponível:', slot, String(erro && erro.message || erro));
+          return null;
+        }
+      };
+      // Só o botão do pé: ele já fica ao lado de settings e abre o painel.
+      // (Uma entrada em sidebar.panellist seria redundante e confundiria com
+      // outra abertura do mesmo painel.)
+      const disposers = [
+        registarBotao('sidebar.footer.action', BotaoModoJogo),
+      ].filter(Boolean);
+      ctx.effect(() => () => { for (const libertar of disposers) { try { libertar(); } catch { /* já libertado */ } } }, 'dsh-work-game: botão');
     };
 
+    try { window.__wgDiag = (window.__wgDiag || '') + '|factory:fim'; } catch { /* sem window */ }
     return module.exports;
   },
 });
