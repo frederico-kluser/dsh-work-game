@@ -829,8 +829,11 @@ window.__ModuleLoader__.load({
 
       // Face estável do núcleo: assina e liga o adaptador uma única vez.
       react.useEffect(() => {
-        iniciar();
+        // Ordem importa: SUBSCREVER antes de iniciar — a explosão inicial de
+        // eventos (catálogo + projeções) não pode cair antes de haver ouvintes,
+        // senão a UI fica presa no estado vazio até ao próximo evento.
         const desligar = subscribe(() => setTick((t) => t + 1));
+        iniciar();
         return () => { desligar(); parar(); };
         // eslint-disable-next-line react-hooks/exhaustive-deps
       }, []);
@@ -1064,6 +1067,7 @@ window.__ModuleLoader__.load({
           }
           adaptador.start();
           agendarPurga();
+          notificar(); /* estado pode já ter avançado durante o arranque */
         },
         parar: () => {
           if (adaptador) adaptador.stop();
