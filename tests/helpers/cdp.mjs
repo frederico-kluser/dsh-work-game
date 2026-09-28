@@ -183,6 +183,16 @@ export async function launchBrowser({ width = 1440, height = 900 } = {}) {
         return true;
       })()`);
     },
+    /** Escrita real no elemento com foco (Input.insertText: input nativo, serve a contenteditable). */
+    async insertText(text) {
+      await cdp.send('Input.insertText', { text });
+    },
+    /** Clique real via Input do CDP (pointerdown/up/click nativos nas coordenadas). */
+    async clickAt(x, y) {
+      await cdp.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x, y });
+      await cdp.send('Input.dispatchMouseEvent', { type: 'mousePressed', x, y, button: 'left', buttons: 1, clickCount: 1 });
+      await cdp.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x, y, button: 'left', buttons: 0, clickCount: 1 });
+    },
     /** Arraste real via Input do CDP (gera pointer events com pointerId válido). */
     async drag(fromX, fromY, toX, toY) {
       await cdp.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: fromX, y: fromY, button: 'left', buttons: 1, clickCount: 1 });

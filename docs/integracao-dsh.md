@@ -1,10 +1,14 @@
 # Integração com o DeepSeek Harness (DSH)
 
 > **Estado (2026-09-28): lado CLIENTE ligado.** A ponte do browser
-> (`dsh-plugin/src/surface.js`, embutida em `client.js`) consome já a superfície REAL
-> `ctx.sessions.list` (catálogo + `projectionValues`), alimentando o escritório com
-> sessões reais, running/idle, modelo, contexto, custo estimado e velocidade de tokens —
-> sem inventar nada (ver §7 de `docs/contratos-plugin.md`). Continua por ligar: os
+> (`dsh-plugin/src/surface.js`, embutida em `client.js`) consome as superfícies REAIS
+> `ctx.sessions.list` (catálogo + `projectionValues`) e `ctx.get('workspaces').list`
+> (workspaces, pertença e arquivadas): a sala mostra uma mesa por workspace do DSH, as
+> conversas visíveis (mesma regra da barra lateral), running/idle, modelo, contexto,
+> custo estimado, velocidade de tokens e a delegação em curso (subagentes a correr), com
+> as ações Abrir conversa / Nova sessão da API pública `uiWorkspace` — sem inventar nada
+> (ver §7 de `docs/contratos-plugin.md`). Instalar por `link:` (a instalação `file:` é uma
+> cópia congelada que o DSH continua a servir). Continua por ligar: os
 > eventos de fio em tempo real (turn/end, tool/*, user-questions, approval/*) via
 > `retain` + `eventSource`, para os quais `src/adapter.js` (lado host) mantém o
 > mapeamento verificado abaixo. Factos DSH verificados no checkout local

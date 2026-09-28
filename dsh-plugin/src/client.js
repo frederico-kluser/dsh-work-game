@@ -3,60 +3,31 @@
  *
  * Este ficheiro É o bundle do browser: package.json aponta exports["./client"]
  * para cá e o sistema de módulos do DSH serve-o tal qual (script clássico via
- * /plugins/.../client.js). Por isso usa a forma oficial dos exemplos do DSH:
+ * /plugins/…/client.js, recarregado a quente pelo client-hmr quando muda no
+ * disco). Usa a forma oficial dos exemplos do DSH:
  * `window.__ModuleLoader__.load({ id, factory })`, com a face { inject, apply }
  * — a função que o runtime do browser chama é `exports.apply(ctx)`.
  *
  * Sem build e sem dependências npm: o único `require` é `react`, fornecido
- * pela seed da plataforma (o shell injeta react no module table).
+ * pela seed da plataforma. Um bundle servido não importa ficheiros irmãos, por
+ * isso a ponte com o DSH (src/surface.js) vai embutida na secção 0 — o teste
+ * de paridade tests/plugin/client-surface.test.mjs guarda contra drift.
  *
- * Projeção dos contratos do projeto (docs/contratos-plugin.md):
- *   §1  eventos normalizados (vocabulário fechado)
- *   §2  createOfficeState / applyEvent / personView / officeView + regras
- *       (emoji por precedência, CTX, custo por deltas, pergunta persistente,
- *       outputs com expiração ~1s, setPrices)
- *   §3  createAdapter({ onEvent, sessions, projections }) -> { start, stop }
- *   §4  renderOffice(state) -> SVG (render.js) — versão autocontida, sem
- *       depender de assets/furniture.svg (inalcançável a partir da webapp).
+ * O que o painel mostra (tudo REAL, nada simulado — ver docs/contratos-plugin.md):
+ *   - uma mesa por WORKSPACE do DSH (ctx.get('workspaces'), ordem do DSH, título
+ *     e caminho), com as conversas sentadas pela pertença `sessionIds` — a mesma
+ *     regra da barra lateral; as órfãs vão para "Sem workspace" (o Ungrouped do
+ *     DSH) e, sem o serviço de workspaces, agrupa-se por pasta (cwd);
+ *   - a visibilidade da barra lateral: subagentes, arquivadas e conversas em
+ *     branco não têm lugar próprio; subagentes A CORRER sentam-se na mesa violeta
+ *     de delegação da demo ("Equipe de …"), com o lugar de casa do líder reservado;
+ *   - a cena da demo portada 1:1 (geometria, cores dos temas, mobiliário,
+ *     fichas, bandeira ❓, aviso >200k) e os bustos Avataaars com a expressão
+ *     do estado, desenhados por <use> a partir de um sprite de <symbol>s.
  *
- * Funcionalidades desta tarefa (verificadas no checkout deepseek-harness
- * v0.1.6-alpha.2, read-only):
- *
- * (1) Botão "Modo jogo" imediatamente ao lado do botão de settings.
- *     Achado do checkout: `sidebar.panellist` ordena as entradas pelo campo
- *     `order` (ascendente, default 0, empates por ordem de registo; ver
- *     packages/client/ui-sidebar/src/client/index.ts). MAS o item de settings
- *     NÃO está na panellist: neste checkout o único registrante nativo é
- *     `plugins` (order 0). Settings ocupa `sidebar.settings` no pé da barra,
- *     e o slot que o contrato de ui-sidebar descreve como "Optional actions
- *     beside Settings at the sidebar foot" é `sidebar.footer.action` —
- *     também ordenado por `order` (regra geral das listas; ver
- *     ui-renderer/src/client/scoped-slots.tsx). Por isso o botão registra-se
- *     em `sidebar.footer.action` { order: 0 }: fica pegado à fila de settings
- *     (wide e rail 56px), com ícone e tooltip "Modo jogo". O clique abre o
- *     painel do escritório via `ctx.layout.selectPanel(PANEL_ID)` — API
- *     pública do serviço `layout` (ui-layout/src/client/service.ts) que
- *     seleciona o slot 'main' com a key 'dsh-work-game'.
- *
- * (2) Auto-associação: quando chega uma sessão/agente sem nome/estilo
- *     associado, gera-se nome aleatório + estilo de avatar aleatório e
- *     guarda-se a associação em localStorage (chave 'dsh-work-game:assoc'),
- *     estável entre renders. Singleton a nível de módulo, tolerante a falhas
- *     de armazenamento (modo privado -> só em memória).
- *
- * (3) Reações: o estado visual (emoji/expressão/ficha) deriva EXCLUSIVAMENTE
- *     dos eventos recebidos do adaptador (applyEvent -> recalcular). Não há
- *     temporizadores que mudem emoji/expressão/ficha: os indicadores
- *     transitórios (retry, compactação) limpiam-se por eventos posteriores,
- *     nunca por timer. O único setTimeout que resta é a expiração de
- *     apresentação dos outputs (~1s, contrato §2): só retira balões e nunca
- *     toca o estado visual da pessoa.
- *
- * Um bundle servido não consegue importar ficheiros ESM irmãos (a resolução
- * do module table só conhece seed words, linhas do grafo e chunks
- * factory-form client.*.js). Quando a integração ganhar um canal host→browser
- * (ou um passo de build), estas projeções trocam-se pelos módulos reais
- * src/state.js, src/adapter.js e src/render.js sem mudar a wiring do apply().
+ * Botão "Modo jogo": slot `sidebar.footer.action` (order 0), colado ao botão de
+ * settings do pé da barra; o clique abre o painel via
+ * `ctx.layout.selectPanel('dsh-work-game')` (API pública de ui-layout).
  */
 window.__ModuleLoader__.load({
   // O id TEM de ser o nome do pacote: é a chave com que o boot data
@@ -83,37 +54,516 @@ window.__ModuleLoader__.load({
     const h = react.createElement;
 
     /* ================================================================
-     * 0. Associação nome+estilo por sessão (tarefa 2)
+     * 0. Ponte REAL do DSH — cópia embutida de src/surface.js
+     *    (gerada a partir da fonte: `export` removido, resto idêntico)
+     * ================================================================ */
+
+    /*
+     * dsh-plugin/src/surface.js — ponte REAL do DSH (browser) para eventos normalizados §1.
+     *
+     * É o único ponto que lê o runtime do browser do DSH. Superfícies verificadas no
+     * checkout deepseek-harness (0.1.6-alpha.2):
+     *
+     *   SESSÕES — packages/api/session-controller/src/client/contract/sessions.ts (ISessions)
+     *   e src/client/sessions/service.ts:
+     *     ctx.sessions.list : ObservableSnapshot<SessionListState>   // getSnapshot() + subscribe(fn)
+     *       SessionListState { ids (ordem do host), byId, phase, subagentsByParent }
+     *         — só `ids` exprime a pertença ao catálogo do host; `byId` junta linhas
+     *           locais de gerações vivas (aqui aproveitadas só para subagentes).
+     *       SessionSummary   { id, title?, displayTitle, cwd?, parentId?, origin?: 'subagent',
+     *                          running, blank, updatedAt, projectionValues? }
+     *       projectionValues (Partial<SessionProjectionMap>, last-wins):
+     *         tokenUsage      { uncachedInputTokens, outputTokens, cacheReadTokens,
+     *                           cacheWriteTokens }          (acumulado)
+     *         contextPressure { pressureTokens?, projectedTokens?, contextWindow? }
+     *         modelSelection  { lastUsed: {provider, model}|null, next? }
+     *       subagentsByParent[pai].entries : SubagentListEntry
+     *         { kind: 'child', id, activity: 'running'|'inactive', label? } | { kind: 'diagnostic' }
+     *
+     *   WORKSPACES — packages/api/workspace-controller/src/client/{service,model}.ts (IWorkspaces)
+     *     ctx.get('workspaces').list : { items: WorkspaceView[], archivedSessionIds, phase }
+     *       WorkspaceView { workspaceId, path, title, sessionIds (ordem manual) }
+     *     A pertença de uma sessão vem SÓ de `sessionIds` (como o owningGroupKey do
+     *     ui-workspace); o que nenhum workspace reclama fica "Ungrouped".
+     *     Lido SEM `inject`: no Cordis do DSH toda a dependência declarada é obrigatória
+     *     e um serviço ausente deixa a entrada 'pending' — o boot web aborta e a UI
+     *     inteira não monta. `ctx.get` lê o serviço sem bloquear a ativação; a ligação é
+     *     tardia (o serviço pode ativar depois do plugin) e, sem ele, a sala agrupa as
+     *     sessões por pasta (cwd).
+     *
+     * O contrato do BUNDLE (vocabulário §1) recebe DELTAS em `usage` (o estado soma),
+     * por isso este módulo diffa snapshots sucessivos e emite:
+     *
+     *   session/added   {sessionId, title?, cwd?, parentId?, subagent, blank, model?}
+     *   session/meta    {sessionId, title?, cwd?, parentId?, subagent, blank} — só em mudança
+     *   session/removed {sessionId}
+     *   workspaces      {fonte: 'dsh'|'nenhuma', items: [{id, title, path, sessionIds}], archived}
+     *   subagent/start|end {sessionId: pai, childId, runId: childId}
+     *                   — só subagentes (origin 'subagent') A CORRER: o catálogo guarda
+     *                     os terminados, que não são delegação em curso
+     *   status {sessionId, status: 'running'|'idle'}               — só em mudança
+     *   usage  {sessionId, model?, uncachedInput, output, cacheRead, cacheWrite}
+     *          — 1.º vislumbre emite o ACUMULADO (custo estimado total visível);
+     *            depois, só deltas positivos (anti-dupla-contagem por sessão).
+     *   model  {sessionId, model?, contextWindow?}
+     *   ctx    {sessionId, used, window?}                          — projected ?? pressure
+     *
+     * Velocidade de tokens: calculada aqui (o estado é puro e sem relógio) a partir
+     * dos deltas de `output` sobre o tempo — `velocidadeDe(id)` devolve tok/s ou null.
+     *
+     * Honestidade: nada é inventado. Sem canal (`ctx.sessions` ausente) devolve-se
+     * `null` e o painel diz "à espera do host"; sem projeções, os campos ficam
+     * indisponíveis ("—" / "custo —"), nunca zero.
+     */
+
+    /** Preços estimados: USD por token (tabela NOSSA — o DSH não publica preços). */
+    const PRECOS_USD_POR_TOKEN = {
+      'deepseek-chat': { input: 2.7e-7, output: 1.1e-6, cacheRead: 2.7e-8, cacheWrite: 2.7e-7 },
+      'deepseek-reasoner': { input: 5.5e-7, output: 2.19e-6, cacheRead: 5.5e-8, cacheWrite: 5.5e-7 },
+      'mimo-v2.6-pro': { input: 6e-7, output: 2.4e-6, cacheRead: 6e-8, cacheWrite: 6e-7 },
+    };
+
+    /** Limiar humano de aviso de contexto (features futuras: >200k). */
+    const LIMIAR_CTX = 200000;
+
+    /** Resolve o preço por modelo: chave exata e, na falta, por inclusão
+     *  (ids reais passam por namespaces, ex. "openrouter/xiaomi/mimo-v2.6-pro"). */
+    function precoDe(precos, modelo) {
+      if (!precos || !modelo) return undefined;
+      const direto = precos instanceof Map ? precos.get(modelo) : precos[modelo];
+      if (direto) return direto;
+      const alvo = String(modelo);
+      const entradas = precos instanceof Map ? [...precos] : Object.entries(precos ?? {});
+      for (const [chave, preco] of entradas) {
+        if (chave && alvo.includes(chave)) return preco;
+      }
+      return undefined;
+    }
+
+    const num = (v) => (Number.isFinite(Number(v)) ? Number(v) : 0);
+
+    /* Diagnóstico para leitura headless (window.__wgSnap, mesmo padrão de __wgDiag). */
+    function diagnostico(chave, valor) {
+      try {
+        if (typeof window !== 'undefined' && window) window[chave] = valor;
+      } catch { /* sem window */ }
+    }
+
+    /** Lê um serviço do contexto Cordis SEM o exigir no inject: `ctx.get` não bloqueia
+     *  a ativação e devolve undefined quando o serviço não existe ou ainda não está
+     *  ativo. Objetos simples (testes) caem no acesso direto à propriedade — num
+     *  contexto Cordis real essa via nunca é usada para serviços não declarados. */
+    function servicoDe(ctx, nome) {
+      if (!ctx || (typeof ctx !== 'object' && typeof ctx !== 'function')) return null;
+      try {
+        if (typeof ctx.get === 'function') return ctx.get(nome) ?? null;
+        if (ctx.reflect && typeof ctx.reflect.get === 'function') return ctx.reflect.get(nome) ?? null;
+        return ctx[nome] ?? null;
+      } catch {
+        return null; /* serviço indisponível: falha silenciosa, sem rebentar o apply */
+      }
+    }
+
+    /* Normaliza uma linha do catálogo (SessionSummary ou SubagentListEntry) num
+     * resumo mínimo. Nomes de campo variam entre linhas do DSH: feature-detected,
+     * sem inventar. Entradas de diagnóstico do catálogo de filhos são ignoradas. */
+    function normalizarLinha(bruto, parentIdForcado) {
+      if (!bruto || typeof bruto !== 'object') return null;
+      if (bruto.kind === 'diagnostic') return null;
+      const id = bruto.id ?? bruto.sessionId;
+      if (id == null || id === '') return null;
+      const titulo = [bruto.displayTitle, bruto.title, bruto.label]
+        .find((t) => typeof t === 'string' && t.trim());
+      return {
+        id: String(id),
+        displayTitle: titulo ? titulo.trim() : null,
+        running: bruto.running === true || bruto.activity === 'running',
+        parentId: parentIdForcado ?? (bruto.parentId != null ? String(bruto.parentId) : null),
+        /* subagente = origem declarada ou listado num catálogo de filhos; um fork
+           também tem parentId mas é uma conversa normal (visível na barra do DSH) */
+        subagente: bruto.origin === 'subagent' || parentIdForcado != null,
+        blank: bruto.blank === true,
+        cwd: typeof bruto.cwd === 'string' && bruto.cwd ? bruto.cwd : null,
+        projectionValues: bruto.projectionValues && typeof bruto.projectionValues === 'object'
+          ? bruto.projectionValues
+          : null,
+      };
+    }
+
+    /* Linhas de um snapshot: o catálogo do host (ordem de `ids`), as linhas locais
+     * de subagentes vivos e os catálogos de filhos por pai — fundidas por id. */
+    function linhasDoSnapshot(snap) {
+      if (!snap || typeof snap !== 'object') return [];
+      const byId = snap.byId && typeof snap.byId === 'object' ? snap.byId : {};
+      const ordem = Array.isArray(snap.ids) ? snap.ids : Object.keys(byId);
+      const linhas = new Map();
+      const juntar = (linha) => {
+        if (!linha) return;
+        const antes = linhas.get(linha.id);
+        if (!antes) {
+          linhas.set(linha.id, linha);
+          return;
+        }
+        linhas.set(linha.id, {
+          ...antes,
+          displayTitle: antes.displayTitle ?? linha.displayTitle,
+          running: antes.running || linha.running,
+          parentId: antes.parentId ?? linha.parentId,
+          subagente: antes.subagente || linha.subagente,
+          cwd: antes.cwd ?? linha.cwd,
+          projectionValues: antes.projectionValues ?? linha.projectionValues,
+        });
+      };
+      for (const id of ordem) juntar(normalizarLinha(byId[id] ?? null, null));
+      for (const [id, bruto] of Object.entries(byId)) {
+        if (!linhas.has(String(id)) && bruto && bruto.origin === 'subagent') juntar(normalizarLinha(bruto, null));
+      }
+      const sub = snap.subagentsByParent && typeof snap.subagentsByParent === 'object'
+        ? snap.subagentsByParent
+        : {};
+      for (const [pai, catalogo] of Object.entries(sub)) {
+        const entradas = Array.isArray(catalogo) ? catalogo
+          : (catalogo && Array.isArray(catalogo.entries) ? catalogo.entries : []);
+        for (const bruto of entradas) juntar(normalizarLinha(bruto, String(pai)));
+      }
+      return [...linhas.values()];
+    }
+
+    function nomeDaPasta(caminho) {
+      const partes = String(caminho ?? '').split(/[\\/]/).filter(Boolean);
+      return partes.length ? partes[partes.length - 1] : null;
+    }
+
+    /** Snapshot de IWorkspaces → evento `workspaces` (null enquanto a baseline não
+     *  chegou ou quando o serviço falhou sem dados: a sala mantém o agrupamento por
+     *  pasta em vez de despejar tudo em "Sem workspace"). */
+    function workspacesDoSnapshot(snap) {
+      if (!snap || typeof snap !== 'object') return null;
+      if (snap.phase === 'pending') return null;
+      const items = Array.isArray(snap.items) ? snap.items : [];
+      if (snap.state === 'error' && items.length === 0) return null;
+      return {
+        type: 'workspaces',
+        fonte: 'dsh',
+        items: items.filter((w) => w && w.workspaceId != null).map((w) => ({
+          id: String(w.workspaceId),
+          title: typeof w.title === 'string' && w.title.trim()
+            ? w.title.trim()
+            : (nomeDaPasta(w.path) ?? String(w.workspaceId)),
+          path: typeof w.path === 'string' ? w.path : '',
+          sessionIds: Array.isArray(w.sessionIds) ? w.sessionIds.map(String) : [],
+        })),
+        archived: Array.isArray(snap.archivedSessionIds) ? snap.archivedSessionIds.map(String) : [],
+      };
+    }
+
+    function modeloDaLinha(linha) {
+      const sel = linha?.projectionValues?.modelSelection;
+      const m = sel?.lastUsed?.model ?? sel?.next?.model ?? null;
+      return typeof m === 'string' && m ? m : (typeof sel?.model === 'string' && sel.model ? sel.model : null);
+    }
+
+    function bucketsDaLinha(linha) {
+      const tu = linha?.projectionValues?.tokenUsage;
+      if (!tu || typeof tu !== 'object') return null;
+      return {
+        uncachedInput: num(tu.uncachedInputTokens),
+        output: num(tu.outputTokens),
+        cacheRead: num(tu.cacheReadTokens),
+        cacheWrite: num(tu.cacheWriteTokens),
+      };
+    }
+
+    function pressaoDaLinha(linha) {
+      const cp = linha?.projectionValues?.contextPressure;
+      if (!cp || typeof cp !== 'object') return null;
+      const janela = Number.isFinite(Number(cp.contextWindow)) ? Number(cp.contextWindow) : null;
+      const usado = Number.isFinite(Number(cp.projectedTokens)) ? Number(cp.projectedTokens)
+        : (Number.isFinite(Number(cp.pressureTokens)) ? Number(cp.pressureTokens) : null);
+      return { usado, janela };
+    }
+
+    const metaDaLinha = (l) => ({
+      title: l.displayTitle ?? undefined,
+      cwd: l.cwd ?? undefined,
+      parentId: l.parentId ?? undefined,
+      subagent: l.subagente,
+      blank: l.blank,
+    });
+
+    /**
+     * Extrai a superfície real do runtime do browser.
+     * @param {object} ctx contexto Cordis do client module (ctx.sessions; ctx.get('workspaces'))
+     * @param {{ agora?: () => number, intervaloWorkspaces?: number }} opts relógio injetável
+     *   (testes determinísticos) e intervalo da ligação tardia aos workspaces (0 = sem sondagem)
+     * @returns {null | { catalogo(): Array, assinar(fn): function, velocidadeDe(id): (number|null) }}
+     */
+    function extrairSuperficie(ctx, opts = {}) {
+      const agora = typeof opts.agora === 'function' ? opts.agora : () => Date.now();
+      const intervaloWs = Number.isFinite(opts.intervaloWorkspaces) ? opts.intervaloWorkspaces : 1000;
+      let servico = null;
+      try {
+        servico = (ctx && ctx.sessions) || null; /* declarado no inject: acesso direto */
+      } catch {
+        servico = null;
+      }
+      if (!servico) servico = servicoDe(ctx, 'sessions');
+      const list = servico && servico.list;
+      if (!list || typeof list.getSnapshot !== 'function') return null;
+
+      diagnostico('__wgSnap', 'superficie:ok');
+      const ler = () => {
+        try { return list.getSnapshot(); } catch (erro) {
+          diagnostico('__wgSnapErr', String(erro && (erro.message || erro)).slice(0, 200));
+          return null;
+        }
+      };
+
+      /* catálogo atual (semente do adaptador) */
+      const catalogo = () => linhasDoSnapshot(ler()).map((l) => ({
+        id: l.id, model: modeloDaLinha(l) ?? undefined, ...metaDaLinha(l),
+      }));
+
+      /* ── workspaces: ligação opcional e tardia ─────────────────────────── */
+      const SEM_WORKSPACES = { type: 'workspaces', fonte: 'nenhuma', items: [], archived: [] };
+      let wsList = null;        /* modelo ligado (ctx.get('workspaces').list — objeto estável) */
+      let wsSoltar = null;      /* unsubscribe do modelo */
+      let wsAssinatura = JSON.stringify(SEM_WORKSPACES);
+      let wsContagem = null;    /* nº de workspaces na última emissão (diagnóstico) */
+      let resumoSessoes = null; /* contagens do último snapshot de sessões (diagnóstico) */
+      const escreverDiagnostico = () => {
+        diagnostico('__wgSnap', JSON.stringify({ ...(resumoSessoes ?? {}), ws: wsContagem }));
+      };
+
+      const emitirWorkspaces = (emitir) => {
+        let evento = null;
+        if (wsList) {
+          try { evento = workspacesDoSnapshot(wsList.getSnapshot()); } catch { evento = null; }
+        }
+        const final = evento ?? SEM_WORKSPACES;
+        const assinatura = JSON.stringify(final);
+        if (assinatura === wsAssinatura) return;
+        wsAssinatura = assinatura;
+        wsContagem = evento ? evento.items.length : null;
+        escreverDiagnostico();
+        emitir(final);
+      };
+
+      const ligarWorkspaces = (emitir) => {
+        const servicoWs = servicoDe(ctx, 'workspaces');
+        const novo = servicoWs && servicoWs.list && typeof servicoWs.list.getSnapshot === 'function'
+          ? servicoWs.list : null;
+        if (novo !== wsList) {
+          if (wsSoltar) { try { wsSoltar(); } catch { /* já solto */ } }
+          wsSoltar = null;
+          wsList = novo;
+          if (wsList && typeof wsList.subscribe === 'function') {
+            try {
+              const soltar = wsList.subscribe(() => emitirWorkspaces(emitir));
+              wsSoltar = typeof soltar === 'function' ? soltar : null;
+            } catch { wsSoltar = null; }
+          }
+        }
+        emitirWorkspaces(emitir);
+        return wsList !== null;
+      };
+
+      /* estado anterior por sessão para diff (só muda o que mudou) */
+      const anterior = new Map();      // id -> { running, usage, modelo, janela, usado, meta, paiAtivo }
+      const velocidades = new Map();   // id -> { saida, at, v }
+
+      const rastrearVelocidade = (id, deltaSaida) => {
+        const reg = velocidades.get(id) ?? { saida: 0, at: agora(), v: 0 };
+        const t = agora();
+        const dt = Math.max(250, t - reg.at) / 1000;
+        const instante = Math.max(0, num(deltaSaida)) / dt;
+        reg.v = reg.v ? reg.v * 0.6 + instante * 0.4 : instante;
+        reg.saida += Math.max(0, num(deltaSaida));
+        reg.at = t;
+        velocidades.set(id, reg);
+      };
+
+      const difs = (emitir) => {
+        const snap = ler();
+        if (!snap) return;
+        const linhas = linhasDoSnapshot(snap);
+        resumoSessoes = {
+          n: linhas.length,
+          fase: snap.phase ?? null,
+          ids: Array.isArray(snap.ids) ? snap.ids.length : null,
+          byId: snap.byId ? Object.keys(snap.byId).length : 0,
+          sub: snap.subagentsByParent ? Object.keys(snap.subagentsByParent).length : 0,
+          raizes: linhas.filter((l) => !l.subagente && !l.blank).length,
+        };
+        escreverDiagnostico();
+        const atuais = new Map(linhas.map((l) => [l.id, l]));
+
+        /* baixas: primeiro subagent/end (se delegava), depois session/removed */
+        for (const [id, antes] of [...anterior]) {
+          if (atuais.has(id)) continue;
+          anterior.delete(id);
+          velocidades.delete(id);
+          if (antes.paiAtivo) {
+            emitir({ type: 'subagent/end', sessionId: antes.paiAtivo, childId: id, runId: id });
+          }
+          emitir({ type: 'session/removed', sessionId: id });
+        }
+
+        for (const [id, linha] of atuais) {
+          const meta = metaDaLinha(linha);
+          const assinaturaMeta = JSON.stringify(meta);
+          let antes = anterior.get(id);
+          if (!antes) {
+            antes = {
+              running: null, usage: null, modelo: null, janela: null, usado: null,
+              meta: assinaturaMeta, paiAtivo: null,
+            };
+            anterior.set(id, antes);
+            emitir({ type: 'session/added', sessionId: id, model: modeloDaLinha(linha) ?? undefined, ...meta });
+          } else if (antes.meta !== assinaturaMeta) {
+            /* título gerado depois do 1.º turno, pasta, fim do "em branco"… */
+            antes.meta = assinaturaMeta;
+            emitir({ type: 'session/meta', sessionId: id, ...meta });
+          }
+
+          /* estado de execução — só em mudança */
+          const aCorrer = linha.running === true;
+          if (antes.running !== aCorrer) {
+            antes.running = aCorrer;
+            emitir({ type: 'status', sessionId: id, status: aCorrer ? 'running' : 'idle' });
+          }
+
+          /* delegação em curso: subagente a correr, pareado com o pai */
+          const pai = linha.subagente && aCorrer && linha.parentId ? linha.parentId : null;
+          if (pai !== antes.paiAtivo) {
+            if (antes.paiAtivo) emitir({ type: 'subagent/end', sessionId: antes.paiAtivo, childId: id, runId: id });
+            if (pai) emitir({ type: 'subagent/start', sessionId: pai, childId: id, runId: id });
+            antes.paiAtivo = pai;
+          }
+
+          /* modelo + janela */
+          const modelo = modeloDaLinha(linha);
+          const pressao = pressaoDaLinha(linha);
+          const janela = pressao ? pressao.janela : null;
+          if (modelo !== antes.modelo || janela !== antes.janela) {
+            antes.modelo = modelo;
+            antes.janela = janela;
+            emitir({
+              type: 'model', sessionId: id,
+              model: modelo ?? undefined,
+              contextWindow: janela ?? undefined,
+            });
+          }
+          const usado = pressao ? pressao.usado : null;
+          if (usado !== null && usado !== antes.usado) {
+            antes.usado = usado;
+            emitir({ type: 'ctx', sessionId: id, used: usado, window: janela ?? undefined });
+          }
+
+          /* usage: 1.º vislumbre emite o acumulado; depois, deltas positivos */
+          const atual = bucketsDaLinha(linha);
+          const prev = antes.usage;
+          if (atual) {
+            if (!prev) {
+              antes.usage = atual;
+              if (atual.uncachedInput || atual.output || atual.cacheRead || atual.cacheWrite) {
+                rastrearVelocidade(id, 0);
+                emitir({
+                  type: 'usage', sessionId: id, model: modelo ?? undefined,
+                  uncachedInput: atual.uncachedInput, output: atual.output,
+                  cacheRead: atual.cacheRead, cacheWrite: atual.cacheWrite,
+                });
+              }
+            } else if (
+              prev.uncachedInput !== atual.uncachedInput || prev.output !== atual.output
+              || prev.cacheRead !== atual.cacheRead || prev.cacheWrite !== atual.cacheWrite
+            ) {
+              const delta = {
+                uncachedInput: Math.max(0, atual.uncachedInput - prev.uncachedInput),
+                output: Math.max(0, atual.output - prev.output),
+                cacheRead: Math.max(0, atual.cacheRead - prev.cacheRead),
+                cacheWrite: Math.max(0, atual.cacheWrite - prev.cacheWrite),
+              };
+              antes.usage = atual;
+              rastrearVelocidade(id, delta.output);
+              emitir({ type: 'usage', sessionId: id, model: modelo ?? undefined, ...delta });
+            }
+          }
+        }
+      };
+
+      return {
+        catalogo,
+        /** Subscreve sessões e workspaces; devolve SEMPRE a função de libertação. */
+        assinar(emitir) {
+          if (typeof emitir !== 'function') return null;
+          const soltas = [];
+          difs(emitir); /* vislumbre imediato do que já existe */
+          ligarWorkspaces(emitir);
+          if (typeof list.subscribe === 'function') {
+            try {
+              const soltar = list.subscribe(() => {
+                difs(emitir);
+                ligarWorkspaces(emitir); /* religa se o serviço de workspaces apareceu/mudou */
+              });
+              if (typeof soltar === 'function') soltas.push(soltar);
+            } catch { /* sem subscrição: fica o vislumbre inicial */ }
+          }
+          /* ligação tardia: o serviço de workspaces pode ativar depois do plugin */
+          let relogio = null;
+          if (wsList === null && intervaloWs > 0 && typeof setInterval === 'function') {
+            let tentativas = 0;
+            relogio = setInterval(() => {
+              tentativas += 1;
+              if (ligarWorkspaces(emitir) || tentativas >= 60) {
+                clearInterval(relogio);
+                relogio = null;
+              }
+            }, intervaloWs);
+            relogio?.unref?.(); /* Node: não segura o processo (no browser é um número) */
+          }
+          return () => {
+            for (const soltar of soltas.splice(0)) { try { soltar(); } catch { /* já solto */ } }
+            if (relogio !== null) { clearInterval(relogio); relogio = null; }
+            if (wsSoltar) { try { wsSoltar(); } catch { /* já solto */ } }
+            wsSoltar = null;
+            wsList = null;
+          };
+        },
+        velocidadeDe(id) {
+          const reg = velocidades.get(String(id));
+          return reg && reg.v >= 1 ? Math.round(reg.v) : null;
+        },
+      };
+    }
+
+    /* ================================================================
+     * 1. Associação nome+estilo por sessão
      * ================================================================ */
 
     // Persistência simples no cliente (localStorage): a identidade de uma
-    // sessão é gerada uma única vez e não muda entre renders.
+    // sessão é gerada uma única vez e não muda entre renders nem recargas.
     const CLAVE_ASSOC = 'dsh-work-game:assoc';
 
-    // Banco de nomes neutros (sem apelidos nem dados pessoais).
+    // Nomes curtos das pessoas — os mesmos da demo (data.js): cabem na ficha.
+    // O título da conversa do DSH vai para o tooltip e para o inspetor.
     const NOMES = [
-      'Ada', 'Bruno', 'Carla', 'Dino', 'Elsa', 'Félix', 'Greta', 'Hugo',
-      'Iris', 'Júlio', 'Kira', 'Lino', 'Mara', 'Nuno', 'Olga', 'Pedro',
-      'Rita', 'Sofia', 'Tino', 'Vera', 'Yuki', 'Zane',
+      'Lia', 'Rui', 'Bia', 'Tom', 'Maya', 'Alex', 'Nara', 'Caio',
+      'Iris', 'Otto', 'Davi', 'Léo', 'Nina', 'Ivo', 'Zoe', 'Ravi',
+      'Cleo', 'Théo', 'Lila', 'Enzo', 'Mila', 'Téo', 'Lara', 'Gael',
+      'Sofia', 'Ruan', 'Dara', 'Noa', 'Yara', 'Iuri', 'Levi', 'Mel',
+      'Tati', 'Vitor', 'Ari', 'Bel', 'Cauã', 'Duda', 'Ely', 'Fábio',
+      'Gil', 'Hana', 'Iara', 'Júlia', 'Kai', 'Luan', 'Manu', 'Nilo',
     ];
-
-    // Bustos Avataaars REAIS (identidades nomeadas da demo, MIT — ver
-    // THIRD_PARTY_NOTICES.md) embutidos como SVG ANINHADO: renderizam em
-    // qualquer browser, sem data: URIs nem referências externas.
-    const AVATARS = {
-      rui: { vb: '0 0 264 280', corpo: `<desc>Created with getavataaars.com</desc><defs><circle id="react-path-1060401" cx="120" cy="120" r="120"></circle><path d="M12,160 C12,226.27417 65.72583,280 132,280 C198.27417,280 252,226.27417 252,160 L264,160 L264,-1.42108547e-14 L-3.19744231e-14,-1.42108547e-14 L-3.19744231e-14,160 L12,160 Z" id="react-path-1060402"></path><path d="M124,144.610951 L124,163 L128,163 L128,163 C167.764502,163 200,195.235498 200,235 L200,244 L0,244 L0,235 C-4.86974701e-15,195.235498 32.235498,163 72,163 L72,163 L76,163 L76,144.610951 C58.7626345,136.422372 46.3722246,119.687011 44.3051388,99.8812385 C38.4803105,99.0577866 34,94.0521096 34,88 L34,74 C34,68.0540074 38.3245733,63.1180731 44,62.1659169 L44,56 L44,56 C44,25.072054 69.072054,5.68137151e-15 100,0 L100,0 L100,0 C130.927946,-5.68137151e-15 156,25.072054 156,56 L156,62.1659169 C161.675427,63.1180731 166,68.0540074 166,74 L166,88 C166,94.0521096 161.51969,99.0577866 155.694861,99.8812385 C153.627775,119.687011 141.237365,136.422372 124,144.610951 Z" id="react-path-1060403"></path></defs><g id="Avataaar" stroke="none" stroke-width="1" fill="none" fill-rule="evenodd"><g transform="translate(-825.000000, -1100.000000)" id="Avataaar/Circle"><g transform="translate(825.000000, 1100.000000)"><g id="Mask"></g><g id="Avataaar" stroke-width="1" fill-rule="evenodd" mask="url(#react-mask-1060405)"><g id="Body" transform="translate(32.000000, 36.000000)"><mask id="react-mask-1060406" fill="white"><use xlink:href="#react-path-1060403"></use></mask><use fill="#D0C6AC" xlink:href="#react-path-1060403"></use><g id="Skin/👶🏽-03-Brown" mask="url(#react-mask-1060406)" fill="#EDB98A"><g transform="translate(0.000000, 0.000000)" id="Color"><rect x="0" y="0" width="264" height="280"></rect></g></g><path d="M156,79 L156,102 C156,132.927946 130.927946,158 100,158 C69.072054,158 44,132.927946 44,102 L44,79 L44,94 C44,124.927946 69.072054,150 100,150 C130.927946,150 156,124.927946 156,94 L156,79 Z" id="Neck-Shadow" fill-opacity="0.100000001" fill="#000000" mask="url(#react-mask-1060406)"></path></g><g id="Clothing/Hoodie" transform="translate(0.000000, 170.000000)"><defs><path d="M108,13.0708856 C90.0813006,15.075938 76.2798424,20.5518341 76.004203,34.6449676 C50.1464329,45.5680933 32,71.1646257 32,100.999485 L32,100.999485 L32,110 L232,110 L232,100.999485 C232,71.1646257 213.853567,45.5680933 187.995797,34.6449832 C187.720158,20.5518341 173.918699,15.075938 156,13.0708856 L156,32 L156,32 C156,45.254834 145.254834,56 132,56 L132,56 C118.745166,56 108,45.254834 108,32 L108,13.0708856 Z" id="react-path-1060407"></path></defs><mask id="react-mask-1060408" fill="white"><use xlink:href="#react-path-1060407"></use></mask><use id="Hoodie" fill="#B7C1DB" fill-rule="evenodd" xlink:href="#react-path-1060407"></use><g id="Color/Palette/Gray-01" mask="url(#react-mask-1060408)" fill-rule="evenodd" fill="#262E33"><rect id="🖍Color" x="0" y="0" width="264" height="110"></rect></g><path d="M102,61.7390531 L102,110 L95,110 L95,58.1502625 C97.2037542,59.4600576 99.5467694,60.6607878 102,61.7390531 Z M169,58.1502625 L169,98.5 C169,100.432997 167.432997,102 165.5,102 C163.567003,102 162,100.432997 162,98.5 L162,61.7390531 C164.453231,60.6607878 166.796246,59.4600576 169,58.1502625 Z" id="Straps" fill="#F4F4F4" fill-rule="evenodd" mask="url(#react-mask-1060408)"></path><path d="M90.9601329,12.7243537 C75.9093095,15.5711782 65.5,21.2428847 65.5,32.3076923 C65.5,52.0200095 98.5376807,68 132,68 C165.462319,68 198.5,52.0200095 198.5,32.3076923 C198.5,21.2428847 188.09069,15.5711782 173.039867,12.7243537 C182.124921,16.0744598 188,21.7060546 188,31.0769231 C188,51.4689754 160.178795,68 132,68 C103.821205,68 76,51.4689754 76,31.0769231 C76,21.7060546 81.8750795,16.0744598 90.9601329,12.7243537 Z" id="Shadow" fill-opacity="0.16" fill="#000000" fill-rule="evenodd" mask="url(#react-mask-1060408)"></path></g><g id="Face" transform="translate(76.000000, 82.000000)" fill="#000000"><g id="Mouth/Smile" transform="translate(2.000000, 52.000000)"><defs><path d="M35.117844,15.1280772 C36.1757121,24.6198025 44.2259873,32 54,32 C63.8042055,32 71.8740075,24.574136 72.8917593,15.0400546 C72.9736685,14.272746 72.1167429,13 71.042767,13 C56.1487536,13 44.7379213,13 37.0868244,13 C36.0066168,13 35.0120058,14.1784435 35.117844,15.1280772 Z" id="react-path-1060409"></path></defs><mask id="react-mask-1060410" fill="white"><use xlink:href="#react-path-1060409"></use></mask><use id="Mouth" fill-opacity="0.699999988" fill="#000000" fill-rule="evenodd" xlink:href="#react-path-1060409"></use><rect id="Teeth" fill="#FFFFFF" fill-rule="evenodd" mask="url(#react-mask-1060410)" x="39" y="2" width="31" height="16" rx="5"></rect><g id="Tongue" stroke-width="1" fill-rule="evenodd" mask="url(#react-mask-1060410)" fill="#FF4F6D"><g transform="translate(38.000000, 24.000000)"><circle cx="11" cy="11" r="11"></circle><circle cx="21" cy="11" r="11"></circle></g></g></g><g id="Nose/Default" transform="translate(28.000000, 40.000000)" fill-opacity="0.16"><path d="M16,8 C16,12.418278 21.372583,16 28,16 L28,16 C34.627417,16 40,12.418278 40,8" id="Nose"></path></g><g id="Eyes/Default-😀" transform="translate(0.000000, 8.000000)" fill-opacity="0.599999964"><circle id="Eye" cx="30" cy="22" r="6"></circle><circle id="Eye" cx="82" cy="22" r="6"></circle></g><g id="Eyebrow/Natural/Default-Natural" fill-opacity="0.599999964"><path d="M26.0390934,6.21012364 C20.2775554,6.98346216 11.2929313,12.0052479 12.04426,17.8178111 C12.0689481,18.0080543 12.3567302,18.0673468 12.4809077,17.9084937 C14.9674041,14.7203351 34.1927973,10.0365481 41.1942673,11.0147151 C41.8350523,11.1044465 42.2580662,10.4430343 41.8210501,10.0302067 C38.0765663,6.49485426 31.2003792,5.51224825 26.0390934,6.21012364" id="Eyebrow" transform="translate(27.000000, 12.000000) rotate(5.000000) translate(-27.000000, -12.000000) "></path><path d="M85.0390934,6.21012364 C79.2775554,6.98346216 70.2929313,12.0052479 71.04426,17.8178111 C71.0689481,18.0080543 71.3567302,18.0673468 71.4809077,17.9084937 C73.9674041,14.7203351 93.1927973,10.0365481 100.194267,11.0147151 C100.835052,11.1044465 101.258066,10.4430343 100.82105,10.0302067 C97.0765663,6.49485426 90.2003792,5.51224825 85.0390934,6.21012364" id="Eyebrow" transform="translate(86.000000, 12.000000) scale(-1, 1) rotate(5.000000) translate(-86.000000, -12.000000) "></path></g></g><g id="Top" stroke-width="1" fill-rule="evenodd"><defs><rect id="react-path-1060415" x="0" y="0" width="264" height="280"></rect><path d="M94.2519269,52.0221149 C94.3749353,51.9677149 94.0696712,51.9468149 93.3361345,51.9595149 C94.2276637,51.9577149 94.5329279,51.9785149 94.2519269,52.0221149 M86.1169775,36.3015924 C86.1148422,36.2819924 86.1337548,36.4526924 86.1169775,36.3015924 M193.765056,70.7656665 C193.500946,67.448734 193.03295,64.1518864 192.246676,60.9110823 C191.622233,58.3353492 190.769007,55.8775343 189.760006,53.4200433 C189.150703,51.9353766 187.727538,49.8961062 187.560324,48.2944933 C187.395466,46.7168527 188.626521,44.969138 188.889285,43.1323368 C189.144311,41.3447761 189.100909,39.4652134 188.734183,37.6938503 C187.901144,33.6710288 185.140271,29.9300447 180.877167,28.8814158 C179.925362,28.6471994 177.913417,28.9358396 177.240862,28.3815597 C176.469729,27.7459682 175.932761,25.5806808 175.234637,24.7121687 C173.244224,22.2362125 170.13984,20.6417265 166.865887,21.1976261 C164.454917,21.606776 165.839391,22.1053363 164.032005,20.6864317 C163.027041,19.8976114 162.276095,18.6931622 161.300066,17.8392279 C159.832826,16.5563826 158.149588,15.4581893 156.408146,14.556958 C151.851325,12.19892 146.654249,10.4848961 141.564162,9.64942693 C132.278934,8.12523827 122.368926,9.45408458 113.368668,11.8688141 C108.890239,13.0703477 104.381531,14.5951842 100.222053,16.6117782 C98.4385542,17.4764029 97.4090304,18.1936301 95.5494951,18.4200717 C92.6207355,18.7767416 90.1404579,18.7589243 87.3661268,20.0009517 C78.8298269,23.8229236 74.9849256,32.6897818 78.3066539,41.1750259 C78.974835,42.8815988 79.8795374,44.3801954 81.1267416,45.7586062 C82.6474761,47.4392631 83.1975648,47.1085093 81.8877817,49.0411999 C79.9289949,51.9311653 78.2777195,55.0129095 76.9332826,58.2128958 C73.4043038,66.6145606 72.8138416,76.0771643 73.043634,85.0373203 C73.1240445,88.1741362 73.2586228,91.3495022 73.753198,94.4561907 C73.966841,95.8009106 74.0267283,98.3293468 75.0353925,99.3271154 C75.5471264,99.8331265 76.2762042,100.115288 77.0035997,99.9137903 C78.7130802,99.4401742 78.1253096,98.1787097 78.1650102,97.0076274 C78.364859,91.1240324 78.0950295,85.9191145 79.4943071,80.1064647 C80.5278683,75.8118486 82.2504702,71.9114806 84.4827873,68.0713675 C87.3213795,63.1871608 90.3857268,58.8977279 94.2895061,54.7155226 C95.2073299,53.7320079 95.4078515,53.3150832 96.6385698,53.243814 C97.5705244,53.1900382 98.9338023,53.8282213 99.8398505,54.0491558 C101.837665,54.5360539 103.83918,55.0174448 105.873331,55.3452831 C109.613261,55.9481556 113.316519,55.9886494 117.090094,55.8704074 C124.516459,55.6381346 131.974787,55.1172217 139.175061,53.2470535 C143.956964,52.00535 148.196516,49.7762443 152.776887,48.1422364 C152.858644,48.1130808 154.006596,47.2951049 154.207791,47.3284719 C154.488723,47.3747968 156.184746,49.1542588 156.471061,49.3784327 C158.696649,51.1238798 161.137899,51.8566566 163.541467,53.2081794 C166.504881,54.8745825 163.634999,52.4899804 165.269452,54.5668292 C165.745859,55.1716454 165.989782,56.2931632 166.371984,56.9783192 C167.587899,59.1610999 169.279548,61.0795367 171.302932,62.6017816 C173.258018,64.0725184 176.196198,64.7829426 177.193087,66.697168 C177.961865,68.1740599 178.220929,70.1812592 178.841334,71.7579279 C180.468722,75.8931602 182.617937,79.7494709 184.767152,83.6443317 C186.498502,86.7830913 188.392354,89.5250111 188.584801,93.1117947 C188.651754,94.3603012 187.463764,101.849397 190.357534,99.5716982 C190.786502,99.2341415 191.711391,95.415733 191.901483,94.7678314 C192.672616,92.135083 192.94682,89.3866841 193.29605,86.6816947 C193.990474,81.3021672 194.218584,76.1837441 193.765056,70.7656665" id="react-path-1060414"></path><filter x="-0.8%" y="-2.0%" width="101.5%" height="108.0%" filterUnits="objectBoundingBox" id="react-filter-1060411"><feOffset dx="0" dy="2" in="SourceAlpha" result="shadowOffsetOuter1"></feOffset><feColorMatrix values="0 0 0 0 0   0 0 0 0 0   0 0 0 0 0  0 0 0 0.16 0" type="matrix" in="shadowOffsetOuter1" result="shadowMatrixOuter1"></feColorMatrix><feMerge><feMergeNode in="shadowMatrixOuter1"></feMergeNode><feMergeNode in="SourceGraphic"></feMergeNode></feMerge></filter></defs><mask id="react-mask-1060413" fill="white"><use xlink:href="#react-path-1060415"></use></mask><g id="Mask"></g><g id="Top/Short-Hair/Short-Curly" mask="url(#react-mask-1060413)"><g transform="translate(-1.000000, 0.000000)"><g id="Facial-Hair/Beard-Medium" transform="translate(49.000000, 72.000000)"><defs><path d="M105.017591,94.1296214 C101.150441,99.7213834 98.257542,95.9467308 94.1374777,92.8762163 C91.6567227,91.0272796 87.9608129,88.7275108 84.5044337,88.8410391 C81.0477114,88.7275108 77.3518016,91.0272796 74.8710466,92.8762163 C70.7509822,95.9467308 67.8580835,99.7213834 63.9909333,94.1296214 C61.0884259,89.9323547 62.3028943,82.8739117 65.014944,78.9027173 C68.8738581,73.2512381 74.1088724,75.9847769 79.9622738,75.3400279 C81.5538829,75.1648137 83.1526985,74.7228407 84.5044337,74 C85.856169,74.7228407 87.4546414,75.1648137 89.0462504,75.3400279 C94.899995,75.9847769 100.134666,73.2512381 103.993923,78.9027173 C106.70563,82.8739117 107.920098,89.9323547 105.017591,94.1296214 M140.39109,26 C136.966521,40.0748212 135.393023,54.4337754 132.909944,68.6711471 C132.392536,71.6390145 131.826063,74.5963095 131.224594,77.5496398 C131.098329,78.1697764 130.973781,80.4725746 130.362704,80.7643064 C128.511632,81.6484223 124.739149,76.9466834 123.730409,75.8851496 C121.196893,73.219256 118.684993,70.5292442 115.599415,68.437233 C109.364783,64.2102603 102.065485,61.7108818 94.4700836,61.117837 C91.2922091,60.8693859 86.9951134,61.3025234 84.000116,63.1104016 C81.0051185,61.3025234 76.7080229,60.8693859 73.5298053,61.117837 C65.9344039,61.7108818 58.6351055,64.2102603 52.4004739,68.437233 C49.3148957,70.5292442 46.8033387,73.219256 44.2694796,75.8851496 C43.2607395,76.9466834 39.4882573,81.6484223 37.6371849,80.7643064 C37.0261079,80.4725746 36.9015594,78.1697764 36.7752954,77.5496398 C36.1738255,74.5963095 35.6073527,71.6390145 35.0899445,68.6711471 C32.6072086,54.4337754 31.0337113,40.0748212 27.6091415,26 C26.6127533,26 25.7385119,44.7478165 25.6273446,46.4945731 C25.174784,53.5889755 24.6463963,60.5254529 25.3216346,67.6261326 C26.485803,79.8749043 27.6993791,95.2339402 37.032627,104.58753 C45.4659003,113.039493 57.7103052,114.806417 68.2713185,120.141327 C69.631059,120.828202 71.4347824,121.676306 73.3798667,122.37111 C75.4289129,123.934171 79.4926946,125 84.1740722,125 C89.0846465,125 93.3155222,123.827456 95.2540874,122.137856 C96.9548781,121.49261 98.5180822,120.752874 99.7285704,120.141327 C110.288776,114.805245 122.533989,113.039493 130.967262,104.58753 C140.30051,95.2339402 141.514086,79.8749043 142.678597,67.6261326 C143.353493,60.5254529 142.825105,53.5889755 142.372887,46.4945731 C142.261377,44.7478165 141.387136,26 140.39109,26 Z" id="react-path-1060417"></path></defs><mask id="react-mask-1060416" fill="white"><use xlink:href="#react-path-1060417"></use></mask><use id="Beardness" fill="#252E32" fill-rule="evenodd" xlink:href="#react-path-1060417"></use><g id="Color/Hair/Brown" mask="url(#react-mask-1060416)" fill="#2C1B18"><g transform="translate(-32.000000, 0.000000)" id="Color"><rect x="0" y="0" width="264" height="244"></rect></g></g></g><mask id="react-mask-1060412" fill="white"><use xlink:href="#react-path-1060414"></use></mask><use id="Short-Hair" stroke="none" fill="#28354B" fill-rule="evenodd" xlink:href="#react-path-1060414"></use><g id="Skin/👶🏽-03-Brown" mask="url(#react-mask-1060412)" fill="#2C1B18"><g transform="translate(0.000000, 0.000000) " id="Color"><rect x="0" y="0" width="264" height="280"></rect></g></g><g id="Top/_Resources/Prescription-02" fill="none" transform="translate(62.000000, 85.000000)" stroke-width="1"><defs><filter x="-0.8%" y="-2.4%" width="101.5%" height="109.8%" filterUnits="objectBoundingBox" id="react-filter-1060418"><feOffset dx="0" dy="2" in="SourceAlpha" result="shadowOffsetOuter1"></feOffset><feColorMatrix values="0 0 0 0 0   0 0 0 0 0   0 0 0 0 0  0 0 0 0.2 0" type="matrix" in="shadowOffsetOuter1" result="shadowMatrixOuter1"></feColorMatrix><feMerge><feMergeNode in="shadowMatrixOuter1"></feMergeNode><feMergeNode in="SourceGraphic"></feMergeNode></feMerge></filter></defs><g id="Wayfarers" filter="url(#react-filter-1060418)" transform="translate(6.000000, 7.000000)" fill="#252C2F"><path d="M34,41 L31.2421498,41 C17.3147125,41 9,33.3359286 9,20.5 C9,10.127 10.8170058,0 32.5299306,0 L35.4700694,0 C57.1829942,0 59,10.127 59,20.5 C59,32.5686429 48.7212748,41 34,41 Z M32.3853606,6 C13,6 13,12.8410159 13,21.5015498 C13,28.5719428 16.116254,37 30.9709365,37 L34,37 C46.3649085,37 55,30.6270373 55,21.5015498 C55,12.8410159 55,6 35.6146394,6 L32.3853606,6 Z" id="Left" fill-rule="nonzero"></path><path d="M96,41 L93.2421498,41 C79.3147125,41 71,33.3359286 71,20.5 C71,10.127 72.8170058,0 94.5299306,0 L97.4700694,0 C119.182994,0 121,10.127 121,20.5 C121,32.5686429 110.721275,41 96,41 Z M94.3853606,6 C75,6 75,12.8410159 75,21.5015498 C75,28.5719428 78.1194833,37 92.9709365,37 L96,37 C108.364909,37 117,30.6270373 117,21.5015498 C117,12.8410159 117,6 97.6146394,6 L94.3853606,6 Z" id="Right" fill-rule="nonzero"></path><path d="M2.95454545,5.77156439 C3.64590909,5.09629136 11.2095455,0 32.5,0 C50.3513636,0 54.1302273,1.85267217 59.8502273,4.6518809 L60.2689233,4.85850899 C60.6666014,4.99901896 62.7002447,5.68982981 65.0790606,5.76579519 C67.2462948,5.67278567 69.1000195,5.08540191 69.641698,4.89719767 C76.1703915,1.7220864 82.5610971,0 97.5,0 C118.790455,0 126.354091,5.09629136 127.045455,5.77156439 C128.679318,5.77156439 130,7.06150904 130,8.65734659 L130,11.5431288 C130,13.1389663 128.679318,14.428911 127.045455,14.428911 C127.045455,14.428911 120.143997,14.428911 120.143997,17.3146932 C120.143997,20.2004754 118.181818,13.1389663 118.181818,11.5431288 L118.181818,8.73240251 C114.578575,7.35340151 108.128411,4.78617535 97.5,4.78617535 C85.6584651,4.78617535 79.7610984,6.88602813 74.7022935,8.97112368 L74.7588636,9.10752861 L74.7563667,11.0937608 L72.5391666,16.4436339 L69.8004908,15.3608351 C69.5558969,15.2641292 69.0281396,15.090392 68.2963505,14.9099044 C66.256272,14.4067419 64.1589087,14.253569 62.3040836,14.6343084 C61.6235903,14.7739931 60.9922286,14.9836085 60.4128127,15.266732 L57.7704824,16.5578701 L55.1266751,11.3962031 L55.2440909,9.10175705 L55.3248203,8.90683855 C50.9620526,6.87386374 46.9392639,4.78617535 32.5,4.78617535 C21.8721459,4.78617535 15.422131,7.3524397 11.8181818,8.7314671 L11.8181818,11.5431288 C11.8181818,13.1389663 8.86363636,20.2004754 8.86363636,17.3146932 C8.86363636,14.428911 2.95454545,14.428911 2.95454545,14.428911 C1.32363636,14.428911 0,13.1389663 0,11.5431288 L0,8.65734659 C0,7.06150904 1.32363636,5.77156439 2.95454545,5.77156439 Z" id="Stuff" fill-rule="nonzero"></path></g></g></g></g></g></g></g></g></g>` },
-      bia: { vb: '0 0 264 280', corpo: `<desc>Created with getavataaars.com</desc><defs><circle id="react-path-1060387" cx="120" cy="120" r="120"></circle><path d="M12,160 C12,226.27417 65.72583,280 132,280 C198.27417,280 252,226.27417 252,160 L264,160 L264,-1.42108547e-14 L-3.19744231e-14,-1.42108547e-14 L-3.19744231e-14,160 L12,160 Z" id="react-path-1060388"></path><path d="M124,144.610951 L124,163 L128,163 L128,163 C167.764502,163 200,195.235498 200,235 L200,244 L0,244 L0,235 C-4.86974701e-15,195.235498 32.235498,163 72,163 L72,163 L76,163 L76,144.610951 C58.7626345,136.422372 46.3722246,119.687011 44.3051388,99.8812385 C38.4803105,99.0577866 34,94.0521096 34,88 L34,74 C34,68.0540074 38.3245733,63.1180731 44,62.1659169 L44,56 L44,56 C44,25.072054 69.072054,5.68137151e-15 100,0 L100,0 L100,0 C130.927946,-5.68137151e-15 156,25.072054 156,56 L156,62.1659169 C161.675427,63.1180731 166,68.0540074 166,74 L166,88 C166,94.0521096 161.51969,99.0577866 155.694861,99.8812385 C153.627775,119.687011 141.237365,136.422372 124,144.610951 Z" id="react-path-1060389"></path></defs><g id="Avataaar" stroke="none" stroke-width="1" fill="none" fill-rule="evenodd"><g transform="translate(-825.000000, -1100.000000)" id="Avataaar/Circle"><g transform="translate(825.000000, 1100.000000)"><g id="Mask"></g><g id="Avataaar" stroke-width="1" fill-rule="evenodd" mask="url(#react-mask-1060391)"><g id="Body" transform="translate(32.000000, 36.000000)"><mask id="react-mask-1060392" fill="white"><use xlink:href="#react-path-1060389"></use></mask><use fill="#D0C6AC" xlink:href="#react-path-1060389"></use><g id="Skin/👶🏽-03-Brown" mask="url(#react-mask-1060392)" fill="#EDB98A"><g transform="translate(0.000000, 0.000000)" id="Color"><rect x="0" y="0" width="264" height="280"></rect></g></g><path d="M156,79 L156,102 C156,132.927946 130.927946,158 100,158 C69.072054,158 44,132.927946 44,102 L44,79 L44,94 C44,124.927946 69.072054,150 100,150 C130.927946,150 156,124.927946 156,94 L156,79 Z" id="Neck-Shadow" fill-opacity="0.100000001" fill="#000000" mask="url(#react-mask-1060392)"></path></g><g id="Clothing/Shirt-Crew-Neck" transform="translate(0.000000, 170.000000)"><defs><path d="M165.960472,29.2949161 C202.936473,32.3249982 232,63.2942856 232,101.051724 L232,110 L32,110 L32,101.051724 C32,62.9525631 61.591985,31.7649812 99.0454063,29.2195264 C99.0152598,29.5931145 99,29.9692272 99,30.3476251 C99,42.2107177 113.998461,51.8276544 132.5,51.8276544 C151.001539,51.8276544 166,42.2107177 166,30.3476251 C166,29.9946691 165.986723,29.6437014 165.960472,29.2949161 Z" id="react-path-1060393"></path></defs><mask id="react-mask-1060394" fill="white"><use xlink:href="#react-path-1060393"></use></mask><use id="Clothes" fill="#E6E6E6" fill-rule="evenodd" xlink:href="#react-path-1060393"></use><g id="Color/Palette/Gray-01" mask="url(#react-mask-1060394)" fill-rule="evenodd" fill="#8357BF"><rect id="🖍Color" x="0" y="0" width="264" height="110"></rect></g><g id="Shadowy" opacity="0.599999964" stroke-width="1" fill-rule="evenodd" mask="url(#react-mask-1060394)" fill-opacity="0.16" fill="#000000"><g transform="translate(92.000000, 4.000000)" id="Hola-👋🏼"><ellipse cx="40.5" cy="27.8476251" rx="39.6351047" ry="26.9138272"></ellipse></g></g></g><g id="Face" transform="translate(76.000000, 82.000000)" fill="#000000"><g id="Mouth/Smile" transform="translate(2.000000, 52.000000)"><defs><path d="M35.117844,15.1280772 C36.1757121,24.6198025 44.2259873,32 54,32 C63.8042055,32 71.8740075,24.574136 72.8917593,15.0400546 C72.9736685,14.272746 72.1167429,13 71.042767,13 C56.1487536,13 44.7379213,13 37.0868244,13 C36.0066168,13 35.0120058,14.1784435 35.117844,15.1280772 Z" id="react-path-1060395"></path></defs><mask id="react-mask-1060396" fill="white"><use xlink:href="#react-path-1060395"></use></mask><use id="Mouth" fill-opacity="0.699999988" fill="#000000" fill-rule="evenodd" xlink:href="#react-path-1060395"></use><rect id="Teeth" fill="#FFFFFF" fill-rule="evenodd" mask="url(#react-mask-1060396)" x="39" y="2" width="31" height="16" rx="5"></rect><g id="Tongue" stroke-width="1" fill-rule="evenodd" mask="url(#react-mask-1060396)" fill="#FF4F6D"><g transform="translate(38.000000, 24.000000)"><circle cx="11" cy="11" r="11"></circle><circle cx="21" cy="11" r="11"></circle></g></g></g><g id="Nose/Default" transform="translate(28.000000, 40.000000)" fill-opacity="0.16"><path d="M16,8 C16,12.418278 21.372583,16 28,16 L28,16 C34.627417,16 40,12.418278 40,8" id="Nose"></path></g><g id="Eyes/Default-😀" transform="translate(0.000000, 8.000000)" fill-opacity="0.599999964"><circle id="Eye" cx="30" cy="22" r="6"></circle><circle id="Eye" cx="82" cy="22" r="6"></circle></g><g id="Eyebrow/Natural/Default-Natural" fill-opacity="0.599999964"><path d="M26.0390934,6.21012364 C20.2775554,6.98346216 11.2929313,12.0052479 12.04426,17.8178111 C12.0689481,18.0080543 12.3567302,18.0673468 12.4809077,17.9084937 C14.9674041,14.7203351 34.1927973,10.0365481 41.1942673,11.0147151 C41.8350523,11.1044465 42.2580662,10.4430343 41.8210501,10.0302067 C38.0765663,6.49485426 31.2003792,5.51224825 26.0390934,6.21012364" id="Eyebrow" transform="translate(27.000000, 12.000000) rotate(5.000000) translate(-27.000000, -12.000000) "></path><path d="M85.0390934,6.21012364 C79.2775554,6.98346216 70.2929313,12.0052479 71.04426,17.8178111 C71.0689481,18.0080543 71.3567302,18.0673468 71.4809077,17.9084937 C73.9674041,14.7203351 93.1927973,10.0365481 100.194267,11.0147151 C100.835052,11.1044465 101.258066,10.4430343 100.82105,10.0302067 C97.0765663,6.49485426 90.2003792,5.51224825 85.0390934,6.21012364" id="Eyebrow" transform="translate(86.000000, 12.000000) scale(-1, 1) rotate(5.000000) translate(-86.000000, -12.000000) "></path></g></g><g id="Top" stroke-width="1" fill-rule="evenodd"><defs><rect id="react-path-1060399" x="0" y="0" width="264" height="280"></rect><path d="M48.7246602,89.2187346 C44.7420117,91.1711421 42,95.2653555 42,100 L42,113 C42,119.018625 46.4308707,124.002364 52.2085808,124.867187 C53.9518066,145.114792 66.4692178,162.282984 84,170.610951 L84,189 L80,189 L80,189 C78.4137385,189 76.8394581,189.051297 75.2787271,189.152323 C70.3620966,186.639548 65.7724391,183.578174 61.590479,180.048925 C57.2814481,181.318646 52.7202934,182 48,182 C21.490332,182 0,160.509668 0,134 C0,119.590902 6.34904132,106.664702 16.4021743,97.866349 C11.1175746,90.6060809 8,81.6671147 8,72 C8,50.160623 23.9112243,32.0375116 44.7738169,28.5905219 C51.0188047,11.8901624 67.1208542,0 86,0 C94.0143172,0 101.528186,2.14267429 108,5.88641659 C114.471814,2.14267429 121.985683,0 130,0 C148.879146,0 164.981195,11.8901624 171.226183,28.5905219 C192.088776,32.0375116 208,50.160623 208,72 C208,81.6671147 204.882425,90.6060809 199.597826,97.866349 C209.650959,106.664702 216,119.590902 216,134 C216,160.509668 194.509668,182 168,182 C163.279707,182 158.718552,181.318646 154.409521,180.048925 C150.227561,183.578174 145.637903,186.639548 140.721273,189.152323 C139.160542,189.051297 137.586262,189 136,189 L136,189 L132,189 L132,170.610951 C149.530782,162.282984 162.048193,145.114792 163.791419,124.867187 C169.569129,124.002364 174,119.018625 174,113 L174,100 C174,95.778427 171.820067,92.0660046 168.524466,89.9269981 C167.450514,89.5343912 166.370126,89.0424011 165.289302,88.4564081 C164.868503,88.3367332 164.43828,88.2394463 164,88.1659169 L164,87.7130302 C155.319369,82.4100235 146.764694,71.1747746 141.449951,56.7992877 C131.312295,58.8351061 119.547256,60 107,60 C95.038684,60 83.7882341,58.9413637 73.9808476,57.0787685 C68.7546917,71.0641476 60.4637821,82.0431875 52,87.4230168 L52,88.1659169 C50.9777341,88.3374206 49.9992949,88.6381729 49.0820602,89.050796 C48.9628927,89.1079465 48.8437566,89.1639284 48.7246602,89.2187346 Z" id="react-path-1060400"></path></defs><mask id="react-mask-1060397" fill="white"><use xlink:href="#react-path-1060399"></use></mask><g id="Mask"></g><g id="Top/Long-Hair/Curly" mask="url(#react-mask-1060397)"><g transform="translate(-1.000000, 0.000000)"><path d="M105.984735,27.7643628 C114.013215,26.6267967 122.796163,26 132,26 C142.358003,26 152.182939,26.7938545 160.999342,28.2161842 C183.451688,38.7497687 199,61.559133 199,88 L199,105.044138 C187.461887,104.672508 173.831239,90.7644306 166.449951,70.7992877 C156.312295,72.8351061 144.547256,74 132,74 C120.038684,74 108.788234,72.9413637 98.9808476,71.0787685 C91.6758772,90.6271291 78.3831001,104.301811 67,105.021902 L67,88 L67,88 C67,61.1745453 83.0039076,38.0870034 105.984735,27.7643628 Z" id="Shadow" fill-opacity="0.16" fill="#000000" fill-rule="evenodd"></path><g id="Hair" stroke-width="1" fill="none" fill-rule="evenodd" transform="translate(25.000000, 10.000000)"><mask id="react-mask-1060398" fill="white"><use xlink:href="#react-path-1060400"></use></mask><use id="Curly!" fill="#314756" xlink:href="#react-path-1060400"></use><g id="Skin/👶🏽-03-Brown" mask="url(#react-mask-1060398)" fill="#724133"><g transform="translate(0.000000, 0.000000) " id="Color"><rect x="0" y="0" width="264" height="280"></rect></g></g></g></g></g></g></g></g></g></g>` },
-      lia: { vb: '0 0 264 280', corpo: `<desc>Created with getavataaars.com</desc><defs><circle id="react-path-1060375" cx="120" cy="120" r="120"></circle><path d="M12,160 C12,226.27417 65.72583,280 132,280 C198.27417,280 252,226.27417 252,160 L264,160 L264,-1.42108547e-14 L-3.19744231e-14,-1.42108547e-14 L-3.19744231e-14,160 L12,160 Z" id="react-path-1060376"></path><path d="M124,144.610951 L124,163 L128,163 L128,163 C167.764502,163 200,195.235498 200,235 L200,244 L0,244 L0,235 C-4.86974701e-15,195.235498 32.235498,163 72,163 L72,163 L76,163 L76,144.610951 C58.7626345,136.422372 46.3722246,119.687011 44.3051388,99.8812385 C38.4803105,99.0577866 34,94.0521096 34,88 L34,74 C34,68.0540074 38.3245733,63.1180731 44,62.1659169 L44,56 L44,56 C44,25.072054 69.072054,5.68137151e-15 100,0 L100,0 L100,0 C130.927946,-5.68137151e-15 156,25.072054 156,56 L156,62.1659169 C161.675427,63.1180731 166,68.0540074 166,74 L166,88 C166,94.0521096 161.51969,99.0577866 155.694861,99.8812385 C153.627775,119.687011 141.237365,136.422372 124,144.610951 Z" id="react-path-1060377"></path></defs><g id="Avataaar" stroke="none" stroke-width="1" fill="none" fill-rule="evenodd"><g transform="translate(-825.000000, -1100.000000)" id="Avataaar/Circle"><g transform="translate(825.000000, 1100.000000)"><g id="Mask"></g><g id="Avataaar" stroke-width="1" fill-rule="evenodd" mask="url(#react-mask-1060379)"><g id="Body" transform="translate(32.000000, 36.000000)"><mask id="react-mask-1060380" fill="white"><use xlink:href="#react-path-1060377"></use></mask><use fill="#D0C6AC" xlink:href="#react-path-1060377"></use><g id="Skin/👶🏽-03-Brown" mask="url(#react-mask-1060380)" fill="#EDB98A"><g transform="translate(0.000000, 0.000000)" id="Color"><rect x="0" y="0" width="264" height="280"></rect></g></g><path d="M156,79 L156,102 C156,132.927946 130.927946,158 100,158 C69.072054,158 44,132.927946 44,102 L44,79 L44,94 C44,124.927946 69.072054,150 100,150 C130.927946,150 156,124.927946 156,94 L156,79 Z" id="Neck-Shadow" fill-opacity="0.100000001" fill="#000000" mask="url(#react-mask-1060380)"></path></g><g id="Clothing/Shirt-Crew-Neck" transform="translate(0.000000, 170.000000)"><defs><path d="M165.960472,29.2949161 C202.936473,32.3249982 232,63.2942856 232,101.051724 L232,110 L32,110 L32,101.051724 C32,62.9525631 61.591985,31.7649812 99.0454063,29.2195264 C99.0152598,29.5931145 99,29.9692272 99,30.3476251 C99,42.2107177 113.998461,51.8276544 132.5,51.8276544 C151.001539,51.8276544 166,42.2107177 166,30.3476251 C166,29.9946691 165.986723,29.6437014 165.960472,29.2949161 Z" id="react-path-1060381"></path></defs><mask id="react-mask-1060382" fill="white"><use xlink:href="#react-path-1060381"></use></mask><use id="Clothes" fill="#E6E6E6" fill-rule="evenodd" xlink:href="#react-path-1060381"></use><g id="Color/Palette/Gray-01" mask="url(#react-mask-1060382)" fill-rule="evenodd" fill="#262E33"><rect id="🖍Color" x="0" y="0" width="264" height="110"></rect></g><g id="Shadowy" opacity="0.599999964" stroke-width="1" fill-rule="evenodd" mask="url(#react-mask-1060382)" fill-opacity="0.16" fill="#000000"><g transform="translate(92.000000, 4.000000)" id="Hola-👋🏼"><ellipse cx="40.5" cy="27.8476251" rx="39.6351047" ry="26.9138272"></ellipse></g></g></g><g id="Face" transform="translate(76.000000, 82.000000)" fill="#000000"><g id="Mouth/Default" transform="translate(2.000000, 52.000000)" fill-opacity="0.699999988"><path d="M40,15 C40,22.7319865 46.2680135,29 54,29 L54,29 C61.7319865,29 68,22.7319865 68,15" id="Mouth"></path></g><g id="Nose/Default" transform="translate(28.000000, 40.000000)" fill-opacity="0.16"><path d="M16,8 C16,12.418278 21.372583,16 28,16 L28,16 C34.627417,16 40,12.418278 40,8" id="Nose"></path></g><g id="Eyes/Default-😀" transform="translate(0.000000, 8.000000)" fill-opacity="0.599999964"><circle id="Eye" cx="30" cy="22" r="6"></circle><circle id="Eye" cx="82" cy="22" r="6"></circle></g><g id="Eyebrow/Natural/Default-Natural" fill-opacity="0.599999964"><path d="M26.0390934,6.21012364 C20.2775554,6.98346216 11.2929313,12.0052479 12.04426,17.8178111 C12.0689481,18.0080543 12.3567302,18.0673468 12.4809077,17.9084937 C14.9674041,14.7203351 34.1927973,10.0365481 41.1942673,11.0147151 C41.8350523,11.1044465 42.2580662,10.4430343 41.8210501,10.0302067 C38.0765663,6.49485426 31.2003792,5.51224825 26.0390934,6.21012364" id="Eyebrow" transform="translate(27.000000, 12.000000) rotate(5.000000) translate(-27.000000, -12.000000) "></path><path d="M85.0390934,6.21012364 C79.2775554,6.98346216 70.2929313,12.0052479 71.04426,17.8178111 C71.0689481,18.0080543 71.3567302,18.0673468 71.4809077,17.9084937 C73.9674041,14.7203351 93.1927973,10.0365481 100.194267,11.0147151 C100.835052,11.1044465 101.258066,10.4430343 100.82105,10.0302067 C97.0765663,6.49485426 90.2003792,5.51224825 85.0390934,6.21012364" id="Eyebrow" transform="translate(86.000000, 12.000000) scale(-1, 1) rotate(5.000000) translate(-86.000000, -12.000000) "></path></g></g><g id="Top" stroke-width="1" fill-rule="evenodd"><defs><rect id="react-path-1060385" x="0" y="0" width="264" height="280"></rect><path d="M162.831093,71.6181521 C162.943003,73.0640672 163,74.5253775 163,76 L163,114 C163,136.339168 149.919579,155.623239 131,164.610951 L131,183 L135,183 C136.524404,183 137.037743,183.047374 138.538625,183.140731 C123.625568,210.496321 119.823733,233.574048 137.47212,247.543277 C139.169858,248.745686 140.396085,249.328761 140.607243,249.428275 C142.980035,250.546232 145.444343,251.76781 148.074296,252.382591 C152.696796,253.463231 158.007057,252.010459 162.630756,251.429524 C164.742591,251.164137 166.847633,251.000636 168.977452,250.993519 C171.542066,250.985014 174.188404,251.078221 176.119408,252.691023 C178.003455,254.264772 177.763079,259.889444 172.244213,262.523872 C176.3432,264.37915 181.25603,260.071171 182.931671,257.34666 C184.398107,254.962171 185.526058,252.378599 186.146081,249.741914 C186.917963,246.458686 186.967717,243.016815 186.363678,239.728032 C185.106048,232.88022 182.187563,226.295538 180.201011,219.605673 C179.468692,217.139607 178.51478,214.440611 178.099366,211.916746 C177.986471,211.23167 177.851996,208.701383 177.957698,208.171998 C178.036425,207.778517 178.016643,207.37549 179.372782,206.996069 C183.288539,205.899634 187.379733,204.063449 190.225486,201.476579 C193.590156,198.418295 195.343925,194.445304 196.758409,190.497133 C198.998525,184.244662 200.281132,177.550111 200.870584,171.057073 C200.99307,169.708269 201.062205,168.361722 201.086383,167.009968 C201.10077,166.193153 201.000862,165.263344 201.094375,164.445141 C201.247433,163.105189 201.039826,163.457881 202.341615,162.571291 C206.599454,159.671476 209.921164,155.448546 212.051783,151.200622 C215.39827,144.528634 215.834064,137.49302 213.117591,130.733555 C210.864687,125.12728 207.291411,119.498616 201.725588,115.887863 C199.588776,114.501568 197.334273,113.244582 195.115337,111.95809 C193.906862,111.257566 191.067703,110.342511 190.209501,109.441341 C189.609259,108.810939 190.56477,105.649382 190.685858,104.583322 C191.213967,99.9353218 190.606132,95.4261763 189.520542,90.8868298 C187.127368,80.8793698 177.487944,64.7382958 173.617944,55.2249863 C170.293437,47.0528435 165.481911,-0.0750473139 108.58669,0.198941193 C51.691468,0.4729297 41.4185991,50.4377258 33.7159879,59.7736698 C25.3512665,69.9121239 16.9074766,89.1763214 22.602684,107.035643 C17.099033,113.95809 4.54481227,124.04369 1.3853513,134.125611 C-0.596804833,140.450807 -0.511883829,147.495621 2.0289526,153.633016 C3.46621561,157.104393 5.52490056,160.250502 7.94045353,163.272162 C10.0566849,165.919435 12.4084972,168.423513 14.4577909,171.110359 C15.6946403,172.732013 16.0263318,173.129312 15.5599656,175.128304 C14.6406208,179.068318 12.7411877,182.853334 11.0939201,186.603116 C8.54189405,192.412639 6.39748885,197.82226 6.0799842,204.016065 C5.77766543,209.912373 7.40435223,226.688671 24.3409972,236.576369 C26.3249517,237.73442 28.2831301,238.743202 30.3833764,239.685161 C29.2931905,236.290327 30.5294405,224.161856 32.7263968,219.653578 C33.2860762,221.204589 34.2369916,222.697108 35.2618383,224.05216 C36.8611506,226.167444 40.636039,231.460774 45.4085994,231.706547 C43.4722007,228.722725 41.3891385,226.708805 40.7853002,223.10864 C44.7616013,225.068753 50.4191385,226.855644 55.0466338,226.691448 C58.4512667,226.570818 63.4709972,224.871405 66.0000446,222.74779 C57.6284322,224.074724 49.679027,221.3155 46.4820009,215.419366 C45.8146217,214.188415 45.3084926,212.898625 45.0141664,211.558847 C44.5967546,209.659309 43.9381673,206.615432 44.8227444,204.862039 C45.0375932,204.436124 45.3893685,204.001198 45.806628,203.572743 C45.7407358,203.49425 45.6753213,203.415537 45.6103845,203.336606 C51.303506,198.550494 58.4494475,190.932516 62.2752482,185.367908 C62.3459243,185.245492 62.416066,185.122857 62.4856702,185 L62.5253504,185 C62.5536953,184.957813 62.5818364,184.915755 62.6097716,184.873828 C67.874859,183.648086 73.3617452,183 79,183 L83,183 L83,164.610951 C64.0804213,155.623239 51,136.339168 51,114 L51,76 L51,76 C51,73.537425 51.1589523,71.1119753 51.4671565,68.733351 C55.4088487,67.4702772 59.365485,66.2776957 63.3986046,65.2045441 C67.8552588,64.0189378 77.7980098,62.0907786 81.6887904,61.1941723 L84.4252449,58.215348 L85.4876566,60.1702128 C87.6456492,60.0042337 99.5663601,58.212708 99.5663601,58.212708 L100.896323,54.9898699 C102.612526,56.7530625 103.834989,57.668872 103.834989,57.668872 C106.391211,57.460454 117.488488,57.2113208 120.119841,57.2427023 C120.119841,57.2427023 127.460212,57.5012269 129.240756,57.5714137 L130.907605,56.9328981 L131.456495,58.0098503 C132.910143,58.601117 141.699367,61.6008734 143.434153,62.138079 L145.980784,61.2323702 C147.100342,63.9256202 149.920119,63.586016 152.257345,65.7132858 C154.760315,67.9915694 159.482831,69.7372554 162.831093,71.6181521 Z" id="react-path-1060386"></path></defs><mask id="react-mask-1060383" fill="white"><use xlink:href="#react-path-1060385"></use></mask><g id="Mask"></g><g id="Top/Long-Hair/Curvy" mask="url(#react-mask-1060383)"><g transform="translate(-1.000000, 0.000000)"><path d="M100.899906,42.4648024 C91.1016204,48.4721303 82.3855283,56.3273858 76.5871222,65.36024 C73.8252914,69.662826 71.5532049,74.1995784 69.4361743,78.7575668 C68.3739624,81.0447336 67.4048638,83.3600237 66.475928,85.6893613 C65.8894735,87.1594817 64.9889112,88.7449062 65.8359233,90.2878445 C66.3526427,89.9857996 66.5492598,90.0943892 66.224362,90.6353417 C68.9162579,91.3693254 72.6583769,89.3003017 74.9906073,88.5362205 C79.7539763,86.9753339 84.5203425,85.5025753 89.3986046,84.2045441 C93.8552588,83.0189378 103.79801,81.0907786 107.68879,80.1941723 L110.425245,77.215348 L111.487657,79.1702128 C113.645649,79.0042337 125.56636,77.212708 125.56636,77.212708 L126.896323,73.9898699 C128.612526,75.7530625 129.834989,76.668872 129.834989,76.668872 C132.391211,76.460454 143.488488,76.2113208 146.119841,76.2427023 C146.119841,76.2427023 153.460212,76.5012269 155.240756,76.5714137 L156.907605,75.9328981 L157.456495,77.0098503 C158.910143,77.601117 167.699367,80.6008734 169.434153,81.138079 L171.980784,80.2323702 C173.100342,82.9256202 175.920119,82.586016 178.257345,84.7132858 C181.34867,87.5271086 187.825645,89.5285179 190.917768,91.9756241 C192.024938,92.8519441 193.059576,93.7675012 194.100208,94.7015404 C195.255933,95.7385867 195.085291,95.890424 195.460742,97.0802141 C195.573237,97.4361731 196.715775,99.2788807 197.202722,99.4296139 C198.935909,99.9660566 187.048767,68.9435732 183.785603,64.9771662 C180.417736,60.8830307 158.574915,33.3231248 129.612057,34.2254634" id="Top-Shadow" fill-opacity="0.16" fill="#000000" fill-rule="evenodd"></path><g id="Hair" stroke-width="1" fill="none" fill-rule="evenodd" transform="translate(26.000000, 16.000000)"><mask id="react-mask-1060384" fill="white"><use xlink:href="#react-path-1060386"></use></mask><use id="Hair-Mask" fill="#361A0A" xlink:href="#react-path-1060386"></use><g id="Skin/👶🏽-03-Brown" mask="url(#react-mask-1060384)" fill="#4A312C"><g transform="translate(0.000000, 0.000000) " id="Color"><rect x="0" y="0" width="264" height="280"></rect></g></g><path d="M62.6794556,184.462132 C69.755442,174.755405 62.148959,147.786913 56.1278159,137.800593 C72.9649824,130.137708 106.213574,131.553467 155.87359,142.047871 C151.079203,150.900348 149.123448,158.803527 150.006324,165.757409 C145.469118,171.332534 141.720304,177.127222 138.759883,183.141474 L103.888915,191.746789 C81.8528509,194.400378 68.1163643,191.97216 62.6794556,184.462132 Z" id="Shadow" fill-opacity="0.24" fill="#000000" mask="url(#react-mask-1060384)"></path></g><path d="M79.0404573,170.094305 C78.9812573,169.892618 78.8354573,169.667152 78.6348573,169.428842 C78.7708573,169.650142 78.9074573,169.871269 79.0404573,170.094305 Z M56.409572,120.375261 C57.2661752,126.5406 58.7356083,132.465374 60.8662263,138.377476 C62.9277086,144.09848 65.285915,149.836145 68.678559,155.067858 C71.8402179,159.943234 75.6031176,164.4923 78.6348973,169.428772 C77.8378388,168.48126 76.1633964,167.329804 75.5207941,166.65115 C74.4643769,165.535276 73.4750971,164.385382 72.5369698,163.193485 C70.6143583,160.749982 68.9003527,158.193833 67.243494,155.609567 C63.9913192,150.536843 61.5529875,145.034363 59.4397533,139.530668 C55.2902133,128.722708 51.1268862,115.61687 54.7738936,104.200899 C54.4921557,104.935095 55.2326668,106.688314 55.3491585,107.497319 C55.5525692,108.91069 55.7349995,110.333608 55.8267142,111.757219 C56.0123415,114.639678 56.0109428,117.505994 56.409572,120.375261 Z M68.8553146,165.041212 C67.4967783,163.309515 64.9739252,161.944396 63.4129772,160.279177 C61.9976938,158.769648 60.9019131,157.07822 59.9070386,155.339754 C57.6517365,151.39922 56.1697151,147.374505 55.6897616,142.969154 C55.7992598,143.49177 56.6083072,144.395543 56.8630702,144.824778 C57.4766993,145.858902 58.0839345,146.89424 58.6508072,147.948671 C59.7481863,149.989667 60.6639345,152.099744 61.7731027,154.135533 C63.8106073,157.875421 66.402796,161.495374 68.8553146,165.041212 Z M73.5320242,183.498629 C74.6465874,185.460651 75.5723262,187.464851 76.1569823,189.60079 C76.4654954,190.727599 76.7138643,191.869508 76.9272658,193.013501 C76.9962017,193.382508 77.0093894,194.709963 77.1846264,195.283955 C74.9700864,190.992812 73.2798587,186.448779 70.6421125,182.34214 C68.0381348,178.288092 64.6948448,174.560527 61.1958996,171.061031 C57.5013364,167.36575 53.7855929,163.879099 51.8038364,159.214262 C50.0788411,155.153619 49.4126608,150.996124 49.8138875,146.658464 C49.8160855,148.56911 51.5706533,151.280256 52.1766896,153.126681 C53.0063178,155.654018 53.6655046,158.231689 54.9143429,160.634229 C57.039566,164.722991 60.873,167.876911 64.0792175,171.321558 C67.631513,175.137643 71.0245567,179.084252 73.5320242,183.498629 Z M59.2286696,174.179456 C60.2874847,175.196917 61.2164205,176.28259 62.0352588,177.454354 C62.9328239,178.738937 63.5914112,180.09017 64.1800637,181.504062 C64.6869921,182.721301 64.9105841,184.986375 65.7074428,186.0021 C63.1288415,182.856337 60.4739112,179.884838 58.6955655,176.312444 C58.0893295,175.089825 57.1480051,173.289222 56.4530516,171.817184 C56.6844363,172.409922 58.7059559,173.677148 59.2286696,174.179456 Z M48.9033745,180.528033 C51.7405353,184.777866 55.450684,188.609052 57.877027,193.056233 C60.7067946,198.242644 61.9518364,203.862978 62.202803,209.595957 C62.3216924,212.307277 62.3152983,215.0606 61.9498383,217.764455 C61.7540204,219.211673 61.4399126,220.650211 61.0810465,222.075732 C60.944973,222.616747 60.2406283,224.002173 60.1037556,224.846586 C59.8140251,214.305575 61.5584024,203.763696 56.0767017,193.942823 C53.4811162,189.292219 49.4912277,185.327212 46.398105,180.924811 C43.6164926,176.966226 40.8998197,173.083838 38.6846803,168.851361 C40.0408188,170.567263 42.485145,171.915893 44.0009349,173.619818 C45.8995688,175.753674 47.3488206,178.199606 48.9033745,180.528033 Z M60.1036574,224.846603 C60.0710574,225.050581 60.0700574,225.224111 60.1172574,225.346603 C60.1116574,225.180112 60.1082574,225.01327 60.1036574,224.846603 Z M50.5604331,202.493815 C50.5610325,202.989874 51.376474,204.011501 51.5992667,204.528562 C52.1207816,205.73799 52.5455864,207.007473 52.7573894,208.289626 C53.1752007,210.818004 52.6269108,213.429521 51.6899823,215.850286 C49.7909489,220.757251 46.8161162,225.102895 43.0767946,229.15 C44.4121524,227.402335 44.9438578,224.56136 45.8833838,222.612182 C46.8478866,220.611106 47.8829238,218.6411 48.7335325,216.600624 C50.652947,211.995842 50.4835046,207.289696 50.5604331,202.493815 Z M41.9174331,221.200893 C42.3180604,220.652936 42.1102537,218.018161 42.3222565,217.328919 C42.714092,216.055618 43.3920613,214.827097 44.170737,213.693866 C43.7551236,214.392828 44.3691524,216.160106 44.1663411,217.067177 C43.8338504,218.55553 42.9962296,219.998582 41.9174331,221.200893 Z M99.6077106,42.748374 C99.5269106,42.804974 99.4471106,42.908174 99.3681106,43.044574 C99.4481106,42.945974 99.5267106,42.846574 99.6077106,42.748374 Z M84.8469387,64.3317143 C86.2672175,63.085837 87.0237138,60.1410677 88.0032026,58.5522183 C89.1283559,56.7269681 90.4213532,54.9730547 91.6476125,53.1960567 C94.0795502,49.6719145 96.3744154,46.2123399 99.3680307,43.0054816 C98.7464089,43.9398028 98.1949219,46.7736616 97.8536394,47.5189663 C96.9620688,49.4667561 95.8988578,51.3334892 94.6328355,53.1235049 C91.7722965,57.1680066 88.7029517,60.9266404 84.8469387,64.3317143 Z M84.3117165,54.1218036 C85.0620186,52.7952168 86.2055548,51.6739619 87.4917584,50.7082248 C86.9188913,51.2107066 86.6607314,53.2831189 86.2670976,53.9831221 C85.472237,55.3952784 84.3143141,56.6130375 83.0714703,57.7545999 C83.7352528,57.1726235 83.842553,54.9516363 84.3117165,54.1218036 Z M203.505599,152.127968 C203.498805,152.179518 203.485417,152.282271 203.464637,152.438483 C203.462638,150.913159 202.784469,149.237352 202.704144,147.668984 C202.592048,145.478545 202.906556,143.353715 203.787137,141.277137 C205.526519,137.175704 208.790083,134.069516 212.950612,131.638511 C211.805877,132.313173 210.683921,134.851617 209.949604,135.906916 C208.84663,137.493162 207.668126,139.094161 206.735993,140.757819 C204.793001,144.225725 204.229725,148.375062 203.505599,152.127968 Z M201.998401,130.481881 C201.761221,131.706583 201.448912,132.921738 201.009121,134.107908 C200.534762,135.386937 199.915938,136.630558 199.22578,137.835993 C198.79578,138.586852 197.246621,140.162684 197.24762,140.993211 C197.165296,136.095098 198.975812,131.657983 202.419809,127.7355 C202.04236,128.392806 202.137271,129.766083 201.998401,130.481881 Z M201.196906,165.719988 C204.852905,165.202752 208.302496,166.981313 210.618342,169.271033 C211.855791,170.494694 212.955568,171.900428 213.683091,173.404055 C214.229783,174.534509 214.228783,176.387356 214.9631,177.323587 C213.165772,174.905078 210.886892,172.951214 208.638584,170.859535 C207.075238,169.404855 203.950944,165.678852 201.196906,165.719988 Z M200.41897,176.096698 C200.227148,176.031957 198.485169,175.539368 198.081944,175.776984 C198.679388,175.510035 199.412106,175.184941 200.068895,175.097983 C204.35311,174.529024 209.561066,178.239232 210.13633,181.81909 C209.657576,180.592826 207.111145,179.578489 205.959616,178.968568 C204.136711,178.002484 202.395531,176.832456 200.41897,176.096698 Z M202.227687,183.908269 C202.969797,184.089822 204.54713,185.083504 205.275252,185.072742 C202.345977,185.143906 199.703236,184.81829 196.883858,184.158729 C197.036117,184.200212 198.643022,183.702937 198.694974,183.695647 C199.910043,183.523987 201.052381,183.620492 202.227687,183.908269 Z M190.882541,197.765243 C195.171151,197.522941 200.218656,198.149351 204.314046,199.181739 C206.346955,199.694288 208.253382,200.468058 210.006351,201.476666 C211.420436,202.290531 213.935896,203.408661 214.881616,204.614097 C211.142494,198.162369 203.032039,194.811448 194.722769,196.473197 C193.615199,196.695886 191.914181,197.749796 190.882541,197.765243 Z M189.923153,210.197773 C192.611453,209.233424 195.584487,208.30431 198.505969,208.169273 C201.277391,208.042395 204.351332,208.458613 206.915546,209.342078 C206.033367,209.102206 203.92333,209.674289 202.995793,209.779298 C201.699199,209.926138 200.399608,210.077837 199.099817,210.196558 C197.506299,210.342009 195.898395,210.422718 194.298883,210.41942 C193.159543,210.41699 190.979371,209.87858 189.923153,210.197773 Z M179.458947,227.410508 C179.711912,231.383499 182.010574,234.84533 185.39043,237.491388 C188.973097,240.296087 193.769036,241.572686 196.369816,245.319691 C197.637437,247.145462 198.312809,249.270812 198.20431,251.417686 C198.148362,252.524014 197.870221,253.636069 197.5695,254.712196 C197.371684,255.420184 196.66734,256.580144 196.667939,257.270775 C196.69911,253.384221 196.751661,248.859281 194.031592,245.598095 C191.300932,242.324066 186.539161,241.170701 183.203065,238.482813 C179.924714,235.841442 177.437828,232.389157 176.877749,228.498264 C176.425569,225.354411 176.648562,219.871892 179.90773,217.738557 C179.246345,218.128392 179.377224,220.111764 179.361438,220.669267 C179.298097,222.900321 179.317079,225.185182 179.458947,227.410508 Z M177.005789,242.672904 C177.402221,243.19257 179.575399,243.82436 180.213805,244.182606 C181.67045,245.000116 183.07914,245.92923 184.234665,247.059684 C186.55111,249.326146 188.044121,252.504886 188.151821,255.553623 C188.151821,254.833139 186.505553,253.096583 186.043183,252.481107 C185.275297,251.458613 184.407904,250.511969 183.524526,249.564283 C181.371329,247.253734 179.135209,244.999942 177.005789,242.672904 Z M229.167807,153.791051 C230.371887,154.841663 231.178936,156.147595 231.842519,157.49987 C233.373295,160.619424 233.65823,164.217333 232.431571,167.500388 C232.634582,166.795698 232.030544,165.31585 231.860502,164.601614 C231.488248,163.038626 230.906389,161.56225 230.298355,160.059664 C229.118053,157.144401 228.163741,154.41208 226.113648,151.858014 C226.644354,152.52556 228.442481,153.157872 229.167807,153.791051 Z M171.509602,41.9832998 C171.510002,42.3148163 172.426549,43.2758671 172.633357,43.6374111 C173.149677,44.5392749 173.557297,45.4857459 173.696967,46.4924453 C173.85542,47.6336606 173.6616,48.7505762 173.315522,49.8605491 C173.109914,50.5202844 172.131624,51.7949741 172.132423,52.3894475 C171.972572,48.891167 171.198691,45.5298324 171.509602,41.9832998 Z M179.146978,48.8048339 C179.312224,50.0477605 178.906202,51.4491555 178.183074,52.546805 C178.314952,52.2364639 177.729296,50.1642252 177.710314,49.7849773 C177.650969,48.6118253 177.77925,47.4056953 177.856378,46.2332376 C177.857178,46.8738803 179.039478,47.9958294 179.146978,48.8048339 Z M118.377388,50.3732542 C117.142336,51.8857333 115.738043,53.3032702 114.227248,54.6164922 C113.2036,55.5060327 111.243024,56.5057893 110.46315,57.5267214 C113.964293,51.8147436 118.00913,46.8878178 122.764906,41.8951095 C122.049172,42.8155452 121.862346,44.8121078 121.337434,45.8885819 C120.563354,47.4758692 119.527518,48.9645693 118.377388,50.3732542 Z M124.275361,52.8515919 C124.845431,52.5155626 125.378934,50.859195 125.81333,50.3013446 C126.54465,49.3623371 127.437619,48.4554398 128.390733,47.6728177 C128.186123,47.8927295 127.788693,49.7158968 127.5657,50.0739694 C126.843372,51.2344508 125.56616,52.1809219 124.275361,52.8515919 Z" id="Lights" fill-opacity="0.6" fill="#FFFFFF" fill-rule="evenodd"></path></g></g></g></g></g></g></g>` },
-      pesquisa: { vb: '0 0 264 280', corpo: `<desc>Created with getavataaars.com</desc><defs><circle id="react-path-1067074" cx="120" cy="120" r="120"></circle><path d="M12,160 C12,226.27417 65.72583,280 132,280 C198.27417,280 252,226.27417 252,160 L264,160 L264,-1.42108547e-14 L-3.19744231e-14,-1.42108547e-14 L-3.19744231e-14,160 L12,160 Z" id="react-path-1067075"></path><path d="M124,144.610951 L124,163 L128,163 L128,163 C167.764502,163 200,195.235498 200,235 L200,244 L0,244 L0,235 C-4.86974701e-15,195.235498 32.235498,163 72,163 L72,163 L76,163 L76,144.610951 C58.7626345,136.422372 46.3722246,119.687011 44.3051388,99.8812385 C38.4803105,99.0577866 34,94.0521096 34,88 L34,74 C34,68.0540074 38.3245733,63.1180731 44,62.1659169 L44,56 L44,56 C44,25.072054 69.072054,5.68137151e-15 100,0 L100,0 L100,0 C130.927946,-5.68137151e-15 156,25.072054 156,56 L156,62.1659169 C161.675427,63.1180731 166,68.0540074 166,74 L166,88 C166,94.0521096 161.51969,99.0577866 155.694861,99.8812385 C153.627775,119.687011 141.237365,136.422372 124,144.610951 Z" id="react-path-1067076"></path></defs><g id="Avataaar" stroke="none" stroke-width="1" fill="none" fill-rule="evenodd"><g transform="translate(-825.000000, -1100.000000)" id="Avataaar/Circle"><g transform="translate(825.000000, 1100.000000)"><g id="Mask"></g><g id="Avataaar" stroke-width="1" fill-rule="evenodd" mask="url(#react-mask-1067078)"><g id="Body" transform="translate(32.000000, 36.000000)"><mask id="react-mask-1067079" fill="white"><use xlink:href="#react-path-1067076"></use></mask><use fill="#D0C6AC" xlink:href="#react-path-1067076"></use><g id="Skin/👶🏽-03-Brown" mask="url(#react-mask-1067079)" fill="#AE5D29"><g transform="translate(0.000000, 0.000000)" id="Color"><rect x="0" y="0" width="264" height="280"></rect></g></g><path d="M156,79 L156,102 C156,132.927946 130.927946,158 100,158 C69.072054,158 44,132.927946 44,102 L44,79 L44,94 C44,124.927946 69.072054,150 100,150 C130.927946,150 156,124.927946 156,94 L156,79 Z" id="Neck-Shadow" fill-opacity="0.100000001" fill="#000000" mask="url(#react-mask-1067079)"></path></g><g id="Clothing/Collar-+-Sweater" transform="translate(0.000000, 170.000000)"><defs><path d="M105.192402,29.0517235 L104,29.0517235 L104,29.0517235 C64.235498,29.0517235 32,61.2872215 32,101.051724 L32,110 L232,110 L232,101.051724 C232,61.2872215 199.764502,29.0517235 160,29.0517235 L160,29.0517235 L158.807598,29.0517235 C158.934638,30.0353144 159,31.0364513 159,32.0517235 C159,45.8588423 146.911688,57.0517235 132,57.0517235 C117.088312,57.0517235 105,45.8588423 105,32.0517235 C105,31.0364513 105.065362,30.0353144 105.192402,29.0517235 Z" id="react-path-1067080"></path></defs><mask id="react-mask-1067081" fill="white"><use xlink:href="#react-path-1067080"></use></mask><use id="Clothes" fill="#E6E6E6" fill-rule="evenodd" xlink:href="#react-path-1067080"></use><g id="Color/Palette/Gray-01" mask="url(#react-mask-1067081)" fill-rule="evenodd" fill="#3C8652"><rect id="🖍Color" x="0" y="0" width="264" height="110"></rect></g><path d="M156,22.2794906 C162.181647,26.8351858 166,33.1057265 166,40.027915 C166,47.2334941 161.862605,53.7329769 155.228997,58.3271669 L149.57933,53.8764929 L145,54.207887 L146,51.0567821 L145.922229,50.995516 C152.022491,47.8530505 156,42.7003578 156,36.8768102 L156,22.2794906 Z M108,21.5714994 C101.232748,26.1740081 97,32.7397769 97,40.027915 C97,47.4261549 101.361602,54.080035 108.308428,58.6915723 L114.42067,53.8764929 L119,54.207887 L118,51.0567821 L118.077771,50.995516 C111.977509,47.8530505 108,42.7003578 108,36.8768102 L108,21.5714994 Z" id="Collar" fill="#F2F2F2" fill-rule="evenodd"></path></g><g id="Face" transform="translate(76.000000, 82.000000)" fill="#000000"><g id="Mouth/Default" transform="translate(2.000000, 52.000000)" fill-opacity="0.699999988"><path d="M40,15 C40,22.7319865 46.2680135,29 54,29 L54,29 C61.7319865,29 68,22.7319865 68,15" id="Mouth"></path></g><g id="Nose/Default" transform="translate(28.000000, 40.000000)" fill-opacity="0.16"><path d="M16,8 C16,12.418278 21.372583,16 28,16 L28,16 C34.627417,16 40,12.418278 40,8" id="Nose"></path></g><g id="Eyes/Default-😀" transform="translate(0.000000, 8.000000)" fill-opacity="0.599999964"><circle id="Eye" cx="30" cy="22" r="6"></circle><circle id="Eye" cx="82" cy="22" r="6"></circle></g><g id="Eyebrow/Natural/Default-Natural" fill-opacity="0.599999964"><path d="M26.0390934,6.21012364 C20.2775554,6.98346216 11.2929313,12.0052479 12.04426,17.8178111 C12.0689481,18.0080543 12.3567302,18.0673468 12.4809077,17.9084937 C14.9674041,14.7203351 34.1927973,10.0365481 41.1942673,11.0147151 C41.8350523,11.1044465 42.2580662,10.4430343 41.8210501,10.0302067 C38.0765663,6.49485426 31.2003792,5.51224825 26.0390934,6.21012364" id="Eyebrow" transform="translate(27.000000, 12.000000) rotate(5.000000) translate(-27.000000, -12.000000) "></path><path d="M85.0390934,6.21012364 C79.2775554,6.98346216 70.2929313,12.0052479 71.04426,17.8178111 C71.0689481,18.0080543 71.3567302,18.0673468 71.4809077,17.9084937 C73.9674041,14.7203351 93.1927973,10.0365481 100.194267,11.0147151 C100.835052,11.1044465 101.258066,10.4430343 100.82105,10.0302067 C97.0765663,6.49485426 90.2003792,5.51224825 85.0390934,6.21012364" id="Eyebrow" transform="translate(86.000000, 12.000000) scale(-1, 1) rotate(5.000000) translate(-86.000000, -12.000000) "></path></g></g><g id="Top" stroke-width="1" fill-rule="evenodd"><defs><rect id="react-path-1067086" x="0" y="0" width="264" height="280"></rect><path d="M94.2519269,52.0221149 C94.3749353,51.9677149 94.0696712,51.9468149 93.3361345,51.9595149 C94.2276637,51.9577149 94.5329279,51.9785149 94.2519269,52.0221149 M86.1169775,36.3015924 C86.1148422,36.2819924 86.1337548,36.4526924 86.1169775,36.3015924 M193.765056,70.7656665 C193.500946,67.448734 193.03295,64.1518864 192.246676,60.9110823 C191.622233,58.3353492 190.769007,55.8775343 189.760006,53.4200433 C189.150703,51.9353766 187.727538,49.8961062 187.560324,48.2944933 C187.395466,46.7168527 188.626521,44.969138 188.889285,43.1323368 C189.144311,41.3447761 189.100909,39.4652134 188.734183,37.6938503 C187.901144,33.6710288 185.140271,29.9300447 180.877167,28.8814158 C179.925362,28.6471994 177.913417,28.9358396 177.240862,28.3815597 C176.469729,27.7459682 175.932761,25.5806808 175.234637,24.7121687 C173.244224,22.2362125 170.13984,20.6417265 166.865887,21.1976261 C164.454917,21.606776 165.839391,22.1053363 164.032005,20.6864317 C163.027041,19.8976114 162.276095,18.6931622 161.300066,17.8392279 C159.832826,16.5563826 158.149588,15.4581893 156.408146,14.556958 C151.851325,12.19892 146.654249,10.4848961 141.564162,9.64942693 C132.278934,8.12523827 122.368926,9.45408458 113.368668,11.8688141 C108.890239,13.0703477 104.381531,14.5951842 100.222053,16.6117782 C98.4385542,17.4764029 97.4090304,18.1936301 95.5494951,18.4200717 C92.6207355,18.7767416 90.1404579,18.7589243 87.3661268,20.0009517 C78.8298269,23.8229236 74.9849256,32.6897818 78.3066539,41.1750259 C78.974835,42.8815988 79.8795374,44.3801954 81.1267416,45.7586062 C82.6474761,47.4392631 83.1975648,47.1085093 81.8877817,49.0411999 C79.9289949,51.9311653 78.2777195,55.0129095 76.9332826,58.2128958 C73.4043038,66.6145606 72.8138416,76.0771643 73.043634,85.0373203 C73.1240445,88.1741362 73.2586228,91.3495022 73.753198,94.4561907 C73.966841,95.8009106 74.0267283,98.3293468 75.0353925,99.3271154 C75.5471264,99.8331265 76.2762042,100.115288 77.0035997,99.9137903 C78.7130802,99.4401742 78.1253096,98.1787097 78.1650102,97.0076274 C78.364859,91.1240324 78.0950295,85.9191145 79.4943071,80.1064647 C80.5278683,75.8118486 82.2504702,71.9114806 84.4827873,68.0713675 C87.3213795,63.1871608 90.3857268,58.8977279 94.2895061,54.7155226 C95.2073299,53.7320079 95.4078515,53.3150832 96.6385698,53.243814 C97.5705244,53.1900382 98.9338023,53.8282213 99.8398505,54.0491558 C101.837665,54.5360539 103.83918,55.0174448 105.873331,55.3452831 C109.613261,55.9481556 113.316519,55.9886494 117.090094,55.8704074 C124.516459,55.6381346 131.974787,55.1172217 139.175061,53.2470535 C143.956964,52.00535 148.196516,49.7762443 152.776887,48.1422364 C152.858644,48.1130808 154.006596,47.2951049 154.207791,47.3284719 C154.488723,47.3747968 156.184746,49.1542588 156.471061,49.3784327 C158.696649,51.1238798 161.137899,51.8566566 163.541467,53.2081794 C166.504881,54.8745825 163.634999,52.4899804 165.269452,54.5668292 C165.745859,55.1716454 165.989782,56.2931632 166.371984,56.9783192 C167.587899,59.1610999 169.279548,61.0795367 171.302932,62.6017816 C173.258018,64.0725184 176.196198,64.7829426 177.193087,66.697168 C177.961865,68.1740599 178.220929,70.1812592 178.841334,71.7579279 C180.468722,75.8931602 182.617937,79.7494709 184.767152,83.6443317 C186.498502,86.7830913 188.392354,89.5250111 188.584801,93.1117947 C188.651754,94.3603012 187.463764,101.849397 190.357534,99.5716982 C190.786502,99.2341415 191.711391,95.415733 191.901483,94.7678314 C192.672616,92.135083 192.94682,89.3866841 193.29605,86.6816947 C193.990474,81.3021672 194.218584,76.1837441 193.765056,70.7656665" id="react-path-1067085"></path><filter x="-0.8%" y="-2.0%" width="101.5%" height="108.0%" filterUnits="objectBoundingBox" id="react-filter-1067082"><feOffset dx="0" dy="2" in="SourceAlpha" result="shadowOffsetOuter1"></feOffset><feColorMatrix values="0 0 0 0 0   0 0 0 0 0   0 0 0 0 0  0 0 0 0.16 0" type="matrix" in="shadowOffsetOuter1" result="shadowMatrixOuter1"></feColorMatrix><feMerge><feMergeNode in="shadowMatrixOuter1"></feMergeNode><feMergeNode in="SourceGraphic"></feMergeNode></feMerge></filter></defs><mask id="react-mask-1067084" fill="white"><use xlink:href="#react-path-1067086"></use></mask><g id="Mask"></g><g id="Top/Short-Hair/Short-Curly" mask="url(#react-mask-1067084)"><g transform="translate(-1.000000, 0.000000)"><mask id="react-mask-1067083" fill="white"><use xlink:href="#react-path-1067085"></use></mask><use id="Short-Hair" stroke="none" fill="#28354B" fill-rule="evenodd" xlink:href="#react-path-1067085"></use><g id="Skin/👶🏽-03-Brown" mask="url(#react-mask-1067083)" fill="#2C1B18"><g transform="translate(0.000000, 0.000000) " id="Color"><rect x="0" y="0" width="264" height="280"></rect></g></g><g id="Top/_Resources/Prescription-02" fill="none" transform="translate(62.000000, 85.000000)" stroke-width="1"><defs><filter x="-0.8%" y="-2.4%" width="101.5%" height="109.8%" filterUnits="objectBoundingBox" id="react-filter-1067087"><feOffset dx="0" dy="2" in="SourceAlpha" result="shadowOffsetOuter1"></feOffset><feColorMatrix values="0 0 0 0 0   0 0 0 0 0   0 0 0 0 0  0 0 0 0.2 0" type="matrix" in="shadowOffsetOuter1" result="shadowMatrixOuter1"></feColorMatrix><feMerge><feMergeNode in="shadowMatrixOuter1"></feMergeNode><feMergeNode in="SourceGraphic"></feMergeNode></feMerge></filter></defs><g id="Wayfarers" filter="url(#react-filter-1067087)" transform="translate(6.000000, 7.000000)" fill="#252C2F"><path d="M34,41 L31.2421498,41 C17.3147125,41 9,33.3359286 9,20.5 C9,10.127 10.8170058,0 32.5299306,0 L35.4700694,0 C57.1829942,0 59,10.127 59,20.5 C59,32.5686429 48.7212748,41 34,41 Z M32.3853606,6 C13,6 13,12.8410159 13,21.5015498 C13,28.5719428 16.116254,37 30.9709365,37 L34,37 C46.3649085,37 55,30.6270373 55,21.5015498 C55,12.8410159 55,6 35.6146394,6 L32.3853606,6 Z" id="Left" fill-rule="nonzero"></path><path d="M96,41 L93.2421498,41 C79.3147125,41 71,33.3359286 71,20.5 C71,10.127 72.8170058,0 94.5299306,0 L97.4700694,0 C119.182994,0 121,10.127 121,20.5 C121,32.5686429 110.721275,41 96,41 Z M94.3853606,6 C75,6 75,12.8410159 75,21.5015498 C75,28.5719428 78.1194833,37 92.9709365,37 L96,37 C108.364909,37 117,30.6270373 117,21.5015498 C117,12.8410159 117,6 97.6146394,6 L94.3853606,6 Z" id="Right" fill-rule="nonzero"></path><path d="M2.95454545,5.77156439 C3.64590909,5.09629136 11.2095455,0 32.5,0 C50.3513636,0 54.1302273,1.85267217 59.8502273,4.6518809 L60.2689233,4.85850899 C60.6666014,4.99901896 62.7002447,5.68982981 65.0790606,5.76579519 C67.2462948,5.67278567 69.1000195,5.08540191 69.641698,4.89719767 C76.1703915,1.7220864 82.5610971,0 97.5,0 C118.790455,0 126.354091,5.09629136 127.045455,5.77156439 C128.679318,5.77156439 130,7.06150904 130,8.65734659 L130,11.5431288 C130,13.1389663 128.679318,14.428911 127.045455,14.428911 C127.045455,14.428911 120.143997,14.428911 120.143997,17.3146932 C120.143997,20.2004754 118.181818,13.1389663 118.181818,11.5431288 L118.181818,8.73240251 C114.578575,7.35340151 108.128411,4.78617535 97.5,4.78617535 C85.6584651,4.78617535 79.7610984,6.88602813 74.7022935,8.97112368 L74.7588636,9.10752861 L74.7563667,11.0937608 L72.5391666,16.4436339 L69.8004908,15.3608351 C69.5558969,15.2641292 69.0281396,15.090392 68.2963505,14.9099044 C66.256272,14.4067419 64.1589087,14.253569 62.3040836,14.6343084 C61.6235903,14.7739931 60.9922286,14.9836085 60.4128127,15.266732 L57.7704824,16.5578701 L55.1266751,11.3962031 L55.2440909,9.10175705 L55.3248203,8.90683855 C50.9620526,6.87386374 46.9392639,4.78617535 32.5,4.78617535 C21.8721459,4.78617535 15.422131,7.3524397 11.8181818,8.7314671 L11.8181818,11.5431288 C11.8181818,13.1389663 8.86363636,20.2004754 8.86363636,17.3146932 C8.86363636,14.428911 2.95454545,14.428911 2.95454545,14.428911 C1.32363636,14.428911 0,13.1389663 0,11.5431288 L0,8.65734659 C0,7.06150904 1.32363636,5.77156439 2.95454545,5.77156439 Z" id="Stuff" fill-rule="nonzero"></path></g></g></g></g></g></g></g></g></g>` },
-      codigo: { vb: '0 0 264 280', corpo: `<desc>Created with getavataaars.com</desc><defs><circle id="react-path-1060449" cx="120" cy="120" r="120"></circle><path d="M12,160 C12,226.27417 65.72583,280 132,280 C198.27417,280 252,226.27417 252,160 L264,160 L264,-1.42108547e-14 L-3.19744231e-14,-1.42108547e-14 L-3.19744231e-14,160 L12,160 Z" id="react-path-1060450"></path><path d="M124,144.610951 L124,163 L128,163 L128,163 C167.764502,163 200,195.235498 200,235 L200,244 L0,244 L0,235 C-4.86974701e-15,195.235498 32.235498,163 72,163 L72,163 L76,163 L76,144.610951 C58.7626345,136.422372 46.3722246,119.687011 44.3051388,99.8812385 C38.4803105,99.0577866 34,94.0521096 34,88 L34,74 C34,68.0540074 38.3245733,63.1180731 44,62.1659169 L44,56 L44,56 C44,25.072054 69.072054,5.68137151e-15 100,0 L100,0 L100,0 C130.927946,-5.68137151e-15 156,25.072054 156,56 L156,62.1659169 C161.675427,63.1180731 166,68.0540074 166,74 L166,88 C166,94.0521096 161.51969,99.0577866 155.694861,99.8812385 C153.627775,119.687011 141.237365,136.422372 124,144.610951 Z" id="react-path-1060451"></path></defs><g id="Avataaar" stroke="none" stroke-width="1" fill="none" fill-rule="evenodd"><g transform="translate(-825.000000, -1100.000000)" id="Avataaar/Circle"><g transform="translate(825.000000, 1100.000000)"><g id="Mask"></g><g id="Avataaar" stroke-width="1" fill-rule="evenodd" mask="url(#react-mask-1060453)"><g id="Body" transform="translate(32.000000, 36.000000)"><mask id="react-mask-1060454" fill="white"><use xlink:href="#react-path-1060451"></use></mask><use fill="#D0C6AC" xlink:href="#react-path-1060451"></use><g id="Skin/👶🏽-03-Brown" mask="url(#react-mask-1060454)" fill="#EDB98A"><g transform="translate(0.000000, 0.000000)" id="Color"><rect x="0" y="0" width="264" height="280"></rect></g></g><path d="M156,79 L156,102 C156,132.927946 130.927946,158 100,158 C69.072054,158 44,132.927946 44,102 L44,79 L44,94 C44,124.927946 69.072054,150 100,150 C130.927946,150 156,124.927946 156,94 L156,79 Z" id="Neck-Shadow" fill-opacity="0.100000001" fill="#000000" mask="url(#react-mask-1060454)"></path></g><g id="Clothing/Hoodie" transform="translate(0.000000, 170.000000)"><defs><path d="M108,13.0708856 C90.0813006,15.075938 76.2798424,20.5518341 76.004203,34.6449676 C50.1464329,45.5680933 32,71.1646257 32,100.999485 L32,100.999485 L32,110 L232,110 L232,100.999485 C232,71.1646257 213.853567,45.5680933 187.995797,34.6449832 C187.720158,20.5518341 173.918699,15.075938 156,13.0708856 L156,32 L156,32 C156,45.254834 145.254834,56 132,56 L132,56 C118.745166,56 108,45.254834 108,32 L108,13.0708856 Z" id="react-path-1060455"></path></defs><mask id="react-mask-1060456" fill="white"><use xlink:href="#react-path-1060455"></use></mask><use id="Hoodie" fill="#B7C1DB" fill-rule="evenodd" xlink:href="#react-path-1060455"></use><g id="Color/Palette/Gray-01" mask="url(#react-mask-1060456)" fill-rule="evenodd" fill="#D47A36"><rect id="🖍Color" x="0" y="0" width="264" height="110"></rect></g><path d="M102,61.7390531 L102,110 L95,110 L95,58.1502625 C97.2037542,59.4600576 99.5467694,60.6607878 102,61.7390531 Z M169,58.1502625 L169,98.5 C169,100.432997 167.432997,102 165.5,102 C163.567003,102 162,100.432997 162,98.5 L162,61.7390531 C164.453231,60.6607878 166.796246,59.4600576 169,58.1502625 Z" id="Straps" fill="#F4F4F4" fill-rule="evenodd" mask="url(#react-mask-1060456)"></path><path d="M90.9601329,12.7243537 C75.9093095,15.5711782 65.5,21.2428847 65.5,32.3076923 C65.5,52.0200095 98.5376807,68 132,68 C165.462319,68 198.5,52.0200095 198.5,32.3076923 C198.5,21.2428847 188.09069,15.5711782 173.039867,12.7243537 C182.124921,16.0744598 188,21.7060546 188,31.0769231 C188,51.4689754 160.178795,68 132,68 C103.821205,68 76,51.4689754 76,31.0769231 C76,21.7060546 81.8750795,16.0744598 90.9601329,12.7243537 Z" id="Shadow" fill-opacity="0.16" fill="#000000" fill-rule="evenodd" mask="url(#react-mask-1060456)"></path></g><g id="Face" transform="translate(76.000000, 82.000000)" fill="#000000"><g id="Mouth/Smile" transform="translate(2.000000, 52.000000)"><defs><path d="M35.117844,15.1280772 C36.1757121,24.6198025 44.2259873,32 54,32 C63.8042055,32 71.8740075,24.574136 72.8917593,15.0400546 C72.9736685,14.272746 72.1167429,13 71.042767,13 C56.1487536,13 44.7379213,13 37.0868244,13 C36.0066168,13 35.0120058,14.1784435 35.117844,15.1280772 Z" id="react-path-1060457"></path></defs><mask id="react-mask-1060458" fill="white"><use xlink:href="#react-path-1060457"></use></mask><use id="Mouth" fill-opacity="0.699999988" fill="#000000" fill-rule="evenodd" xlink:href="#react-path-1060457"></use><rect id="Teeth" fill="#FFFFFF" fill-rule="evenodd" mask="url(#react-mask-1060458)" x="39" y="2" width="31" height="16" rx="5"></rect><g id="Tongue" stroke-width="1" fill-rule="evenodd" mask="url(#react-mask-1060458)" fill="#FF4F6D"><g transform="translate(38.000000, 24.000000)"><circle cx="11" cy="11" r="11"></circle><circle cx="21" cy="11" r="11"></circle></g></g></g><g id="Nose/Default" transform="translate(28.000000, 40.000000)" fill-opacity="0.16"><path d="M16,8 C16,12.418278 21.372583,16 28,16 L28,16 C34.627417,16 40,12.418278 40,8" id="Nose"></path></g><g id="Eyes/Default-😀" transform="translate(0.000000, 8.000000)" fill-opacity="0.599999964"><circle id="Eye" cx="30" cy="22" r="6"></circle><circle id="Eye" cx="82" cy="22" r="6"></circle></g><g id="Eyebrow/Natural/Default-Natural" fill-opacity="0.599999964"><path d="M26.0390934,6.21012364 C20.2775554,6.98346216 11.2929313,12.0052479 12.04426,17.8178111 C12.0689481,18.0080543 12.3567302,18.0673468 12.4809077,17.9084937 C14.9674041,14.7203351 34.1927973,10.0365481 41.1942673,11.0147151 C41.8350523,11.1044465 42.2580662,10.4430343 41.8210501,10.0302067 C38.0765663,6.49485426 31.2003792,5.51224825 26.0390934,6.21012364" id="Eyebrow" transform="translate(27.000000, 12.000000) rotate(5.000000) translate(-27.000000, -12.000000) "></path><path d="M85.0390934,6.21012364 C79.2775554,6.98346216 70.2929313,12.0052479 71.04426,17.8178111 C71.0689481,18.0080543 71.3567302,18.0673468 71.4809077,17.9084937 C73.9674041,14.7203351 93.1927973,10.0365481 100.194267,11.0147151 C100.835052,11.1044465 101.258066,10.4430343 100.82105,10.0302067 C97.0765663,6.49485426 90.2003792,5.51224825 85.0390934,6.21012364" id="Eyebrow" transform="translate(86.000000, 12.000000) scale(-1, 1) rotate(5.000000) translate(-86.000000, -12.000000) "></path></g></g><g id="Top" stroke-width="1" fill-rule="evenodd"><defs><rect id="react-path-1060463" x="0" y="0" width="264" height="280"></rect><path d="M94.2519269,52.0221149 C94.3749353,51.9677149 94.0696712,51.9468149 93.3361345,51.9595149 C94.2276637,51.9577149 94.5329279,51.9785149 94.2519269,52.0221149 M86.1169775,36.3015924 C86.1148422,36.2819924 86.1337548,36.4526924 86.1169775,36.3015924 M193.765056,70.7656665 C193.500946,67.448734 193.03295,64.1518864 192.246676,60.9110823 C191.622233,58.3353492 190.769007,55.8775343 189.760006,53.4200433 C189.150703,51.9353766 187.727538,49.8961062 187.560324,48.2944933 C187.395466,46.7168527 188.626521,44.969138 188.889285,43.1323368 C189.144311,41.3447761 189.100909,39.4652134 188.734183,37.6938503 C187.901144,33.6710288 185.140271,29.9300447 180.877167,28.8814158 C179.925362,28.6471994 177.913417,28.9358396 177.240862,28.3815597 C176.469729,27.7459682 175.932761,25.5806808 175.234637,24.7121687 C173.244224,22.2362125 170.13984,20.6417265 166.865887,21.1976261 C164.454917,21.606776 165.839391,22.1053363 164.032005,20.6864317 C163.027041,19.8976114 162.276095,18.6931622 161.300066,17.8392279 C159.832826,16.5563826 158.149588,15.4581893 156.408146,14.556958 C151.851325,12.19892 146.654249,10.4848961 141.564162,9.64942693 C132.278934,8.12523827 122.368926,9.45408458 113.368668,11.8688141 C108.890239,13.0703477 104.381531,14.5951842 100.222053,16.6117782 C98.4385542,17.4764029 97.4090304,18.1936301 95.5494951,18.4200717 C92.6207355,18.7767416 90.1404579,18.7589243 87.3661268,20.0009517 C78.8298269,23.8229236 74.9849256,32.6897818 78.3066539,41.1750259 C78.974835,42.8815988 79.8795374,44.3801954 81.1267416,45.7586062 C82.6474761,47.4392631 83.1975648,47.1085093 81.8877817,49.0411999 C79.9289949,51.9311653 78.2777195,55.0129095 76.9332826,58.2128958 C73.4043038,66.6145606 72.8138416,76.0771643 73.043634,85.0373203 C73.1240445,88.1741362 73.2586228,91.3495022 73.753198,94.4561907 C73.966841,95.8009106 74.0267283,98.3293468 75.0353925,99.3271154 C75.5471264,99.8331265 76.2762042,100.115288 77.0035997,99.9137903 C78.7130802,99.4401742 78.1253096,98.1787097 78.1650102,97.0076274 C78.364859,91.1240324 78.0950295,85.9191145 79.4943071,80.1064647 C80.5278683,75.8118486 82.2504702,71.9114806 84.4827873,68.0713675 C87.3213795,63.1871608 90.3857268,58.8977279 94.2895061,54.7155226 C95.2073299,53.7320079 95.4078515,53.3150832 96.6385698,53.243814 C97.5705244,53.1900382 98.9338023,53.8282213 99.8398505,54.0491558 C101.837665,54.5360539 103.83918,55.0174448 105.873331,55.3452831 C109.613261,55.9481556 113.316519,55.9886494 117.090094,55.8704074 C124.516459,55.6381346 131.974787,55.1172217 139.175061,53.2470535 C143.956964,52.00535 148.196516,49.7762443 152.776887,48.1422364 C152.858644,48.1130808 154.006596,47.2951049 154.207791,47.3284719 C154.488723,47.3747968 156.184746,49.1542588 156.471061,49.3784327 C158.696649,51.1238798 161.137899,51.8566566 163.541467,53.2081794 C166.504881,54.8745825 163.634999,52.4899804 165.269452,54.5668292 C165.745859,55.1716454 165.989782,56.2931632 166.371984,56.9783192 C167.587899,59.1610999 169.279548,61.0795367 171.302932,62.6017816 C173.258018,64.0725184 176.196198,64.7829426 177.193087,66.697168 C177.961865,68.1740599 178.220929,70.1812592 178.841334,71.7579279 C180.468722,75.8931602 182.617937,79.7494709 184.767152,83.6443317 C186.498502,86.7830913 188.392354,89.5250111 188.584801,93.1117947 C188.651754,94.3603012 187.463764,101.849397 190.357534,99.5716982 C190.786502,99.2341415 191.711391,95.415733 191.901483,94.7678314 C192.672616,92.135083 192.94682,89.3866841 193.29605,86.6816947 C193.990474,81.3021672 194.218584,76.1837441 193.765056,70.7656665" id="react-path-1060462"></path><filter x="-0.8%" y="-2.0%" width="101.5%" height="108.0%" filterUnits="objectBoundingBox" id="react-filter-1060459"><feOffset dx="0" dy="2" in="SourceAlpha" result="shadowOffsetOuter1"></feOffset><feColorMatrix values="0 0 0 0 0   0 0 0 0 0   0 0 0 0 0  0 0 0 0.16 0" type="matrix" in="shadowOffsetOuter1" result="shadowMatrixOuter1"></feColorMatrix><feMerge><feMergeNode in="shadowMatrixOuter1"></feMergeNode><feMergeNode in="SourceGraphic"></feMergeNode></feMerge></filter></defs><mask id="react-mask-1060461" fill="white"><use xlink:href="#react-path-1060463"></use></mask><g id="Mask"></g><g id="Top/Short-Hair/Short-Curly" mask="url(#react-mask-1060461)"><g transform="translate(-1.000000, 0.000000)"><g id="Facial-Hair/Beard-Medium" transform="translate(49.000000, 72.000000)"><defs><path d="M105.017591,94.1296214 C101.150441,99.7213834 98.257542,95.9467308 94.1374777,92.8762163 C91.6567227,91.0272796 87.9608129,88.7275108 84.5044337,88.8410391 C81.0477114,88.7275108 77.3518016,91.0272796 74.8710466,92.8762163 C70.7509822,95.9467308 67.8580835,99.7213834 63.9909333,94.1296214 C61.0884259,89.9323547 62.3028943,82.8739117 65.014944,78.9027173 C68.8738581,73.2512381 74.1088724,75.9847769 79.9622738,75.3400279 C81.5538829,75.1648137 83.1526985,74.7228407 84.5044337,74 C85.856169,74.7228407 87.4546414,75.1648137 89.0462504,75.3400279 C94.899995,75.9847769 100.134666,73.2512381 103.993923,78.9027173 C106.70563,82.8739117 107.920098,89.9323547 105.017591,94.1296214 M140.39109,26 C136.966521,40.0748212 135.393023,54.4337754 132.909944,68.6711471 C132.392536,71.6390145 131.826063,74.5963095 131.224594,77.5496398 C131.098329,78.1697764 130.973781,80.4725746 130.362704,80.7643064 C128.511632,81.6484223 124.739149,76.9466834 123.730409,75.8851496 C121.196893,73.219256 118.684993,70.5292442 115.599415,68.437233 C109.364783,64.2102603 102.065485,61.7108818 94.4700836,61.117837 C91.2922091,60.8693859 86.9951134,61.3025234 84.000116,63.1104016 C81.0051185,61.3025234 76.7080229,60.8693859 73.5298053,61.117837 C65.9344039,61.7108818 58.6351055,64.2102603 52.4004739,68.437233 C49.3148957,70.5292442 46.8033387,73.219256 44.2694796,75.8851496 C43.2607395,76.9466834 39.4882573,81.6484223 37.6371849,80.7643064 C37.0261079,80.4725746 36.9015594,78.1697764 36.7752954,77.5496398 C36.1738255,74.5963095 35.6073527,71.6390145 35.0899445,68.6711471 C32.6072086,54.4337754 31.0337113,40.0748212 27.6091415,26 C26.6127533,26 25.7385119,44.7478165 25.6273446,46.4945731 C25.174784,53.5889755 24.6463963,60.5254529 25.3216346,67.6261326 C26.485803,79.8749043 27.6993791,95.2339402 37.032627,104.58753 C45.4659003,113.039493 57.7103052,114.806417 68.2713185,120.141327 C69.631059,120.828202 71.4347824,121.676306 73.3798667,122.37111 C75.4289129,123.934171 79.4926946,125 84.1740722,125 C89.0846465,125 93.3155222,123.827456 95.2540874,122.137856 C96.9548781,121.49261 98.5180822,120.752874 99.7285704,120.141327 C110.288776,114.805245 122.533989,113.039493 130.967262,104.58753 C140.30051,95.2339402 141.514086,79.8749043 142.678597,67.6261326 C143.353493,60.5254529 142.825105,53.5889755 142.372887,46.4945731 C142.261377,44.7478165 141.387136,26 140.39109,26 Z" id="react-path-1060465"></path></defs><mask id="react-mask-1060464" fill="white"><use xlink:href="#react-path-1060465"></use></mask><use id="Beardness" fill="#252E32" fill-rule="evenodd" xlink:href="#react-path-1060465"></use><g id="Color/Hair/Brown" mask="url(#react-mask-1060464)" fill="#724133"><g transform="translate(-32.000000, 0.000000)" id="Color"><rect x="0" y="0" width="264" height="244"></rect></g></g></g><mask id="react-mask-1060460" fill="white"><use xlink:href="#react-path-1060462"></use></mask><use id="Short-Hair" stroke="none" fill="#28354B" fill-rule="evenodd" xlink:href="#react-path-1060462"></use><g id="Skin/👶🏽-03-Brown" mask="url(#react-mask-1060460)" fill="#724133"><g transform="translate(0.000000, 0.000000) " id="Color"><rect x="0" y="0" width="264" height="280"></rect></g></g></g></g></g></g></g></g></g>` },
-      testes: { vb: '0 0 264 280', corpo: `<desc>Created with getavataaars.com</desc><defs><circle id="react-path-1060434" cx="120" cy="120" r="120"></circle><path d="M12,160 C12,226.27417 65.72583,280 132,280 C198.27417,280 252,226.27417 252,160 L264,160 L264,-1.42108547e-14 L-3.19744231e-14,-1.42108547e-14 L-3.19744231e-14,160 L12,160 Z" id="react-path-1060435"></path><path d="M124,144.610951 L124,163 L128,163 L128,163 C167.764502,163 200,195.235498 200,235 L200,244 L0,244 L0,235 C-4.86974701e-15,195.235498 32.235498,163 72,163 L72,163 L76,163 L76,144.610951 C58.7626345,136.422372 46.3722246,119.687011 44.3051388,99.8812385 C38.4803105,99.0577866 34,94.0521096 34,88 L34,74 C34,68.0540074 38.3245733,63.1180731 44,62.1659169 L44,56 L44,56 C44,25.072054 69.072054,5.68137151e-15 100,0 L100,0 L100,0 C130.927946,-5.68137151e-15 156,25.072054 156,56 L156,62.1659169 C161.675427,63.1180731 166,68.0540074 166,74 L166,88 C166,94.0521096 161.51969,99.0577866 155.694861,99.8812385 C153.627775,119.687011 141.237365,136.422372 124,144.610951 Z" id="react-path-1060436"></path></defs><g id="Avataaar" stroke="none" stroke-width="1" fill="none" fill-rule="evenodd"><g transform="translate(-825.000000, -1100.000000)" id="Avataaar/Circle"><g transform="translate(825.000000, 1100.000000)"><g id="Mask"></g><g id="Avataaar" stroke-width="1" fill-rule="evenodd" mask="url(#react-mask-1060438)"><g id="Body" transform="translate(32.000000, 36.000000)"><mask id="react-mask-1060439" fill="white"><use xlink:href="#react-path-1060436"></use></mask><use fill="#D0C6AC" xlink:href="#react-path-1060436"></use><g id="Skin/👶🏽-03-Brown" mask="url(#react-mask-1060439)" fill="#EDB98A"><g transform="translate(0.000000, 0.000000)" id="Color"><rect x="0" y="0" width="264" height="280"></rect></g></g><path d="M156,79 L156,102 C156,132.927946 130.927946,158 100,158 C69.072054,158 44,132.927946 44,102 L44,79 L44,94 C44,124.927946 69.072054,150 100,150 C130.927946,150 156,124.927946 156,94 L156,79 Z" id="Neck-Shadow" fill-opacity="0.100000001" fill="#000000" mask="url(#react-mask-1060439)"></path></g><g id="Clothing/Shirt-Crew-Neck" transform="translate(0.000000, 170.000000)"><defs><path d="M165.960472,29.2949161 C202.936473,32.3249982 232,63.2942856 232,101.051724 L232,110 L32,110 L32,101.051724 C32,62.9525631 61.591985,31.7649812 99.0454063,29.2195264 C99.0152598,29.5931145 99,29.9692272 99,30.3476251 C99,42.2107177 113.998461,51.8276544 132.5,51.8276544 C151.001539,51.8276544 166,42.2107177 166,30.3476251 C166,29.9946691 165.986723,29.6437014 165.960472,29.2949161 Z" id="react-path-1060440"></path></defs><mask id="react-mask-1060441" fill="white"><use xlink:href="#react-path-1060440"></use></mask><use id="Clothes" fill="#E6E6E6" fill-rule="evenodd" xlink:href="#react-path-1060440"></use><g id="Color/Palette/Gray-01" mask="url(#react-mask-1060441)" fill-rule="evenodd" fill="#FF488E"><rect id="🖍Color" x="0" y="0" width="264" height="110"></rect></g><g id="Shadowy" opacity="0.599999964" stroke-width="1" fill-rule="evenodd" mask="url(#react-mask-1060441)" fill-opacity="0.16" fill="#000000"><g transform="translate(92.000000, 4.000000)" id="Hola-👋🏼"><ellipse cx="40.5" cy="27.8476251" rx="39.6351047" ry="26.9138272"></ellipse></g></g></g><g id="Face" transform="translate(76.000000, 82.000000)" fill="#000000"><g id="Mouth/Smile" transform="translate(2.000000, 52.000000)"><defs><path d="M35.117844,15.1280772 C36.1757121,24.6198025 44.2259873,32 54,32 C63.8042055,32 71.8740075,24.574136 72.8917593,15.0400546 C72.9736685,14.272746 72.1167429,13 71.042767,13 C56.1487536,13 44.7379213,13 37.0868244,13 C36.0066168,13 35.0120058,14.1784435 35.117844,15.1280772 Z" id="react-path-1060442"></path></defs><mask id="react-mask-1060443" fill="white"><use xlink:href="#react-path-1060442"></use></mask><use id="Mouth" fill-opacity="0.699999988" fill="#000000" fill-rule="evenodd" xlink:href="#react-path-1060442"></use><rect id="Teeth" fill="#FFFFFF" fill-rule="evenodd" mask="url(#react-mask-1060443)" x="39" y="2" width="31" height="16" rx="5"></rect><g id="Tongue" stroke-width="1" fill-rule="evenodd" mask="url(#react-mask-1060443)" fill="#FF4F6D"><g transform="translate(38.000000, 24.000000)"><circle cx="11" cy="11" r="11"></circle><circle cx="21" cy="11" r="11"></circle></g></g></g><g id="Nose/Default" transform="translate(28.000000, 40.000000)" fill-opacity="0.16"><path d="M16,8 C16,12.418278 21.372583,16 28,16 L28,16 C34.627417,16 40,12.418278 40,8" id="Nose"></path></g><g id="Eyes/Default-😀" transform="translate(0.000000, 8.000000)" fill-opacity="0.599999964"><circle id="Eye" cx="30" cy="22" r="6"></circle><circle id="Eye" cx="82" cy="22" r="6"></circle></g><g id="Eyebrow/Natural/Default-Natural" fill-opacity="0.599999964"><path d="M26.0390934,6.21012364 C20.2775554,6.98346216 11.2929313,12.0052479 12.04426,17.8178111 C12.0689481,18.0080543 12.3567302,18.0673468 12.4809077,17.9084937 C14.9674041,14.7203351 34.1927973,10.0365481 41.1942673,11.0147151 C41.8350523,11.1044465 42.2580662,10.4430343 41.8210501,10.0302067 C38.0765663,6.49485426 31.2003792,5.51224825 26.0390934,6.21012364" id="Eyebrow" transform="translate(27.000000, 12.000000) rotate(5.000000) translate(-27.000000, -12.000000) "></path><path d="M85.0390934,6.21012364 C79.2775554,6.98346216 70.2929313,12.0052479 71.04426,17.8178111 C71.0689481,18.0080543 71.3567302,18.0673468 71.4809077,17.9084937 C73.9674041,14.7203351 93.1927973,10.0365481 100.194267,11.0147151 C100.835052,11.1044465 101.258066,10.4430343 100.82105,10.0302067 C97.0765663,6.49485426 90.2003792,5.51224825 85.0390934,6.21012364" id="Eyebrow" transform="translate(86.000000, 12.000000) scale(-1, 1) rotate(5.000000) translate(-86.000000, -12.000000) "></path></g></g><g id="Top" stroke-width="1" fill-rule="evenodd"><defs><rect id="react-path-1060446" x="0" y="0" width="264" height="280"></rect><path d="M21,157.540812 L21,69.046252 C21,65.5140485 21.3981158,62.0748299 22.1519234,58.7710202 C25.205041,38.7314193 36.7752683,22.8108863 50,13 C69.9046441,-1.75961713 103.441939,-6.01828252 115.047069,11.5221046 C123.698343,7.68103538 136.519049,11.1821114 146,20 C155.565156,29.4150438 163.19967,50.1973768 158.657409,67.2035172 C158.762104,68.4691962 158.815476,69.7490355 158.815476,71.0408963 L158.815476,92.8921195 C157.934142,87.9183006 153.988995,84.0029116 149,83.1659169 L149,83 C142.963851,61.4642087 125.229516,51.5800472 114.429684,41.777113 C97.5353566,60.6732583 44.8226408,60.7398069 27,98 L27,108 C27,114.018625 31.4308707,119.002364 37.2085808,119.867187 C38.9518066,140.114792 51.4692178,157.282984 69,165.610951 L69,166 C71.9303712,209.855112 62.358462,264.797432 0,248 C13.6057325,240.037752 20.8081123,189.055563 21,157.540812 Z M117,165.610951 C134.530782,157.282984 147.048193,140.114792 148.791419,119.867187 C153.87876,119.105701 157.921895,115.150816 158.815476,110.107881 L158.815476,111.47039 L158.815476,111.47039 C158.815476,127.298552 162.572711,142.900645 169.7782,156.993609 L196.726668,209.701177 C203.689761,223.320048 201.645562,239.173573 192.790715,250.468968 C189.966212,213.288807 158.90349,184 121,184 L121,184 L117,184 L117,165.610951 Z" id="react-path-1060447"></path><path d="M65.1802189,77.7372986 C67.3631845,76.1045334 80.4065113,75.4786511 82.757829,74.0894494 C83.4916461,73.6553857 84.0610723,73.215719 84.4997781,72.7800074 C84.938814,73.215719 85.5085703,73.6553857 86.2423874,74.0894494 C88.593375,75.4786511 101.636702,76.1045334 103.819667,77.7372986 C106.030032,79.3908276 107.643571,83.1846831 107.466966,86.15095 C107.255041,89.7101408 103.361486,98.2028927 93.6723269,99.1811016 C91.5576925,96.8281927 88.2368647,95.3104528 84.4997781,95.3104528 C80.7633517,95.3104528 77.4421938,96.8281927 75.3275594,99.1811016 C65.6387308,98.2028927 61.7451757,89.7101408 61.5332501,86.15095 C61.3566455,83.1846831 62.9701849,79.3908276 65.1802189,77.7372986 M103.141638,94.9063813 C103.142958,94.9057221 103.144609,94.905063 103.145929,94.9047334 C103.144278,94.905063 103.142958,94.9057221 103.141638,94.9063813 M65.8453747,94.9014375 C65.8493359,94.9030855 65.8565982,94.9057221 65.8618798,94.9076997 C65.8565982,94.9057221 65.8509864,94.9034151 65.8453747,94.9014375 M144.86259,55.9853335 C144.47439,50.0303878 143.277769,44.1519058 142.233986,38.2862777 C141.952739,36.7072349 140.423706,26 139.734783,26 C139.502391,35.1094058 138.701893,44.0803858 137.669664,53.1393651 C137.361018,55.8475668 137.037848,58.5564277 136.825262,61.2741874 C136.653609,63.4695546 136.959614,66.1220564 136.427819,68.2455739 C135.749129,70.9524573 132.348087,73.4783984 129.702978,74.410795 C123.102915,76.7373371 117.597802,67.1077689 111.960977,64.2911336 C104.643272,60.6347152 92.0637391,59.7639895 84.5816434,64.5297918 C76.9361472,59.7639895 64.356614,60.6347152 57.0389092,64.2911336 C51.4024147,67.1077689 45.8969708,76.7373371 39.2972383,74.410795 C36.6521296,73.4783984 33.2504268,70.9524573 32.572397,68.2455739 C32.0402723,66.1220564 32.346277,63.4695546 32.174954,61.2741874 C31.9623682,58.5564277 31.6388681,55.8475668 31.3302226,53.1393651 C30.2983232,44.0803858 29.4974953,35.1094058 29.2654335,26 C28.5761802,26 27.0468169,36.7072349 26.7658999,38.2862777 C25.7221169,44.1519058 24.5258266,50.0303878 24.1376265,55.9853335 C23.738533,62.1047422 24.2148704,68.1674622 25.4695887,74.1632765 C26.0687242,77.0277016 26.7685407,79.8756475 27.518863,82.7041478 C28.352701,85.8467429 27.198994,91.9661516 27.5723395,95.1921317 C28.2787581,101.29572 31.1542781,113.199679 34.3833375,118.45096 C35.9440605,120.989096 37.7734867,122.573742 39.816489,124.619148 C41.7825775,126.58809 42.6038717,129.640049 44.7260985,131.73687 C48.6820428,135.645092 54.4456266,137.971304 60.3656788,138.543134 C65.6773527,143.050212 74.505605,146 84.4997781,146 C94.4946114,146 103.322534,143.050212 108.634538,138.543134 C114.55393,137.971304 120.317843,135.645092 124.274118,131.73687 C126.396015,129.640049 127.217309,126.58809 129.183727,124.619148 C131.2264,122.573742 133.055826,120.989096 134.616879,118.45096 C137.845608,113.199679 140.721458,101.29572 141.427547,95.1921317 C141.800892,91.9661516 140.647185,85.8467429 141.481353,82.7041478 C142.231676,79.8756475 142.931162,77.0277016 143.530628,74.1632765 C144.784686,68.1674622 145.261353,62.1047422 144.86259,55.9853335 Z" id="react-path-1060448"></path></defs><mask id="react-mask-1060444" fill="white"><use xlink:href="#react-path-1060446"></use></mask><g id="Mask"></g><g id="Top/Long-Hair/Straight" mask="url(#react-mask-1060444)"><g transform="translate(-1.000000, 0.000000)"><g id="Hair" stroke-width="1" fill="none" fill-rule="evenodd" transform="translate(40.000000, 15.000000)"><mask id="react-mask-1060445" fill="white"><use xlink:href="#react-path-1060447"></use></mask><use fill="#272C2E" xlink:href="#react-path-1060447"></use><g id="Skin/👶🏽-03-Brown" mask="url(#react-mask-1060445)" fill="#B58143"><g transform="translate(0.000000, 0.000000) " id="Color"><rect x="0" y="0" width="264" height="280"></rect></g></g></g><path d="M67,113 C84.8226408,80.6646674 137.535357,80.6069148 154.429684,64.2083647 C165.207546,72.6982916 182.891727,79.2665518 188.963018,97.8687161 C182.891727,76.423995 165.207546,66.5601054 154.429684,56.777113 C137.535357,75.6732583 84.8226408,75.7398069 67,113 Z" id="Shadow" fill-opacity="0.16" fill="#000000" fill-rule="evenodd"></path></g></g></g></g></g></g></g>` },
-      alex: { vb: '0 0 264 280', corpo: `<desc>Created with getavataaars.com</desc><defs><circle id="react-path-1060419" cx="120" cy="120" r="120"></circle><path d="M12,160 C12,226.27417 65.72583,280 132,280 C198.27417,280 252,226.27417 252,160 L264,160 L264,-1.42108547e-14 L-3.19744231e-14,-1.42108547e-14 L-3.19744231e-14,160 L12,160 Z" id="react-path-1060420"></path><path d="M124,144.610951 L124,163 L128,163 L128,163 C167.764502,163 200,195.235498 200,235 L200,244 L0,244 L0,235 C-4.86974701e-15,195.235498 32.235498,163 72,163 L72,163 L76,163 L76,144.610951 C58.7626345,136.422372 46.3722246,119.687011 44.3051388,99.8812385 C38.4803105,99.0577866 34,94.0521096 34,88 L34,74 C34,68.0540074 38.3245733,63.1180731 44,62.1659169 L44,56 L44,56 C44,25.072054 69.072054,5.68137151e-15 100,0 L100,0 L100,0 C130.927946,-5.68137151e-15 156,25.072054 156,56 L156,62.1659169 C161.675427,63.1180731 166,68.0540074 166,74 L166,88 C166,94.0521096 161.51969,99.0577866 155.694861,99.8812385 C153.627775,119.687011 141.237365,136.422372 124,144.610951 Z" id="react-path-1060421"></path></defs><g id="Avataaar" stroke="none" stroke-width="1" fill="none" fill-rule="evenodd"><g transform="translate(-825.000000, -1100.000000)" id="Avataaar/Circle"><g transform="translate(825.000000, 1100.000000)"><g id="Mask"></g><g id="Avataaar" stroke-width="1" fill-rule="evenodd" mask="url(#react-mask-1060423)"><g id="Body" transform="translate(32.000000, 36.000000)"><mask id="react-mask-1060424" fill="white"><use xlink:href="#react-path-1060421"></use></mask><use fill="#D0C6AC" xlink:href="#react-path-1060421"></use><g id="Skin/👶🏽-03-Brown" mask="url(#react-mask-1060424)" fill="#FD9841"><g transform="translate(0.000000, 0.000000)" id="Color"><rect x="0" y="0" width="264" height="280"></rect></g></g><path d="M156,79 L156,102 C156,132.927946 130.927946,158 100,158 C69.072054,158 44,132.927946 44,102 L44,79 L44,94 C44,124.927946 69.072054,150 100,150 C130.927946,150 156,124.927946 156,94 L156,79 Z" id="Neck-Shadow" fill-opacity="0.100000001" fill="#000000" mask="url(#react-mask-1060424)"></path></g><g id="Clothing/Shirt-Crew-Neck" transform="translate(0.000000, 170.000000)"><defs><path d="M165.960472,29.2949161 C202.936473,32.3249982 232,63.2942856 232,101.051724 L232,110 L32,110 L32,101.051724 C32,62.9525631 61.591985,31.7649812 99.0454063,29.2195264 C99.0152598,29.5931145 99,29.9692272 99,30.3476251 C99,42.2107177 113.998461,51.8276544 132.5,51.8276544 C151.001539,51.8276544 166,42.2107177 166,30.3476251 C166,29.9946691 165.986723,29.6437014 165.960472,29.2949161 Z" id="react-path-1060425"></path></defs><mask id="react-mask-1060426" fill="white"><use xlink:href="#react-path-1060425"></use></mask><use id="Clothes" fill="#E6E6E6" fill-rule="evenodd" xlink:href="#react-path-1060425"></use><g id="Color/Palette/Gray-01" mask="url(#react-mask-1060426)" fill-rule="evenodd" fill="#5199E4"><rect id="🖍Color" x="0" y="0" width="264" height="110"></rect></g><g id="Shadowy" opacity="0.599999964" stroke-width="1" fill-rule="evenodd" mask="url(#react-mask-1060426)" fill-opacity="0.16" fill="#000000"><g transform="translate(92.000000, 4.000000)" id="Hola-👋🏼"><ellipse cx="40.5" cy="27.8476251" rx="39.6351047" ry="26.9138272"></ellipse></g></g></g><g id="Face" transform="translate(76.000000, 82.000000)" fill="#000000"><g id="Mouth/Smile" transform="translate(2.000000, 52.000000)"><defs><path d="M35.117844,15.1280772 C36.1757121,24.6198025 44.2259873,32 54,32 C63.8042055,32 71.8740075,24.574136 72.8917593,15.0400546 C72.9736685,14.272746 72.1167429,13 71.042767,13 C56.1487536,13 44.7379213,13 37.0868244,13 C36.0066168,13 35.0120058,14.1784435 35.117844,15.1280772 Z" id="react-path-1060427"></path></defs><mask id="react-mask-1060428" fill="white"><use xlink:href="#react-path-1060427"></use></mask><use id="Mouth" fill-opacity="0.699999988" fill="#000000" fill-rule="evenodd" xlink:href="#react-path-1060427"></use><rect id="Teeth" fill="#FFFFFF" fill-rule="evenodd" mask="url(#react-mask-1060428)" x="39" y="2" width="31" height="16" rx="5"></rect><g id="Tongue" stroke-width="1" fill-rule="evenodd" mask="url(#react-mask-1060428)" fill="#FF4F6D"><g transform="translate(38.000000, 24.000000)"><circle cx="11" cy="11" r="11"></circle><circle cx="21" cy="11" r="11"></circle></g></g></g><g id="Nose/Default" transform="translate(28.000000, 40.000000)" fill-opacity="0.16"><path d="M16,8 C16,12.418278 21.372583,16 28,16 L28,16 C34.627417,16 40,12.418278 40,8" id="Nose"></path></g><g id="Eyes/Default-😀" transform="translate(0.000000, 8.000000)" fill-opacity="0.599999964"><circle id="Eye" cx="30" cy="22" r="6"></circle><circle id="Eye" cx="82" cy="22" r="6"></circle></g><g id="Eyebrow/Natural/Default-Natural" fill-opacity="0.599999964"><path d="M26.0390934,6.21012364 C20.2775554,6.98346216 11.2929313,12.0052479 12.04426,17.8178111 C12.0689481,18.0080543 12.3567302,18.0673468 12.4809077,17.9084937 C14.9674041,14.7203351 34.1927973,10.0365481 41.1942673,11.0147151 C41.8350523,11.1044465 42.2580662,10.4430343 41.8210501,10.0302067 C38.0765663,6.49485426 31.2003792,5.51224825 26.0390934,6.21012364" id="Eyebrow" transform="translate(27.000000, 12.000000) rotate(5.000000) translate(-27.000000, -12.000000) "></path><path d="M85.0390934,6.21012364 C79.2775554,6.98346216 70.2929313,12.0052479 71.04426,17.8178111 C71.0689481,18.0080543 71.3567302,18.0673468 71.4809077,17.9084937 C73.9674041,14.7203351 93.1927973,10.0365481 100.194267,11.0147151 C100.835052,11.1044465 101.258066,10.4430343 100.82105,10.0302067 C97.0765663,6.49485426 90.2003792,5.51224825 85.0390934,6.21012364" id="Eyebrow" transform="translate(86.000000, 12.000000) scale(-1, 1) rotate(5.000000) translate(-86.000000, -12.000000) "></path></g></g><g id="Top" stroke-width="1" fill-rule="evenodd"><defs><rect id="react-path-1060433" x="0" y="0" width="264" height="280"></rect><path d="M180.14998,39.9204083 C177.390206,37.1003988 174.185913,34.7068297 171.069252,32.3065503 C170.381566,31.777442 169.682843,31.2610833 169.010544,30.7118441 C168.857687,30.5870323 167.291999,29.4657388 167.104691,29.0530544 C166.653816,28.0602634 166.915042,28.8332916 166.977255,27.6485857 C167.055857,26.150508 170.11064,21.9193194 167.831176,20.9490079 C166.828413,20.522232 165.039628,21.6579526 164.077671,22.0330592 C162.196235,22.7671676 160.291721,23.3932399 158.346734,23.9330847 C159.278588,22.0763407 161.055333,18.3594977 157.71591,19.3543018 C155.114345,20.1293431 152.690052,22.1219709 150.075777,23.0594018 C150.940735,21.6415124 154.399901,17.2479341 151.274209,17.0023366 C150.301549,16.925839 147.471201,18.7503735 146.423952,19.1395717 C143.287223,20.3054888 140.083264,21.0590571 136.789999,21.6525844 C125.59203,23.6707114 112.497238,23.0953019 102.1368,28.1934632 C94.1494796,32.1236942 86.262502,38.2220278 81.648386,45.987539 C77.2011742,53.472559 75.537818,61.6641751 74.6069673,70.2412987 C73.9239644,76.535909 73.8684412,83.0425652 74.1878671,89.3599905 C74.2922241,91.4297869 74.5250203,100.970847 77.5319724,98.0813859 C79.0300967,96.641688 79.019059,90.8282073 79.3963495,88.8604076 C80.1472513,84.9452748 80.870057,81.0126951 82.122006,77.2227096 C84.3282191,70.5439339 86.9307879,63.4296587 92.4269209,58.8297383 C95.9539853,55.8782066 98.4307906,51.8889248 101.806002,48.9112229 C103.322188,47.5738572 102.165231,47.7130963 104.602902,47.888571 C106.240504,48.006337 107.885464,48.0512961 109.52641,48.0942421 C113.322394,48.1928837 117.124399,48.16772 120.921387,48.1811407 C128.56821,48.208653 136.179243,48.316689 143.818708,47.9164188 C147.213653,47.7385955 150.617965,47.6423024 154.00388,47.3282597 C155.895349,47.152785 159.251496,45.9405668 160.808488,46.8669256 C162.233362,47.7144383 163.71309,50.4817719 164.736257,51.615144 C167.153525,54.2935659 170.035717,56.3392052 172.862385,58.5354911 C178.756547,63.114945 181.732392,68.8666908 183.522515,76.023241 C185.305949,83.1532854 184.805905,89.76815 187.013456,96.78479 C187.401784,98.0184813 188.428965,100.14498 189.695296,98.2389151 C189.930434,97.8849461 189.869559,95.9390277 189.869559,94.819339 C189.869559,90.2995934 191.014141,86.9083772 190.999758,82.3591197 C190.943566,68.5271489 190.49637,50.4908308 180.14998,39.9204083 Z" id="react-path-1060432"></path><filter x="-0.8%" y="-2.0%" width="101.5%" height="108.0%" filterUnits="objectBoundingBox" id="react-filter-1060429"><feOffset dx="0" dy="2" in="SourceAlpha" result="shadowOffsetOuter1"></feOffset><feColorMatrix values="0 0 0 0 0   0 0 0 0 0   0 0 0 0 0  0 0 0 0.16 0" type="matrix" in="shadowOffsetOuter1" result="shadowMatrixOuter1"></feColorMatrix><feMerge><feMergeNode in="shadowMatrixOuter1"></feMergeNode><feMergeNode in="SourceGraphic"></feMergeNode></feMerge></filter></defs><mask id="react-mask-1060431" fill="white"><use xlink:href="#react-path-1060433"></use></mask><g id="Mask"></g><g id="Top/Short-Hair/Short-Flat" mask="url(#react-mask-1060431)"><g transform="translate(-1.000000, 0.000000)"><mask id="react-mask-1060430" fill="white"><use xlink:href="#react-path-1060432"></use></mask><use id="Short-Hair" stroke="none" fill="#1F3140" fill-rule="evenodd" xlink:href="#react-path-1060432"></use><g id="Skin/👶🏽-03-Brown" mask="url(#react-mask-1060430)" fill="#4A312C"><g transform="translate(0.000000, 0.000000) " id="Color"><rect x="0" y="0" width="264" height="280"></rect></g></g></g></g></g></g></g></g></g>` },
-      maya: { vb: '0 0 264 280', corpo: `<desc>Created with getavataaars.com</desc><defs><circle id="react-path-1060466" cx="120" cy="120" r="120"></circle><path d="M12,160 C12,226.27417 65.72583,280 132,280 C198.27417,280 252,226.27417 252,160 L264,160 L264,-1.42108547e-14 L-3.19744231e-14,-1.42108547e-14 L-3.19744231e-14,160 L12,160 Z" id="react-path-1060467"></path><path d="M124,144.610951 L124,163 L128,163 L128,163 C167.764502,163 200,195.235498 200,235 L200,244 L0,244 L0,235 C-4.86974701e-15,195.235498 32.235498,163 72,163 L72,163 L76,163 L76,144.610951 C58.7626345,136.422372 46.3722246,119.687011 44.3051388,99.8812385 C38.4803105,99.0577866 34,94.0521096 34,88 L34,74 C34,68.0540074 38.3245733,63.1180731 44,62.1659169 L44,56 L44,56 C44,25.072054 69.072054,5.68137151e-15 100,0 L100,0 L100,0 C130.927946,-5.68137151e-15 156,25.072054 156,56 L156,62.1659169 C161.675427,63.1180731 166,68.0540074 166,74 L166,88 C166,94.0521096 161.51969,99.0577866 155.694861,99.8812385 C153.627775,119.687011 141.237365,136.422372 124,144.610951 Z" id="react-path-1060468"></path></defs><g id="Avataaar" stroke="none" stroke-width="1" fill="none" fill-rule="evenodd"><g transform="translate(-825.000000, -1100.000000)" id="Avataaar/Circle"><g transform="translate(825.000000, 1100.000000)"><g id="Mask"></g><g id="Avataaar" stroke-width="1" fill-rule="evenodd" mask="url(#react-mask-1060470)"><g id="Body" transform="translate(32.000000, 36.000000)"><mask id="react-mask-1060471" fill="white"><use xlink:href="#react-path-1060468"></use></mask><use fill="#D0C6AC" xlink:href="#react-path-1060468"></use><g id="Skin/👶🏽-03-Brown" mask="url(#react-mask-1060471)" fill="#FD9841"><g transform="translate(0.000000, 0.000000)" id="Color"><rect x="0" y="0" width="264" height="280"></rect></g></g><path d="M156,79 L156,102 C156,132.927946 130.927946,158 100,158 C69.072054,158 44,132.927946 44,102 L44,79 L44,94 C44,124.927946 69.072054,150 100,150 C130.927946,150 156,124.927946 156,94 L156,79 Z" id="Neck-Shadow" fill-opacity="0.100000001" fill="#000000" mask="url(#react-mask-1060471)"></path></g><g id="Clothing/Shirt-Crew-Neck" transform="translate(0.000000, 170.000000)"><defs><path d="M165.960472,29.2949161 C202.936473,32.3249982 232,63.2942856 232,101.051724 L232,110 L32,110 L32,101.051724 C32,62.9525631 61.591985,31.7649812 99.0454063,29.2195264 C99.0152598,29.5931145 99,29.9692272 99,30.3476251 C99,42.2107177 113.998461,51.8276544 132.5,51.8276544 C151.001539,51.8276544 166,42.2107177 166,30.3476251 C166,29.9946691 165.986723,29.6437014 165.960472,29.2949161 Z" id="react-path-1060472"></path></defs><mask id="react-mask-1060473" fill="white"><use xlink:href="#react-path-1060472"></use></mask><use id="Clothes" fill="#E6E6E6" fill-rule="evenodd" xlink:href="#react-path-1060472"></use><g id="Color/Palette/Gray-01" mask="url(#react-mask-1060473)" fill-rule="evenodd" fill="#2F9A94"><rect id="🖍Color" x="0" y="0" width="264" height="110"></rect></g><g id="Shadowy" opacity="0.599999964" stroke-width="1" fill-rule="evenodd" mask="url(#react-mask-1060473)" fill-opacity="0.16" fill="#000000"><g transform="translate(92.000000, 4.000000)" id="Hola-👋🏼"><ellipse cx="40.5" cy="27.8476251" rx="39.6351047" ry="26.9138272"></ellipse></g></g></g><g id="Face" transform="translate(76.000000, 82.000000)" fill="#000000"><g id="Mouth/Smile" transform="translate(2.000000, 52.000000)"><defs><path d="M35.117844,15.1280772 C36.1757121,24.6198025 44.2259873,32 54,32 C63.8042055,32 71.8740075,24.574136 72.8917593,15.0400546 C72.9736685,14.272746 72.1167429,13 71.042767,13 C56.1487536,13 44.7379213,13 37.0868244,13 C36.0066168,13 35.0120058,14.1784435 35.117844,15.1280772 Z" id="react-path-1060474"></path></defs><mask id="react-mask-1060475" fill="white"><use xlink:href="#react-path-1060474"></use></mask><use id="Mouth" fill-opacity="0.699999988" fill="#000000" fill-rule="evenodd" xlink:href="#react-path-1060474"></use><rect id="Teeth" fill="#FFFFFF" fill-rule="evenodd" mask="url(#react-mask-1060475)" x="39" y="2" width="31" height="16" rx="5"></rect><g id="Tongue" stroke-width="1" fill-rule="evenodd" mask="url(#react-mask-1060475)" fill="#FF4F6D"><g transform="translate(38.000000, 24.000000)"><circle cx="11" cy="11" r="11"></circle><circle cx="21" cy="11" r="11"></circle></g></g></g><g id="Nose/Default" transform="translate(28.000000, 40.000000)" fill-opacity="0.16"><path d="M16,8 C16,12.418278 21.372583,16 28,16 L28,16 C34.627417,16 40,12.418278 40,8" id="Nose"></path></g><g id="Eyes/Default-😀" transform="translate(0.000000, 8.000000)" fill-opacity="0.599999964"><circle id="Eye" cx="30" cy="22" r="6"></circle><circle id="Eye" cx="82" cy="22" r="6"></circle></g><g id="Eyebrow/Natural/Default-Natural" fill-opacity="0.599999964"><path d="M26.0390934,6.21012364 C20.2775554,6.98346216 11.2929313,12.0052479 12.04426,17.8178111 C12.0689481,18.0080543 12.3567302,18.0673468 12.4809077,17.9084937 C14.9674041,14.7203351 34.1927973,10.0365481 41.1942673,11.0147151 C41.8350523,11.1044465 42.2580662,10.4430343 41.8210501,10.0302067 C38.0765663,6.49485426 31.2003792,5.51224825 26.0390934,6.21012364" id="Eyebrow" transform="translate(27.000000, 12.000000) rotate(5.000000) translate(-27.000000, -12.000000) "></path><path d="M85.0390934,6.21012364 C79.2775554,6.98346216 70.2929313,12.0052479 71.04426,17.8178111 C71.0689481,18.0080543 71.3567302,18.0673468 71.4809077,17.9084937 C73.9674041,14.7203351 93.1927973,10.0365481 100.194267,11.0147151 C100.835052,11.1044465 101.258066,10.4430343 100.82105,10.0302067 C97.0765663,6.49485426 90.2003792,5.51224825 85.0390934,6.21012364" id="Eyebrow" transform="translate(86.000000, 12.000000) scale(-1, 1) rotate(5.000000) translate(-86.000000, -12.000000) "></path></g></g><g id="Top" stroke-width="1" fill-rule="evenodd"><defs><rect id="react-path-1060478" x="0" y="0" width="264" height="280"></rect><path d="M133.506381,81.3351151 C137.363649,83.3307002 140,87.3574737 140,92 L140,105 C140,111.018625 135.569129,116.002364 129.791419,116.867187 C128.048193,137.114792 115.530782,154.282984 98,162.610951 L98,162.610951 L98,181 L102,181 C119.490913,181 135.525121,187.236892 148,197.608051 L148,74 C148,53.5654643 139.717268,35.0654643 126.325902,21.6740982 C112.934536,8.28273213 94.4345357,-3.55271368e-15 74,0 C33.1309285,7.10542736e-15 -7.10542736e-15,33.1309285 0,74 L0,257.716445 C13.5691766,255.775526 24,244.105888 24,230 L24,184.423101 C30.9346808,182.200199 38.3271796,181 46,181 L50,181 L50,162.610951 C38.7726252,157.277407 29.6015372,148.317951 24,137.245847 L24,75.2659587 C33.1467898,72.2910056 42.777598,68.0170651 52.3415164,62.4953343 C67.7445474,53.6023901 80.4313947,42.9409152 89.0661426,32.3970356 C90.8310687,37.5951441 93.1752556,42.8009742 96.1104311,47.8848473 C104.877881,63.0705152 117.224186,74.2337047 130,79.9170491 L130,80.1659169 C130.400422,80.233095 130.794121,80.3201038 131.18005,80.4258987 C131.954509,80.7493055 132.730185,81.0524853 133.506381,81.3351151 Z" id="react-path-1060479"></path></defs><mask id="react-mask-1060476" fill="white"><use xlink:href="#react-path-1060478"></use></mask><g id="Mask"></g><g id="Top/Long-Hair/Straight" mask="url(#react-mask-1060476)"><g transform="translate(-1.000000, 0.000000)"><g id="Hair" stroke-width="1" fill="none" fill-rule="evenodd" transform="translate(59.000000, 18.000000)"><mask id="react-mask-1060477" fill="white"><use xlink:href="#react-path-1060479"></use></mask><use id="Mask-Hair" fill="#944F23" xlink:href="#react-path-1060479"></use><g id="Skin/👶🏽-03-Brown" mask="url(#react-mask-1060477)" fill="#2C1B18"><g transform="translate(0.000000, 0.000000) " id="Color"><rect x="0" y="0" width="264" height="280"></rect></g></g></g><path d="M192.506381,99.3351151 C197.3745,101.107702 202.263079,102.071957 207,102.148232 L207,102.148232 L207,92 C207,71.5654643 198.717268,53.0654643 185.325902,39.6740982 C198.717268,53.0654643 207,71.5654643 207,92 L207,215.608051 C194.525121,205.236892 178.490913,199 161,199 L157,199 L157,180.610951 L157,180.610951 C174.530782,172.282984 187.048193,155.114792 188.791419,134.867187 C194.569129,134.002364 199,129.018625 199,123 L199,110 C199,105.357474 196.363649,101.3307 192.506381,99.3351151 Z M190.18005,98.4258987 C189.794121,98.3201038 189.400422,98.233095 189,98.1659169 L189,97.9170491 C189.392974,98.0918644 189.786355,98.2614951 190.18005,98.4258987 Z M83,155.245847 C88.6015372,166.317951 97.7726252,175.277407 109,180.610951 L109,199 L105,199 C97.3271796,199 89.9346808,200.200199 83,202.423101 L83,155.245847 Z" id="Shadow" fill-opacity="0.24" fill="#000000" fill-rule="evenodd"></path></g></g></g></g></g></g></g>` },
-    };
-
+    // Nomes gerados por versões anteriores do plugin (continuam válidos).
+    const NOMES_ANTERIORES = [
+      'Ada', 'Bruno', 'Carla', 'Dino', 'Elsa', 'Félix', 'Greta', 'Hugo',
+      'Júlio', 'Kira', 'Lino', 'Mara', 'Nuno', 'Olga', 'Pedro',
+      'Rita', 'Tino', 'Vera', 'Yuki', 'Zane',
+    ];
+    const NOMES_VALIDOS = new Set([...NOMES, ...NOMES_ANTERIORES]);
 
     // Banco de estilos: forma do avatar + paleta (fundo/borde/acento).
-    // Cada estilo identifica visualmente ao ocupante na sala.
     const ESTILOS = [
       { id: 'azul', forma: 'circulo', paleta: { fundo: '#2e5a86', borde: '#1d3a55', acento: '#4a90d9' } },
       { id: 'bosque', forma: 'cuadrado', paleta: { fundo: '#2f6d4f', borde: '#1f4a35', acento: '#58b368' } },
@@ -125,9 +575,8 @@ window.__ModuleLoader__.load({
 
     const aleatorioDe = (lista) => lista[Math.floor(Math.random() * lista.length)];
 
-    // Associador: cache em memória + localStorage. Cria uma associação
-    // { name, style } na primeira visita de cada id e reutiliza-a depois,
-    // mesmo após recargar a página.
+    // Associador: cache em memória + localStorage. Cria { name, avatar, style }
+    // na primeira visita de cada id e reutiliza-o depois, mesmo após recarregar.
     function criarAssociador() {
       let cache = null; // null = ainda não lido
 
@@ -150,29 +599,31 @@ window.__ModuleLoader__.load({
         }
       };
 
+      // Prefere um nome que ainda ninguém usa (menos homónimos na sala).
+      const nomeLivre = () => {
+        const usados = new Set(Object.values(cache).map((a) => a && a.name));
+        const livres = NOMES.filter((n) => !usados.has(n));
+        return aleatorioDe(livres.length ? livres : NOMES);
+      };
+
       return {
-        // Associação estável para `id`; `dado` permite que o próprio evento
-        // (futuro transporte) traia nome/avatar explícitos se os houver.
-        para(id, dado = {}) {
+        para(id) {
           if (cache === null) ler();
           let a = cache[id];
           if (typeof a !== 'object' || a === null) {
-            a = {
-              name: typeof dado.name === 'string' && dado.name ? dado.name : aleatorioDe(NOMES),
-              avatar: typeof dado.avatar === 'string' && dado.avatar ? dado.avatar : aleatorioDe(Object.keys(AVATARS)),
-              style: dado.style ?? aleatorioDe(ESTILOS),
-            };
+            a = { name: nomeLivre(), avatar: aleatorioDe(identidades()), style: aleatorioDe(ESTILOS) };
             cache[id] = a;
             guardar();
+            return a;
           }
-          // Migração: caches antigos guardaram data URIs — passam a identidade.
-          if (typeof a.avatar === 'string' && !AVATARS[a.avatar]) {
-            if (a.avatar.startsWith('data:') || a.avatar.startsWith('http')) {
-              a.avatar = aleatorioDe(Object.keys(AVATARS));
-              cache[id] = a;
-              guardar();
-            }
-          }
+          // Migrações de versões anteriores: nomes que eram o TÍTULO da conversa
+          // (não cabiam na ficha) passam a nome de pessoa; avatares antigos
+          // (data:/http ou identidade desconhecida) passam a uma identidade real.
+          let mudou = false;
+          if (!NOMES_VALIDOS.has(a.name)) { a.name = nomeLivre(); mudou = true; }
+          if (typeof a.avatar !== 'string' || !EXPR_AVATARS[a.avatar]) { a.avatar = aleatorioDe(identidades()); mudou = true; }
+          if (!a.style) { a.style = aleatorioDe(ESTILOS); mudou = true; }
+          if (mudou) { cache[id] = a; guardar(); }
           return a;
         },
       };
@@ -183,13 +634,13 @@ window.__ModuleLoader__.load({
     const associador = criarAssociador();
 
     /* ================================================================
-     * 1. Estado do escritório — contrato §2 (projeção browser)
+     * 2. Estado do escritório — contrato §2 (projeção browser)
      * ================================================================ */
 
     // Precedência de emoji (contrato §2): ❓/⚖️ > ⚠️ > 🔧/📝/🔍 > 🔄/📦/⏳ > ✅ > 💤.
     const PRECEDENCIA = {
       pergunta: 10, aprovacao: 10, erro: 8, ferramenta: 6, subagentes: 5,
-      retry: 4, compactacao: 4, concluido: 2, ocioso: 0,
+      trabalho: 5, retry: 4, compactacao: 4, concluido: 2, ocioso: 0,
     };
 
     // Estado visual: id -> rótulo e expression Avataaars derivada.
@@ -202,17 +653,20 @@ window.__ModuleLoader__.load({
       waiting: 'waiting', error: 'error', done: 'success',
     };
 
-    const nomeDe = (id) => `Agente ${String(id).slice(-5)}`;
-
     function criarPessoa(id, modelo, a, evento) {
-      const asoc = a ?? null; // { name, avatar, style } | null (tarefa 2)
+      const asoc = a ?? null; // { name, avatar, style } | null
+      const ev = evento ?? {};
       return {
         id,
-        name: asoc ? asoc.name : nomeDe(id),
-        avatar: asoc ? asoc.avatar : null, // o painel não inventa URLs
-        style: asoc ? asoc.style : null,   // { forma, paleta } do avatar
-        teamId: evento && evento.teamId ? evento.teamId : 'geral',
-        cwd: evento && evento.cwd ? evento.cwd : null,
+        name: asoc ? asoc.name : `Agente ${String(id).slice(-5)}`,
+        avatar: asoc ? asoc.avatar : null,
+        style: asoc ? asoc.style : null,
+        title: typeof ev.title === 'string' && ev.title ? ev.title : null, // título da conversa no DSH
+        cwd: typeof ev.cwd === 'string' && ev.cwd ? ev.cwd : null,
+        parentId: ev.parentId != null ? String(ev.parentId) : null,
+        subagent: ev.subagent === true,
+        blank: ev.blank === true,
+        running: false,
         status: 'idle',
         emoji: '💤',
         expression: 'idle',
@@ -221,7 +675,7 @@ window.__ModuleLoader__.load({
         cost: null, // null -> "custo indisponível", nunca zero inventado
         question: null, // persistente até question/answered
         approvals: [],
-        subagents: 0,
+        subagents: 0, // subagentes A CORRER (delegação em curso)
         outputs: [],
         flags: {
           ocioso: true, concluido: false, erro: false, ferramenta: false,
@@ -240,6 +694,9 @@ window.__ModuleLoader__.load({
       if (p.subagents > 0) return { e: '🤝', status: 'working', prioridade: PRECEDENCIA.subagentes };
       if (f.retry) return { e: '🔄', status: 'working', prioridade: PRECEDENCIA.retry };
       if (f.compactacao) return { e: '📦', status: 'working', prioridade: PRECEDENCIA.compactacao };
+      // Turno a correr sem sinal mais específico = a trabalhar (o catálogo do
+      // DSH só diz running/idle — sem isto, quem trabalha aparecia "Disponível").
+      if (!f.ocioso) return { e: '📝', status: 'working', prioridade: PRECEDENCIA.trabalho };
       if (f.concluido) return { e: '✅', status: 'done', prioridade: PRECEDENCIA.concluido };
       return { e: '💤', status: 'idle', prioridade: PRECEDENCIA.ocioso };
     }
@@ -254,17 +711,15 @@ window.__ModuleLoader__.load({
     // Outputs expiram em ~1s na UI (contrato §2); histórico limitado a 6.
     function adicionarOutput(p, kind, texto) {
       p.outputs.push({ kind, text: texto, expiraEm: Date.now() + 1000 });
-      // Histórico limitado a 6: retira o mais antigo (Array.shift não existe).
       if (p.outputs.length > 6) p.outputs.splice(0, 1);
     }
-
-    const num = (v) => (Number.isFinite(Number(v)) ? Number(v) : 0);
 
     // Construtor do estado (contrato §2): recebe tabela de preços opcional.
     function createOfficeState(precos = {}) {
       return {
         people: new Map(), // sessionId -> pessoa
         teams: {},
+        workspaces: null, // { fonte, items, archived } | null (sem dados: agrupa por pasta)
         modules: [],
         alerts: [],
         precos: new Map(Object.entries(precos)),
@@ -273,45 +728,64 @@ window.__ModuleLoader__.load({
       };
     }
 
-    // Evento normalizado (vocabulário §1) -> NOVO estado (puro).
-    // Reações (tarefa 3): as únicas escrituras de emoji/status/expression
-    // acontecem aqui, derivadas do evento recebido — nunca de um timer. Os
-    // indicadores transitórios limpiam-se por eventos posteriores; o
-    // `associador` toca localStorage só ao criar uma pessoa nova.
+    // Evento normalizado (vocabulário §1) -> NOVO estado.
+    // As únicas escrituras de emoji/status/expression acontecem aqui, derivadas
+    // do evento recebido — nunca de um timer.
     function applyEvent(estado, evento) {
       const pessoas = new Map(estado.people);
       const p = (id) => pessoas.get(id);
+      const extra = {};
 
       switch (evento.type) {
         case 'session/added':
           if (!pessoas.has(evento.sessionId)) {
-            const asoc = associador.para(evento.sessionId, evento);
+            const asoc = associador.para(evento.sessionId);
             pessoas.set(evento.sessionId, criarPessoa(evento.sessionId, evento.model, asoc, evento));
           }
           break;
+        case 'session/meta': {
+          // Metadados que mudam depois da alta (título gerado após o 1.º turno,
+          // pasta, fim do "em branco", origem de subagente).
+          const pessoa = p(evento.sessionId);
+          if (!pessoa) break;
+          if ('title' in evento) pessoa.title = typeof evento.title === 'string' && evento.title ? evento.title : null;
+          if ('cwd' in evento) pessoa.cwd = typeof evento.cwd === 'string' && evento.cwd ? evento.cwd : null;
+          if ('parentId' in evento) pessoa.parentId = evento.parentId != null ? String(evento.parentId) : null;
+          if ('subagent' in evento) pessoa.subagent = evento.subagent === true;
+          if ('blank' in evento) pessoa.blank = evento.blank === true;
+          break;
+        }
         case 'session/removed':
-          // A associação fica em localStorage: se a sessão voltar, mantenga
+          // A associação fica em localStorage: se a sessão voltar, mantém
           // nome e estilo (identidade estável entre desconexões).
           pessoas.delete(evento.sessionId);
+          break;
+        case 'workspaces':
+          // Lista de workspaces do DSH (ou 'nenhuma': sem serviço -> por pasta).
+          extra.workspaces = {
+            fonte: evento.fonte === 'dsh' ? 'dsh' : 'nenhuma',
+            items: Array.isArray(evento.items) ? evento.items : [],
+            archived: Array.isArray(evento.archived) ? evento.archived : [],
+          };
           break;
         case 'status': {
           const pessoa = p(evento.sessionId);
           if (!pessoa) break;
-          const emExecucion = evento.status === 'running';
-          pessoa.flags.ocioso = !emExecucion;
+          const emExecucao = evento.status === 'running';
+          pessoa.running = emExecucao;
+          pessoa.flags.ocioso = !emExecucao;
           // Nova execução supera as marcas transitórias; arranque de turno
           // também limpa o erro anterior.
           pessoa.flags.concluido = false;
           pessoa.flags.ferramenta = false;
           pessoa.flags.retry = false;
-          if (emExecucion) pessoa.flags.erro = false;
+          if (emExecucao) pessoa.flags.erro = false;
           break;
         }
         case 'turn/end': {
           const pessoa = p(evento.sessionId);
           if (!pessoa) break;
           const kind = evento.kind;
-          // Fin de turno: limpa os indicadores transitórios.
           pessoa.flags.ocioso = true;
           pessoa.flags.ferramenta = false;
           pessoa.flags.retry = false;
@@ -340,7 +814,6 @@ window.__ModuleLoader__.load({
           pessoa.flags.retry = false;
           pessoa.flags.compactacao = false;
           if (evento.phase === 'call') {
-            // Nova chamada = progresso: supera o erro anterior (se o houver).
             pessoa.flags.ferramenta = true;
             pessoa.flags.erro = false;
           } else {
@@ -379,7 +852,6 @@ window.__ModuleLoader__.load({
           const pessoa = p(evento.sessionId);
           if (!pessoa) break;
           pessoa.subagents += 1;
-          // Subagente a correr = trabalho em curso, não conclusão.
           pessoa.flags.ocioso = false;
           pessoa.flags.concluido = false;
           pessoa.flags.retry = false;
@@ -396,8 +868,7 @@ window.__ModuleLoader__.load({
           pessoa.model = evento.model ?? pessoa.model;
           const preco = precoDe(estado.precos, pessoa.model);
           if (!preco) {
-            // Sem preço conhecido para o modelo -> custo indisponível.
-            pessoa.cost = null;
+            pessoa.cost = null; // sem preço conhecido -> custo indisponível
             break;
           }
           const delta = num(evento.uncachedInput) * preco.input
@@ -416,8 +887,6 @@ window.__ModuleLoader__.load({
           }
           break;
         }
-        // Pressão de contexto (extensão prevista do vocabulário): used é o
-        // projectedTokens ?? pressureTokens que o adaptador vier a entregar.
         case 'ctx': {
           const pessoa = p(evento.sessionId);
           if (!pessoa) break;
@@ -427,9 +896,6 @@ window.__ModuleLoader__.load({
         case 'retry': {
           const pessoa = p(evento.sessionId);
           if (!pessoa) break;
-          // llm/retry-started: sem evento de fim no vocabulário, o seguinte
-          // evento para esta pessoa (status/tool/turn-end/...) supera o
-          // indicador — nunca um temporizador.
           pessoa.flags.retry = true;
           pessoa.flags.ocioso = false;
           pessoa.flags.concluido = false;
@@ -438,8 +904,6 @@ window.__ModuleLoader__.load({
         case 'compaction': {
           const pessoa = p(evento.sessionId);
           if (!pessoa) break;
-          // O vocabulário tem phase 'start'|'end': o indicador vive exatamente
-          // o tempo que os próprios eventos digam — sem temporizador.
           pessoa.flags.compactacao = evento.phase === 'start';
           if (evento.phase === 'start') pessoa.flags.ocioso = false;
           break;
@@ -449,7 +913,7 @@ window.__ModuleLoader__.load({
       }
 
       for (const pessoa of pessoas.values()) recalcular(pessoa);
-      return { ...estado, people: pessoas };
+      return { ...estado, ...extra, people: pessoas };
     }
 
     // Regra §2: view de apresentação pronta para a UI.
@@ -461,18 +925,19 @@ window.__ModuleLoader__.load({
         emoji: p.emoji, expression: p.expression, ctx: p.ctx, model: p.model,
         cost: p.cost, question: p.question, approvals: p.approvals,
         subagents: p.subagents, outputs: p.outputs,
+        title: p.title, cwd: p.cwd, parentId: p.parentId, subagent: p.subagent,
+        blank: p.blank, running: p.running,
       };
     }
 
     function officeView(estado) {
       const people = {};
       for (const p of estado.people.values()) people[p.id] = personView(estado, p.id);
-      return { people, teams: estado.teams, alerts: estado.alerts };
+      return { people, teams: estado.teams, alerts: estado.alerts, workspaces: estado.workspaces ?? null };
     }
 
-    // Expiração (~1s) só de outputs na UI (contrato §2). Presentação pura:
-    // nunca recalcula emoji/expressão/ficha — as reações visuais dependem
-    // somente de eventos (tarefa 3), este timer não as toca.
+    // Expiração (~1s) só de outputs na UI (contrato §2): nunca recalcula
+    // emoji/expressão/ficha.
     function purgar(estado, agora = Date.now()) {
       const pessoas = new Map(estado.people);
       let mudou = false;
@@ -485,24 +950,15 @@ window.__ModuleLoader__.load({
     }
 
     /* ================================================================
-     * 2. Adaptador — contrato §3 (projeção browser)
+     * 3. Adaptador — contrato §3 (projeção browser)
      * ================================================================ */
 
-    // createAdapter({ onEvent, sessions, projections, surface }) -> { start, stop }.
-    // `surface` é o transporte real host->browser (feature-detected em apply):
-    //   surface.catalogo() -> [{ id, model? }]
-    //   surface.assinar(fn) -> devolve função de libertação (ou null)
-    // Sem canal, o painel mostra "telemetria indisponível" — nunca inventa
-    // sessões nem eventos.
-
-    // Normaliza um evento bruto do DSH para o vocabulário do contrato §1.
-    // Tipos desconhecidos devolvem null (ignorados, nunca fabricados).
-    // Tipos já no vocabulário normalizado (vindos da superfície de snapshots)
-    // passam tal-e-qual; só os eventos brutos do fio são traduzidos.
+    // Tipos já no vocabulário normalizado (vindos da ponte) passam tal-e-qual;
+    // só os eventos brutos do fio são traduzidos. Desconhecidos -> null.
     const TIPOS_NORMALIZADOS = new Set([
-      'session/added', 'session/removed', 'status', 'usage', 'model', 'ctx',
-      'subagent/start', 'subagent/end', 'question', 'question/answered',
-      'approval', 'approval/decided', 'retry', 'compaction',
+      'session/added', 'session/meta', 'session/removed', 'workspaces', 'status',
+      'usage', 'model', 'ctx', 'subagent/start', 'subagent/end', 'question',
+      'question/answered', 'approval', 'approval/decided', 'retry', 'compaction',
     ]);
     function normalizarEventoDSH(bruto) {
       if (!bruto || typeof bruto !== 'object') return null;
@@ -522,10 +978,6 @@ window.__ModuleLoader__.load({
           return { type: 'tool', ...base, phase: 'call', name: bruto.name ?? bruto.payload?.name };
         case 'tool/result':
           return { type: 'tool', ...base, phase: 'result', name: bruto.name ?? bruto.payload?.name, ok: bruto.ok ?? bruto.payload?.ok };
-        case 'subagent/start':
-          return { type: 'subagent/start', ...base, childId: bruto.id ?? bruto.payload?.id, runId: bruto.runId ?? bruto.payload?.runId, local: bruto.local ?? bruto.payload?.local };
-        case 'subagent/end':
-          return { type: 'subagent/end', ...base, childId: bruto.id ?? bruto.payload?.id, runId: bruto.runId ?? bruto.payload?.runId, stopReason: bruto.stopReason ?? bruto.payload?.stopReason };
         case 'approval/asked':
           return { type: 'approval', ...base, id: bruto.id, toolName: bruto.toolName ?? bruto.payload?.toolName, callId: bruto.callId ?? bruto.payload?.callId, reason: bruto.reason ?? bruto.payload?.reason };
         case 'approval/decided':
@@ -541,6 +993,9 @@ window.__ModuleLoader__.load({
       }
     }
 
+    // createAdapter({ onEvent, sessions, projections, surface }) -> { start, stop }.
+    // `surface` é a ponte real (secção 0). Sem canal, o painel mostra
+    // "telemetria indisponível" — nunca inventa sessões nem eventos.
     function createAdapter({ onEvent, sessions = [], projections = {}, surface = null }) {
       let ativo = false;
       const limpeza = [];
@@ -552,10 +1007,10 @@ window.__ModuleLoader__.load({
           for (const sessao of sessions) {
             onEvent({
               type: 'session/added', sessionId: sessao.id, model: sessao.model,
-              name: sessao.name, teamId: sessao.teamId, cwd: sessao.cwd,
+              title: sessao.title, cwd: sessao.cwd, parentId: sessao.parentId,
+              subagent: sessao.subagent, blank: sessao.blank,
             });
           }
-          // Transporte real: assinar eventos brutos e normalizá-los.
           if (surface && typeof surface.assinar === 'function') {
             try {
               const libertar = surface.assinar((bruto) => {
@@ -567,13 +1022,6 @@ window.__ModuleLoader__.load({
               /* sem transporte utilizável: mantém "telemetria indisponível" */
             }
           }
-          // Projeções (ctx/model/uso) chegam já normalizadas quando o canal existe.
-          if (surface && typeof surface.assinarProjecoes === 'function') {
-            try {
-              const libertar = surface.assinarProjecoes(onEvent);
-              if (typeof libertar === 'function') limpeza.push(libertar);
-            } catch { /* idem */ }
-          }
           void projections;
         },
         stop() {
@@ -584,25 +1032,63 @@ window.__ModuleLoader__.load({
       };
     }
 
-        /* ================================================================
-     * 3. Renderização — a CENA ESTILIZADA da demo (portada 1:1)
+    /* ================================================================
+     * 4. Renderização — a CENA ESTILIZADA da demo (portada 1:1)
      * ================================================================
-     * Geometria e estética idênticas à demo dsh-work-game: chão com padrão,
+     * Geometria, cores e estética idênticas à demo (app.js: GRID, W, THEMES,
+     * renderWorld/renderModule/renderSeat/renderCharacter): chão com padrão,
      * grelha, mesas/cadeiras/portáteis do furniture.svg embutido, fichas com
-     * CTX/custo/velocidade, bandeira de pergunta, aviso de contexto >200k,
-     * fita de fim de turno e bustos Avataaars com expressão. Por baixo: os
-     * dados REAIS do DSH (nada é simulado — sem dados, mostra "—").
+     * CTX/custo/velocidade, bandeira de pergunta, aviso >200k, mesa violeta de
+     * delegação e bustos Avataaars com expressão. Por baixo: os dados REAIS do
+     * DSH (nada é simulado — sem dados, mostra "—").
      * ================================================================ */
 
-    const PASSO_LUGAR = 225;
-    const LARGURA_MESA = 900;
-    const ALTURA_LINHA = 880;
-    const COLUNAS = 3;
+    const GRID = { cols: 3, pitchX: 940, pitchY: 730, originX: 40, originY: 40 }; // = demo
+    const LARGURA_MESA = 900; // = demo (W)
+    const TEMAS = { // = demo (THEMES)
+      blue: { color: '#2869a6', panel: '#25629b', stroke: '#244e72' },
+      teal: { color: '#408a80', panel: '#378176', stroke: '#2c625b' },
+      violet: { color: '#8064ae', panel: '#765ba4', stroke: '#59467c' },
+      coral: { color: '#bb7861', panel: '#b36c57', stroke: '#855441' },
+    };
+    // Workspaces alternam azul/verde/coral pela ordem do DSH; o violeta fica
+    // para a delegação, como na demo.
+    const TEMAS_DE_EQUIPA = ['blue', 'teal', 'coral'];
+    const estiloTema = (tema) => {
+      const t = TEMAS[tema] || TEMAS.blue;
+      return `--desk-color:${t.color};--desk-panel:${t.panel};--desk-stroke:${t.stroke}`;
+    };
+    const posicaoGrelha = (i) => ({
+      x: GRID.originX + (i % GRID.cols) * GRID.pitchX,
+      y: GRID.originY + Math.floor(i / GRID.cols) * GRID.pitchY,
+    });
+    function tamanhoMundo(nModulos) {
+      const linhas = Math.max(1, Math.ceil(nModulos / GRID.cols));
+      return {
+        linhas,
+        largura: GRID.originX * 2 + GRID.cols * GRID.pitchX,
+        altura: GRID.originY + linhas * GRID.pitchY + 60,
+      };
+    }
 
     const ESCAPES = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
     const esc = (v) => String(v ?? '').replace(/[&<>"']/g, (c) => ESCAPES[c]);
+    const cortar = (texto, max) => {
+      const t = String(texto ?? '');
+      return t.length > max ? `${t.slice(0, max - 1)}…` : t;
+    };
+    const cortarInicio = (texto, max) => {
+      const t = String(texto ?? '');
+      return t.length > max ? `…${t.slice(t.length - max + 1)}` : t;
+    };
+    // Caminho legível como na demo (~/workspaces/site): a casa abrevia-se a ~.
+    function caminhoCurto(caminho) {
+      const c = String(caminho ?? '');
+      const casa = c.match(/^(\/Users\/[^/]+|\/home\/[^/]+|[A-Za-z]:\\Users\\[^\\]+)(?=[\\/]|$)/);
+      return casa ? `~${c.slice(casa[1].length)}` : c;
+    }
 
-    // Mobiliário e expressões embutidos (SVG aninhado — sem referências externas).
+    // Mobiliário e expressões embutidos (SVG — sem referências externas).
     const MOBILIARIO = `<!-- Original, modular office artwork. Every symbol is a separate, reusable SVG piece.
        Tables touch at x = 900. Repeat the desk symbol laterally; use connector at each join.
        CSS custom properties color the same geometry for any workspace. No raster furniture. -->
@@ -680,7 +1166,7 @@ window.__ModuleLoader__.load({
   <symbol id="wg-icon-grid" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></g></symbol>
   <symbol id="wg-icon-hand" viewBox="0 0 24 24"><path d="M8 13V5q0-3 3-1v7-8q3-2 3 1v7-6q3-2 3 1v7-4q3-1 3 2v6q0 6-7 6h-1q-3 0-5-3l-4-5q-1-3 2-3Z" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></symbol>`;
     // Expressões REAIS da demo (8 identidades × 6 estados usados pelo
-    // plugin) embutidas como SVG aninhado — os mesmos bonecos da demo.
+    // plugin) — os mesmos bonecos da demo, preparados como <symbol> (abaixo).
     const EXPR_AVATARS = {
       rui: {
         idle: { vb: '0 0 264 280', corpo: `<desc>Created with getavataaars.com</desc><defs><circle id="react-path-1060401" cx="120" cy="120" r="120"></circle><path d="M12,160 C12,226.27417 65.72583,280 132,280 C198.27417,280 252,226.27417 252,160 L264,160 L264,-1.42108547e-14 L-3.19744231e-14,-1.42108547e-14 L-3.19744231e-14,160 L12,160 Z" id="react-path-1060402"></path><path d="M124,144.610951 L124,163 L128,163 L128,163 C167.764502,163 200,195.235498 200,235 L200,244 L0,244 L0,235 C-4.86974701e-15,195.235498 32.235498,163 72,163 L72,163 L76,163 L76,144.610951 C58.7626345,136.422372 46.3722246,119.687011 44.3051388,99.8812385 C38.4803105,99.0577866 34,94.0521096 34,88 L34,74 C34,68.0540074 38.3245733,63.1180731 44,62.1659169 L44,56 L44,56 C44,25.072054 69.072054,5.68137151e-15 100,0 L100,0 L100,0 C130.927946,-5.68137151e-15 156,25.072054 156,56 L156,62.1659169 C161.675427,63.1180731 166,68.0540074 166,74 L166,88 C166,94.0521096 161.51969,99.0577866 155.694861,99.8812385 C153.627775,119.687011 141.237365,136.422372 124,144.610951 Z" id="react-path-1060403"></path></defs><g id="Avataaar" stroke="none" stroke-width="1" fill="none" fill-rule="evenodd"><g transform="translate(-825.000000, -1100.000000)" id="Avataaar/Circle"><g transform="translate(825.000000, 1100.000000)"><g id="Mask"></g><g id="Avataaar" stroke-width="1" fill-rule="evenodd" mask="url(#react-mask-1060405)"><g id="Body" transform="translate(32.000000, 36.000000)"><mask id="react-mask-1060406" fill="white"><use xlink:href="#react-path-1060403"></use></mask><use fill="#D0C6AC" xlink:href="#react-path-1060403"></use><g id="Skin/👶🏽-03-Brown" mask="url(#react-mask-1060406)" fill="#EDB98A"><g transform="translate(0.000000, 0.000000)" id="Color"><rect x="0" y="0" width="264" height="280"></rect></g></g><path d="M156,79 L156,102 C156,132.927946 130.927946,158 100,158 C69.072054,158 44,132.927946 44,102 L44,79 L44,94 C44,124.927946 69.072054,150 100,150 C130.927946,150 156,124.927946 156,94 L156,79 Z" id="Neck-Shadow" fill-opacity="0.100000001" fill="#000000" mask="url(#react-mask-1060406)"></path></g><g id="Clothing/Hoodie" transform="translate(0.000000, 170.000000)"><defs><path d="M108,13.0708856 C90.0813006,15.075938 76.2798424,20.5518341 76.004203,34.6449676 C50.1464329,45.5680933 32,71.1646257 32,100.999485 L32,100.999485 L32,110 L232,110 L232,100.999485 C232,71.1646257 213.853567,45.5680933 187.995797,34.6449832 C187.720158,20.5518341 173.918699,15.075938 156,13.0708856 L156,32 L156,32 C156,45.254834 145.254834,56 132,56 L132,56 C118.745166,56 108,45.254834 108,32 L108,13.0708856 Z" id="react-path-1060407"></path></defs><mask id="react-mask-1060408" fill="white"><use xlink:href="#react-path-1060407"></use></mask><use id="Hoodie" fill="#B7C1DB" fill-rule="evenodd" xlink:href="#react-path-1060407"></use><g id="Color/Palette/Gray-01" mask="url(#react-mask-1060408)" fill-rule="evenodd" fill="#262E33"><rect id="🖍Color" x="0" y="0" width="264" height="110"></rect></g><path d="M102,61.7390531 L102,110 L95,110 L95,58.1502625 C97.2037542,59.4600576 99.5467694,60.6607878 102,61.7390531 Z M169,58.1502625 L169,98.5 C169,100.432997 167.432997,102 165.5,102 C163.567003,102 162,100.432997 162,98.5 L162,61.7390531 C164.453231,60.6607878 166.796246,59.4600576 169,58.1502625 Z" id="Straps" fill="#F4F4F4" fill-rule="evenodd" mask="url(#react-mask-1060408)"></path><path d="M90.9601329,12.7243537 C75.9093095,15.5711782 65.5,21.2428847 65.5,32.3076923 C65.5,52.0200095 98.5376807,68 132,68 C165.462319,68 198.5,52.0200095 198.5,32.3076923 C198.5,21.2428847 188.09069,15.5711782 173.039867,12.7243537 C182.124921,16.0744598 188,21.7060546 188,31.0769231 C188,51.4689754 160.178795,68 132,68 C103.821205,68 76,51.4689754 76,31.0769231 C76,21.7060546 81.8750795,16.0744598 90.9601329,12.7243537 Z" id="Shadow" fill-opacity="0.16" fill="#000000" fill-rule="evenodd" mask="url(#react-mask-1060408)"></path></g><g id="Face" transform="translate(76.000000, 82.000000)" fill="#000000"><g id="Mouth/Smile" transform="translate(2.000000, 52.000000)"><defs><path d="M35.117844,15.1280772 C36.1757121,24.6198025 44.2259873,32 54,32 C63.8042055,32 71.8740075,24.574136 72.8917593,15.0400546 C72.9736685,14.272746 72.1167429,13 71.042767,13 C56.1487536,13 44.7379213,13 37.0868244,13 C36.0066168,13 35.0120058,14.1784435 35.117844,15.1280772 Z" id="react-path-1060409"></path></defs><mask id="react-mask-1060410" fill="white"><use xlink:href="#react-path-1060409"></use></mask><use id="Mouth" fill-opacity="0.699999988" fill="#000000" fill-rule="evenodd" xlink:href="#react-path-1060409"></use><rect id="Teeth" fill="#FFFFFF" fill-rule="evenodd" mask="url(#react-mask-1060410)" x="39" y="2" width="31" height="16" rx="5"></rect><g id="Tongue" stroke-width="1" fill-rule="evenodd" mask="url(#react-mask-1060410)" fill="#FF4F6D"><g transform="translate(38.000000, 24.000000)"><circle cx="11" cy="11" r="11"></circle><circle cx="21" cy="11" r="11"></circle></g></g></g><g id="Nose/Default" transform="translate(28.000000, 40.000000)" fill-opacity="0.16"><path d="M16,8 C16,12.418278 21.372583,16 28,16 L28,16 C34.627417,16 40,12.418278 40,8" id="Nose"></path></g><g id="Eyes/Default-😀" transform="translate(0.000000, 8.000000)" fill-opacity="0.599999964"><circle id="Eye" cx="30" cy="22" r="6"></circle><circle id="Eye" cx="82" cy="22" r="6"></circle></g><g id="Eyebrow/Natural/Default-Natural" fill-opacity="0.599999964"><path d="M26.0390934,6.21012364 C20.2775554,6.98346216 11.2929313,12.0052479 12.04426,17.8178111 C12.0689481,18.0080543 12.3567302,18.0673468 12.4809077,17.9084937 C14.9674041,14.7203351 34.1927973,10.0365481 41.1942673,11.0147151 C41.8350523,11.1044465 42.2580662,10.4430343 41.8210501,10.0302067 C38.0765663,6.49485426 31.2003792,5.51224825 26.0390934,6.21012364" id="Eyebrow" transform="translate(27.000000, 12.000000) rotate(5.000000) translate(-27.000000, -12.000000) "></path><path d="M85.0390934,6.21012364 C79.2775554,6.98346216 70.2929313,12.0052479 71.04426,17.8178111 C71.0689481,18.0080543 71.3567302,18.0673468 71.4809077,17.9084937 C73.9674041,14.7203351 93.1927973,10.0365481 100.194267,11.0147151 C100.835052,11.1044465 101.258066,10.4430343 100.82105,10.0302067 C97.0765663,6.49485426 90.2003792,5.51224825 85.0390934,6.21012364" id="Eyebrow" transform="translate(86.000000, 12.000000) scale(-1, 1) rotate(5.000000) translate(-86.000000, -12.000000) "></path></g></g><g id="Top" stroke-width="1" fill-rule="evenodd"><defs><rect id="react-path-1060415" x="0" y="0" width="264" height="280"></rect><path d="M94.2519269,52.0221149 C94.3749353,51.9677149 94.0696712,51.9468149 93.3361345,51.9595149 C94.2276637,51.9577149 94.5329279,51.9785149 94.2519269,52.0221149 M86.1169775,36.3015924 C86.1148422,36.2819924 86.1337548,36.4526924 86.1169775,36.3015924 M193.765056,70.7656665 C193.500946,67.448734 193.03295,64.1518864 192.246676,60.9110823 C191.622233,58.3353492 190.769007,55.8775343 189.760006,53.4200433 C189.150703,51.9353766 187.727538,49.8961062 187.560324,48.2944933 C187.395466,46.7168527 188.626521,44.969138 188.889285,43.1323368 C189.144311,41.3447761 189.100909,39.4652134 188.734183,37.6938503 C187.901144,33.6710288 185.140271,29.9300447 180.877167,28.8814158 C179.925362,28.6471994 177.913417,28.9358396 177.240862,28.3815597 C176.469729,27.7459682 175.932761,25.5806808 175.234637,24.7121687 C173.244224,22.2362125 170.13984,20.6417265 166.865887,21.1976261 C164.454917,21.606776 165.839391,22.1053363 164.032005,20.6864317 C163.027041,19.8976114 162.276095,18.6931622 161.300066,17.8392279 C159.832826,16.5563826 158.149588,15.4581893 156.408146,14.556958 C151.851325,12.19892 146.654249,10.4848961 141.564162,9.64942693 C132.278934,8.12523827 122.368926,9.45408458 113.368668,11.8688141 C108.890239,13.0703477 104.381531,14.5951842 100.222053,16.6117782 C98.4385542,17.4764029 97.4090304,18.1936301 95.5494951,18.4200717 C92.6207355,18.7767416 90.1404579,18.7589243 87.3661268,20.0009517 C78.8298269,23.8229236 74.9849256,32.6897818 78.3066539,41.1750259 C78.974835,42.8815988 79.8795374,44.3801954 81.1267416,45.7586062 C82.6474761,47.4392631 83.1975648,47.1085093 81.8877817,49.0411999 C79.9289949,51.9311653 78.2777195,55.0129095 76.9332826,58.2128958 C73.4043038,66.6145606 72.8138416,76.0771643 73.043634,85.0373203 C73.1240445,88.1741362 73.2586228,91.3495022 73.753198,94.4561907 C73.966841,95.8009106 74.0267283,98.3293468 75.0353925,99.3271154 C75.5471264,99.8331265 76.2762042,100.115288 77.0035997,99.9137903 C78.7130802,99.4401742 78.1253096,98.1787097 78.1650102,97.0076274 C78.364859,91.1240324 78.0950295,85.9191145 79.4943071,80.1064647 C80.5278683,75.8118486 82.2504702,71.9114806 84.4827873,68.0713675 C87.3213795,63.1871608 90.3857268,58.8977279 94.2895061,54.7155226 C95.2073299,53.7320079 95.4078515,53.3150832 96.6385698,53.243814 C97.5705244,53.1900382 98.9338023,53.8282213 99.8398505,54.0491558 C101.837665,54.5360539 103.83918,55.0174448 105.873331,55.3452831 C109.613261,55.9481556 113.316519,55.9886494 117.090094,55.8704074 C124.516459,55.6381346 131.974787,55.1172217 139.175061,53.2470535 C143.956964,52.00535 148.196516,49.7762443 152.776887,48.1422364 C152.858644,48.1130808 154.006596,47.2951049 154.207791,47.3284719 C154.488723,47.3747968 156.184746,49.1542588 156.471061,49.3784327 C158.696649,51.1238798 161.137899,51.8566566 163.541467,53.2081794 C166.504881,54.8745825 163.634999,52.4899804 165.269452,54.5668292 C165.745859,55.1716454 165.989782,56.2931632 166.371984,56.9783192 C167.587899,59.1610999 169.279548,61.0795367 171.302932,62.6017816 C173.258018,64.0725184 176.196198,64.7829426 177.193087,66.697168 C177.961865,68.1740599 178.220929,70.1812592 178.841334,71.7579279 C180.468722,75.8931602 182.617937,79.7494709 184.767152,83.6443317 C186.498502,86.7830913 188.392354,89.5250111 188.584801,93.1117947 C188.651754,94.3603012 187.463764,101.849397 190.357534,99.5716982 C190.786502,99.2341415 191.711391,95.415733 191.901483,94.7678314 C192.672616,92.135083 192.94682,89.3866841 193.29605,86.6816947 C193.990474,81.3021672 194.218584,76.1837441 193.765056,70.7656665" id="react-path-1060414"></path><filter x="-0.8%" y="-2.0%" width="101.5%" height="108.0%" filterUnits="objectBoundingBox" id="react-filter-1060411"><feOffset dx="0" dy="2" in="SourceAlpha" result="shadowOffsetOuter1"></feOffset><feColorMatrix values="0 0 0 0 0   0 0 0 0 0   0 0 0 0 0  0 0 0 0.16 0" type="matrix" in="shadowOffsetOuter1" result="shadowMatrixOuter1"></feColorMatrix><feMerge><feMergeNode in="shadowMatrixOuter1"></feMergeNode><feMergeNode in="SourceGraphic"></feMergeNode></feMerge></filter></defs><mask id="react-mask-1060413" fill="white"><use xlink:href="#react-path-1060415"></use></mask><g id="Mask"></g><g id="Top/Short-Hair/Short-Curly" mask="url(#react-mask-1060413)"><g transform="translate(-1.000000, 0.000000)"><g id="Facial-Hair/Beard-Medium" transform="translate(49.000000, 72.000000)"><defs><path d="M105.017591,94.1296214 C101.150441,99.7213834 98.257542,95.9467308 94.1374777,92.8762163 C91.6567227,91.0272796 87.9608129,88.7275108 84.5044337,88.8410391 C81.0477114,88.7275108 77.3518016,91.0272796 74.8710466,92.8762163 C70.7509822,95.9467308 67.8580835,99.7213834 63.9909333,94.1296214 C61.0884259,89.9323547 62.3028943,82.8739117 65.014944,78.9027173 C68.8738581,73.2512381 74.1088724,75.9847769 79.9622738,75.3400279 C81.5538829,75.1648137 83.1526985,74.7228407 84.5044337,74 C85.856169,74.7228407 87.4546414,75.1648137 89.0462504,75.3400279 C94.899995,75.9847769 100.134666,73.2512381 103.993923,78.9027173 C106.70563,82.8739117 107.920098,89.9323547 105.017591,94.1296214 M140.39109,26 C136.966521,40.0748212 135.393023,54.4337754 132.909944,68.6711471 C132.392536,71.6390145 131.826063,74.5963095 131.224594,77.5496398 C131.098329,78.1697764 130.973781,80.4725746 130.362704,80.7643064 C128.511632,81.6484223 124.739149,76.9466834 123.730409,75.8851496 C121.196893,73.219256 118.684993,70.5292442 115.599415,68.437233 C109.364783,64.2102603 102.065485,61.7108818 94.4700836,61.117837 C91.2922091,60.8693859 86.9951134,61.3025234 84.000116,63.1104016 C81.0051185,61.3025234 76.7080229,60.8693859 73.5298053,61.117837 C65.9344039,61.7108818 58.6351055,64.2102603 52.4004739,68.437233 C49.3148957,70.5292442 46.8033387,73.219256 44.2694796,75.8851496 C43.2607395,76.9466834 39.4882573,81.6484223 37.6371849,80.7643064 C37.0261079,80.4725746 36.9015594,78.1697764 36.7752954,77.5496398 C36.1738255,74.5963095 35.6073527,71.6390145 35.0899445,68.6711471 C32.6072086,54.4337754 31.0337113,40.0748212 27.6091415,26 C26.6127533,26 25.7385119,44.7478165 25.6273446,46.4945731 C25.174784,53.5889755 24.6463963,60.5254529 25.3216346,67.6261326 C26.485803,79.8749043 27.6993791,95.2339402 37.032627,104.58753 C45.4659003,113.039493 57.7103052,114.806417 68.2713185,120.141327 C69.631059,120.828202 71.4347824,121.676306 73.3798667,122.37111 C75.4289129,123.934171 79.4926946,125 84.1740722,125 C89.0846465,125 93.3155222,123.827456 95.2540874,122.137856 C96.9548781,121.49261 98.5180822,120.752874 99.7285704,120.141327 C110.288776,114.805245 122.533989,113.039493 130.967262,104.58753 C140.30051,95.2339402 141.514086,79.8749043 142.678597,67.6261326 C143.353493,60.5254529 142.825105,53.5889755 142.372887,46.4945731 C142.261377,44.7478165 141.387136,26 140.39109,26 Z" id="react-path-1060417"></path></defs><mask id="react-mask-1060416" fill="white"><use xlink:href="#react-path-1060417"></use></mask><use id="Beardness" fill="#252E32" fill-rule="evenodd" xlink:href="#react-path-1060417"></use><g id="Color/Hair/Brown" mask="url(#react-mask-1060416)" fill="#2C1B18"><g transform="translate(-32.000000, 0.000000)" id="Color"><rect x="0" y="0" width="264" height="244"></rect></g></g></g><mask id="react-mask-1060412" fill="white"><use xlink:href="#react-path-1060414"></use></mask><use id="Short-Hair" stroke="none" fill="#28354B" fill-rule="evenodd" xlink:href="#react-path-1060414"></use><g id="Skin/👶🏽-03-Brown" mask="url(#react-mask-1060412)" fill="#2C1B18"><g transform="translate(0.000000, 0.000000) " id="Color"><rect x="0" y="0" width="264" height="280"></rect></g></g><g id="Top/_Resources/Prescription-02" fill="none" transform="translate(62.000000, 85.000000)" stroke-width="1"><defs><filter x="-0.8%" y="-2.4%" width="101.5%" height="109.8%" filterUnits="objectBoundingBox" id="react-filter-1060418"><feOffset dx="0" dy="2" in="SourceAlpha" result="shadowOffsetOuter1"></feOffset><feColorMatrix values="0 0 0 0 0   0 0 0 0 0   0 0 0 0 0  0 0 0 0.2 0" type="matrix" in="shadowOffsetOuter1" result="shadowMatrixOuter1"></feColorMatrix><feMerge><feMergeNode in="shadowMatrixOuter1"></feMergeNode><feMergeNode in="SourceGraphic"></feMergeNode></feMerge></filter></defs><g id="Wayfarers" filter="url(#react-filter-1060418)" transform="translate(6.000000, 7.000000)" fill="#252C2F"><path d="M34,41 L31.2421498,41 C17.3147125,41 9,33.3359286 9,20.5 C9,10.127 10.8170058,0 32.5299306,0 L35.4700694,0 C57.1829942,0 59,10.127 59,20.5 C59,32.5686429 48.7212748,41 34,41 Z M32.3853606,6 C13,6 13,12.8410159 13,21.5015498 C13,28.5719428 16.116254,37 30.9709365,37 L34,37 C46.3649085,37 55,30.6270373 55,21.5015498 C55,12.8410159 55,6 35.6146394,6 L32.3853606,6 Z" id="Left" fill-rule="nonzero"></path><path d="M96,41 L93.2421498,41 C79.3147125,41 71,33.3359286 71,20.5 C71,10.127 72.8170058,0 94.5299306,0 L97.4700694,0 C119.182994,0 121,10.127 121,20.5 C121,32.5686429 110.721275,41 96,41 Z M94.3853606,6 C75,6 75,12.8410159 75,21.5015498 C75,28.5719428 78.1194833,37 92.9709365,37 L96,37 C108.364909,37 117,30.6270373 117,21.5015498 C117,12.8410159 117,6 97.6146394,6 L94.3853606,6 Z" id="Right" fill-rule="nonzero"></path><path d="M2.95454545,5.77156439 C3.64590909,5.09629136 11.2095455,0 32.5,0 C50.3513636,0 54.1302273,1.85267217 59.8502273,4.6518809 L60.2689233,4.85850899 C60.6666014,4.99901896 62.7002447,5.68982981 65.0790606,5.76579519 C67.2462948,5.67278567 69.1000195,5.08540191 69.641698,4.89719767 C76.1703915,1.7220864 82.5610971,0 97.5,0 C118.790455,0 126.354091,5.09629136 127.045455,5.77156439 C128.679318,5.77156439 130,7.06150904 130,8.65734659 L130,11.5431288 C130,13.1389663 128.679318,14.428911 127.045455,14.428911 C127.045455,14.428911 120.143997,14.428911 120.143997,17.3146932 C120.143997,20.2004754 118.181818,13.1389663 118.181818,11.5431288 L118.181818,8.73240251 C114.578575,7.35340151 108.128411,4.78617535 97.5,4.78617535 C85.6584651,4.78617535 79.7610984,6.88602813 74.7022935,8.97112368 L74.7588636,9.10752861 L74.7563667,11.0937608 L72.5391666,16.4436339 L69.8004908,15.3608351 C69.5558969,15.2641292 69.0281396,15.090392 68.2963505,14.9099044 C66.256272,14.4067419 64.1589087,14.253569 62.3040836,14.6343084 C61.6235903,14.7739931 60.9922286,14.9836085 60.4128127,15.266732 L57.7704824,16.5578701 L55.1266751,11.3962031 L55.2440909,9.10175705 L55.3248203,8.90683855 C50.9620526,6.87386374 46.9392639,4.78617535 32.5,4.78617535 C21.8721459,4.78617535 15.422131,7.3524397 11.8181818,8.7314671 L11.8181818,11.5431288 C11.8181818,13.1389663 8.86363636,20.2004754 8.86363636,17.3146932 C8.86363636,14.428911 2.95454545,14.428911 2.95454545,14.428911 C1.32363636,14.428911 0,13.1389663 0,11.5431288 L0,8.65734659 C0,7.06150904 1.32363636,5.77156439 2.95454545,5.77156439 Z" id="Stuff" fill-rule="nonzero"></path></g></g></g></g></g></g></g></g></g>` },
@@ -768,28 +1254,208 @@ window.__ModuleLoader__.load({
       return String(typeof m === 'string' ? m : (m.model ?? m.provider ?? '')).slice(0, 18);
     }
 
-    // Distribui pessoas por mesas de 4 lugares, agrupadas por equipa (workspace).
-    function gerarModulos(pessoas) {
-      const porEquipa = new Map();
-      for (const p of pessoas) {
-        const equipa = p.teamId ?? 'geral';
-        if (!porEquipa.has(equipa)) porEquipa.set(equipa, []);
-        porEquipa.get(equipa).push(p.id);
+    /* ── Bonecos: um <symbol> por corpo, desenhado com <use> ─────────────
+       Cada corpo Avataaars (identidade × expressão) é preparado UMA vez e vive
+       como <symbol> no sprite do painel; cada pessoa desenha-se com <use>.
+       Assim os ids internos são únicos no documento (escopo por corpo) e a
+       cena, que muda a cada evento, não re-serializa ~15 KB de SVG por pessoa.
+       O pipeline dos bustos (sem o círculo de fundo) deixou o grupo raiz com
+       mask="url(#…)" para uma máscara que já não existe: o Chromium ignora-a e
+       desenha o boneco, mas outros motores podem tratar o recurso como
+       pendente e não o desenhar. Retira-se SÓ essa referência pendurada — o
+       resultado é, em todos os motores, exatamente o desenho do Chromium. */
+    const identidades = () => Object.keys(EXPR_AVATARS);
+    const idSimbolo = (avatar, preset) => `wgav-${avatar}-${preset}`;
+
+    function prepararCorpo(corpo, prefixo) {
+      const ids = new Set();
+      for (const m of corpo.matchAll(/\sid="([^"]+)"/g)) ids.add(m[1]);
+      return corpo
+        .replace(/\s(mask|clip-path|filter)="url\(#([^)]+)\)"/g, (m, _attr, id) => (ids.has(id) ? m : ''))
+        .replace(/(\s)id="([^"]+)"/g, (_m, sp, id) => `${sp}id="${prefixo}-${id}"`)
+        .replace(/(xlink:href|href)="#([^"]+)"/g, (_m, attr, id) => `${attr}="#${prefixo}-${id}"`)
+        .replace(/url\(#([^)]+)\)/g, (_m, id) => `url(#${prefixo}-${id})`);
+    }
+
+    // Chave do corpo a desenhar: identidade × expressão (cai para idle).
+    function chaveCorpo(avatar, preset) {
+      const conjunto = EXPR_AVATARS[avatar];
+      if (!conjunto) return null;
+      return `${avatar}|${conjunto[preset] ? preset : 'idle'}`;
+    }
+
+    const SIMBOLOS = new Map(); // chave -> markup do <symbol> (preparado uma vez)
+    function simboloDe(chave) {
+      if (!SIMBOLOS.has(chave)) {
+        const [avatar, preset] = chave.split('|');
+        const av = EXPR_AVATARS[avatar] && EXPR_AVATARS[avatar][preset];
+        const id = idSimbolo(avatar, preset);
+        SIMBOLOS.set(chave, av
+          ? `<symbol id="${id}" viewBox="${av.vb}" preserveAspectRatio="xMidYMax meet">${prepararCorpo(av.corpo, id)}</symbol>`
+          : '');
       }
-      const modulos = [];
-      let n = 0;
-      for (const [equipa, ids] of porEquipa) {
-        for (let i = 0; i < ids.length; i += 4) {
-          modulos.push({
-            id: `mesa-${n}`,
-            teamId: equipa,
-            kind: i === 0 ? 'main' : 'expansion',
-            seats: Array.from({ length: 4 }, (_, k) => ids[i + k] ?? null),
+      return SIMBOLOS.get(chave);
+    }
+
+    // Sprite do painel: mobiliário + os corpos em uso. Só muda quando o
+    // conjunto de corpos muda (o markup é memorizado por assinatura).
+    let spriteMemo = { assinatura: null, markup: '' };
+    function spriteDoPainel(chaves) {
+      const lista = [...new Set(chaves)].filter(Boolean).sort();
+      const assinatura = lista.join(',');
+      if (spriteMemo.assinatura !== assinatura) {
+        spriteMemo = {
+          assinatura,
+          markup: '<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" '
+            + 'class="wg-sprite-svg" width="0" height="0" focusable="false" aria-hidden="true">'
+            + `<defs>${MOBILIARIO}${lista.map(simboloDe).join('')}</defs></svg>`,
+        };
+      }
+      return spriteMemo.markup;
+    }
+
+    /* ── Distribuição pela sala (pura e determinística) ─────────────────── */
+
+    const EQUIPA_SEM_WORKSPACE = 'sem-workspace';
+
+    /**
+     * Mesas e lugares a partir das pessoas e dos workspaces do DSH.
+     * @param {Array} pessoas vistas (officeView.people), na ordem do catálogo do host
+     * @param {{fonte, items, archived}|null} workspaces
+     * @returns {{ equipas: Map, modules: Array, visiveis: number, chaves: string[] }}
+     */
+    function montarEscritorio(pessoas, workspaces) {
+      const porId = new Map(pessoas.map((p) => [p.id, p]));
+      const doDsh = !!(workspaces && workspaces.fonte === 'dsh');
+      const arquivadas = new Set(doDsh ? workspaces.archived : []);
+      const nomeDe = (id) => (porId.get(id) ? porId.get(id).name : 'equipe');
+
+      // Mesma regra da barra lateral do DSH (ui-workspace/tree.ts): subagentes,
+      // arquivadas e conversas em branco não têm lugar próprio.
+      const raiz = (p) => !p.subagent && !arquivadas.has(p.id) && !(p.blank && !p.running);
+
+      // Delegação em curso: subagentes A CORRER, agrupados pelo pai.
+      const filhosAtivos = new Map();
+      for (const p of pessoas) {
+        if (!p.subagent || !p.running || !p.parentId || arquivadas.has(p.id)) continue;
+        if (!filhosAtivos.has(p.parentId)) filhosAtivos.set(p.parentId, []);
+        filhosAtivos.get(p.parentId).push(p.id);
+      }
+      const emDelegacao = (id) => (filhosAtivos.get(id) || []).length > 0;
+
+      // 1) equipas = workspaces do DSH (ordem do DSH) e dono de cada conversa
+      const equipas = new Map();
+      const juntarEquipa = (id, name, path) => {
+        if (!equipas.has(id)) {
+          equipas.set(id, { id, name, path, theme: TEMAS_DE_EQUIPA[equipas.size % TEMAS_DE_EQUIPA.length] });
+        }
+        return equipas.get(id);
+      };
+      const dono = new Map();
+      const ordemNoWorkspace = new Map();
+      if (doDsh) {
+        for (const w of workspaces.items) {
+          const equipa = juntarEquipa(`ws:${w.id}`, w.title, caminhoCurto(w.path));
+          w.sessionIds.forEach((sid, i) => {
+            if (dono.has(sid)) return; // como o owningGroupKey: vale o primeiro
+            dono.set(sid, equipa.id);
+            ordemNoWorkspace.set(sid, i);
           });
-          n += 1;
         }
       }
-      return modulos;
+      const equipaDe = (p) => {
+        if (!p) return EQUIPA_SEM_WORKSPACE;
+        if (dono.has(p.id)) return dono.get(p.id);
+        if (!doDsh && p.cwd) return `cwd:${p.cwd}`;
+        return EQUIPA_SEM_WORKSPACE;
+      };
+
+      // 2) lugares de casa: conversas-raiz visíveis na mesa do seu workspace
+      const casa = new Map();
+      const raizes = pessoas.filter(raiz);
+      const ordemNoCatalogo = new Map(raizes.map((p, i) => [p.id, i]));
+      for (const p of raizes) {
+        const id = equipaDe(p);
+        if (id.startsWith('cwd:')) juntarEquipa(id, nomeDaPasta(p.cwd) ?? 'pasta', caminhoCurto(p.cwd));
+        if (!casa.has(id)) casa.set(id, []);
+        casa.get(id).push(p);
+      }
+      const precisaSemWorkspace = () => {
+        juntarEquipa(EQUIPA_SEM_WORKSPACE, 'Sem workspace', doDsh ? 'Ungrouped no DSH' : 'conversas sem pasta');
+      };
+      if (casa.has(EQUIPA_SEM_WORKSPACE)) precisaSemWorkspace();
+      // Ordem manual do workspace (sessionIds) e, no resto, a ordem do catálogo.
+      const posicao = (p) => (ordemNoWorkspace.has(p.id) ? ordemNoWorkspace.get(p.id) : Number.MAX_SAFE_INTEGER);
+      for (const lista of casa.values()) {
+        lista.sort((a, b) => (posicao(a) - posicao(b)) || (ordemNoCatalogo.get(a.id) - ordemNoCatalogo.get(b.id)));
+      }
+
+      // 3) mesas: por equipa (main + expansion, 4 lugares); quem delega senta-se
+      //    no lugar 0 da sua mesa violeta, logo a seguir, e o lugar de casa fica
+      //    reservado ("Lugar reservado · Em delegação ↗"), como na demo.
+      const modules = [];
+      const colocados = new Set();
+      let n = 0;
+      const mesasDeDelegacao = (liderId, equipaId, liderSentado) => {
+        const filhos = (filhosAtivos.get(liderId) || []).filter((id) => !colocados.has(id));
+        filhos.forEach((id) => colocados.add(id));
+        const lugares = [
+          ...(liderSentado ? [liderId] : []),
+          ...filhos.map((id) => (emDelegacao(id) ? { reservado: id } : id)),
+        ];
+        const mesas = [];
+        for (let i = 0; i < lugares.length; i += 4) {
+          const seats = Array.from({ length: 4 }, (_, k) => lugares[i + k] ?? null);
+          const lugar0 = typeof seats[0] === 'string' ? seats[0] : (seats[0] && seats[0].reservado);
+          mesas.push({
+            id: `mesa-${n++}`, teamId: equipaId, kind: 'delegation', seats,
+            coordenacao: i === 0, lider: i === 0 ? nomeDe(liderId) : nomeDe(lugar0),
+          });
+        }
+        for (const id of filhos) if (emDelegacao(id)) mesas.push(...mesasDeDelegacao(id, equipaId, true));
+        return mesas;
+      };
+
+      for (const [equipaId] of [...equipas]) {
+        const lista = casa.get(equipaId) || [];
+        lista.forEach((p) => colocados.add(p.id));
+        const lugares = lista.map((p) => (emDelegacao(p.id) ? { reservado: p.id } : p.id));
+        const total = Math.max(4, Math.ceil(lugares.length / 4) * 4); // workspace vazio = 4 lugares livres
+        // Só as mesas de um workspace REAL do DSH podem abrir conversa nova ali.
+        const workspaceId = equipaId.startsWith('ws:') ? equipaId.slice(3) : null;
+        for (let i = 0; i < total; i += 4) {
+          modules.push({
+            id: `mesa-${n++}`, teamId: equipaId, workspaceId, kind: i === 0 ? 'main' : 'expansion',
+            seats: Array.from({ length: 4 }, (_, k) => lugares[i + k] ?? null),
+          });
+        }
+        for (const p of lista) if (emDelegacao(p.id)) modules.push(...mesasDeDelegacao(p.id, equipaId, true));
+      }
+
+      // Delegações cujo líder não tem lugar na sala (arquivado, em branco ou fora
+      // do catálogo): a equipa violeta aparece na mesma, sem o líder sentado.
+      for (const liderId of filhosAtivos.keys()) {
+        if (colocados.has(liderId)) continue;
+        if ((filhosAtivos.get(liderId) || []).every((id) => colocados.has(id))) continue;
+        const equipaId = equipaDe(porId.get(liderId));
+        if (equipaId === EQUIPA_SEM_WORKSPACE) precisaSemWorkspace();
+        else if (!equipas.has(equipaId)) juntarEquipa(equipaId, nomeDaPasta(equipaId.replace(/^(ws|cwd):/, '')) ?? 'equipa', '');
+        modules.push(...mesasDeDelegacao(liderId, equipaId, false));
+      }
+
+      // Corpos a desenhar (para o sprite) e contagem de pessoas na sala.
+      const chaves = [];
+      let visiveis = 0;
+      for (const mod of modules) {
+        for (const lugar of mod.seats) {
+          if (typeof lugar !== 'string') continue;
+          const p = porId.get(lugar);
+          if (!p) continue;
+          visiveis += 1;
+          chaves.push(chaveCorpo(p.avatar, estadoDemo(p).preset));
+        }
+      }
+      return { equipas, modules, visiveis, chaves };
     }
 
     // Estados com o vocabulário VISUAL da demo (rótulo, cor, ícone, expressão).
@@ -805,7 +1471,7 @@ window.__ModuleLoader__.load({
       { idle: 'available', working: 'working', tool: 'tool', waiting: 'waiting', error: 'error', done: 'done' }[p.status] ?? 'available'
     ];
 
-    const useMob = (id, x, y, w, h) => `<use href="#wg-${id}" x="${x}" y="${y}" width="${w}" height="${h}"/>`;
+    const useMob = (id, x, y, w, alt) => `<use href="#wg-${id}" x="${x}" y="${y}" width="${w}" height="${alt}"/>`;
     const glyph = (id, x, y, size, color) => `<g style="color:${color}">${useMob(`icon-${id}`, x, y, size, size)}</g>`;
 
     function custoDe(p) { return typeof p.cost === 'number' && Number.isFinite(p.cost) ? p.cost : 0; }
@@ -824,7 +1490,7 @@ window.__ModuleLoader__.load({
       return chunks.join(' · ');
     }
 
-    // Balão persistente de pergunta (features nº 1 da demo), 2 linhas máx.
+    // Balão persistente de pergunta, 2 linhas máx.
     function balao(cx, pergunta) {
       const texto = String(pergunta ?? '').replace(/\s+/g, ' ').trim() || 'Pergunta';
       const linhas = [];
@@ -879,20 +1545,35 @@ window.__ModuleLoader__.load({
 
     function renderCharacter(p, cx) {
       const preset = estadoDemo(p).preset;
-      const conjunto = EXPR_AVATARS[p.avatar];
-      const av = conjunto ? (conjunto[preset] ?? conjunto.idle) : null;
+      const chave = chaveCorpo(p.avatar, preset);
+      const corpo = chave
+        ? `<use href="#${idSimbolo(...chave.split('|'))}" width="226" height="240"/>`
+        : '<rect x="60" y="40" width="106" height="130" rx="20" fill="#b9c2cb"/>';
       return `<g class="seat character-hit" data-session-id="${esc(p.id)}" aria-hidden="true">`
         + `<g transform="translate(${cx - 113} 147)"><g class="character" data-character-id="${esc(p.id)}" data-expression="${preset}">`
-        + (av
-          ? `<svg width="226" height="240" viewBox="${av.vb}" preserveAspectRatio="xMidYMax meet">${av.corpo}</svg>`
-          : `<rect x="60" y="40" width="106" height="130" rx="20" fill="#b9c2cb"/>`)
-        + `</g></g></g>`;
+        + corpo
+        + '</g></g></g>';
     }
 
-    function renderSeat(mod, person, index, selecionada) {
+    function renderSeat(lugar, index, pessoas, selecionada, mod, recrutar) {
       const cx = 112.5 + index * 225;
       const hit = `<rect x="${cx - 104}" y="271" width="208" height="234" fill="transparent" pointer-events="all"/>`;
+      if (lugar && typeof lugar === 'object' && lugar.reservado) {
+        const donoLugar = pessoas[lugar.reservado];
+        const label = donoLugar ? donoLugar.name : 'Reservado';
+        return `<g class="seat slot-reserved" role="button" tabindex="0" aria-label="${esc(label)}, lugar reservado durante delegação" data-session-id="${esc(lugar.reservado)}">
+          ${hit}${glyph('arrow', cx - 17, 290, 34, '#99a9b4')}<rect class="seat-card" x="${cx - 99}" y="426" width="198" height="77" rx="9"/>
+          <text class="seat-card-name" x="${cx}" y="450" text-anchor="middle">${esc(cortar(label, 14))}</text><text class="seat-card-role" x="${cx}" y="469" text-anchor="middle">Lugar reservado</text><text class="seat-card-status" x="${cx}" y="492" text-anchor="middle" fill="#919ea4">Em delegação ↗</text></g>`;
+      }
+      const person = typeof lugar === 'string' ? pessoas[lugar] : null;
       if (!person) {
+        // Como na demo: o lugar livre de um workspace recruta — abre uma
+        // conversa nova do DSH nesse workspace (uiWorkspace.startSession).
+        if (recrutar && mod && mod.workspaceId) {
+          return `<g class="seat slot-free recrutavel" role="button" tabindex="0" aria-label="Abrir nova sessão no lugar ${index + 1} desta mesa" data-action="nova-sessao" data-workspace-id="${esc(mod.workspaceId)}">
+          ${hit}<circle class="empty-seat-plus" cx="${cx}" cy="307" r="24"/><text class="empty-seat-plus-sign" x="${cx}" y="318" text-anchor="middle">+</text>
+          <rect class="seat-card" x="${cx - 99}" y="426" width="198" height="77" rx="9"/><text class="seat-card-name" x="${cx}" y="451" text-anchor="middle" style="font-size:18px;fill:#8b958e">Lugar livre</text><text class="seat-card-role" x="${cx}" y="473" text-anchor="middle">Clique para recrutar</text></g>`;
+        }
         return `<g class="seat slot-free" aria-label="Lugar livre">
           ${hit}<circle class="empty-seat-plus" cx="${cx}" cy="307" r="24"/><text class="empty-seat-plus-sign" x="${cx}" y="318" text-anchor="middle">+</text>
           <rect class="seat-card" x="${cx - 99}" y="426" width="198" height="77" rx="9"/><text class="seat-card-name" x="${cx}" y="451" text-anchor="middle" style="font-size:18px;fill:#8b958e">Lugar livre</text></g>`;
@@ -900,11 +1581,12 @@ window.__ModuleLoader__.load({
       const info = estadoDemo(person);
       const sel = person.id === selecionada ? ' selected' : '';
       const laptop = `<g class="character-laptop">${useMob('laptop', cx - 76, 323, 152, 95)}${glyph(info.icon === 'plus' ? 'code' : info.icon, cx - 14, 350, 28, '#f4f7f8')}</g>`;
+      const conversa = person.title ? ` · ${person.title}` : '';
       return `<g class="seat${sel}${excedeuCtx(person) ? ' context-over' : ''}" role="button" tabindex="0"
-        aria-label="Abrir ${esc(person.name)}, ${esc(info.label)}" data-session-id="${esc(person.id)}">
-        <title>${esc(person.name)} · ${esc(info.label)} · clique para inspecionar</title>${hit}${laptop}
+        aria-label="Abrir ${esc(person.name)}${esc(conversa)}, ${esc(info.label)}" data-session-id="${esc(person.id)}">
+        <title>${esc(person.name)}${esc(conversa)} · ${esc(info.label)} · clique para inspecionar</title>${hit}${laptop}
         <rect class="seat-card" x="${cx - 99}" y="426" width="198" height="77" rx="9"/>
-        <text class="seat-card-name" x="${cx}" y="450" text-anchor="middle">${esc(person.name)}</text>
+        <text class="seat-card-name" x="${cx}" y="450" text-anchor="middle">${esc(cortar(person.name, 14))}</text>
         <text class="seat-card-role" x="${cx}" y="469" text-anchor="middle">${seatRoleHtml(person)}</text>
         <circle cx="${cx - 73}" cy="487" r="5.5" fill="${info.color}"/><text class="seat-card-status" x="${cx - 60}" y="492" fill="${info.color}">${esc(info.label)}</text>
         <rect class="selection-line" x="${cx - 33}" y="415" width="66" height="4" rx="2" fill="#3881b4"/>
@@ -917,77 +1599,90 @@ window.__ModuleLoader__.load({
         </g>`;
     }
 
-    function renderModulo(mod, pessoas, selecionada, indice) {
-      const pos = { x: (indice % COLUNAS) * LARGURA_MESA, y: Math.floor(indice / COLUNAS) * ALTURA_LINHA };
-      const ocupados = mod.seats.filter((s) => s && pessoas[s]).length;
+    // Botão de cena da demo (sceneButton): retângulo claro com glifo e rótulo.
+    function botaoCena(x, y, largura, rotulo, atributos, glifo) {
+      return `<g class="scene-action" role="button" tabindex="0" aria-label="${esc(rotulo)}" ${atributos} transform="translate(${x} ${y})"><rect width="${largura}" height="37" rx="9" fill="#faf8f0" stroke="#d8dbcf"/>${glyph(glifo, 12, 10, 16, '#85939b')}<text x="36" y="24">${esc(rotulo)}</text></g>`;
+    }
+
+    function renderModulo(mod, indice, pessoas, equipas, selecionada, recrutar) {
+      const equipa = equipas.get(mod.teamId) || { name: 'Equipa', path: '', theme: 'blue' };
+      const pos = posicaoGrelha(indice);
+      const ocupados = mod.seats.filter((s) => typeof s === 'string' && pessoas[s]).length;
       const chairs = mod.seats.map((_, i) => useMob('chair', 112.5 + i * 225 - 81, 212, 162, 184)).join('');
-      const characters = mod.seats.map((s, i) => (s && pessoas[s] ? renderCharacter(pessoas[s], 112.5 + i * 225) : '')).join('');
-      const custoMesa = mod.seats.reduce((soma, s) => soma + (s && pessoas[s] ? custoDe(pessoas[s]) : 0), 0);
-      const lugar = mod.seats.map((s) => s && pessoas[s]).find(Boolean);
-      return `<g class="desk-module" data-module-id="${esc(mod.id ?? '')}" data-team-id="${esc(mod.teamId ?? '')}" transform="translate(${pos.x} ${pos.y})">
-        ${chairs}${characters}${useMob('desk', 0, 365, LARGURA_MESA, 288)}
-        ${mod.seats.map((s, i) => renderSeat(mod, s && pessoas[s] ? pessoas[s] : null, i, selecionada)).join('')}
-        ${glyph(mod.kind === 'delegation' ? 'team' : 'browser', 64, 548, 48, '#f7f9f3')}
-        <text class="desk-label" x="139" y="577">${esc(mod.teamId ?? 'Equipa')}</text>
-        <text class="desk-subtitle" x="141" y="609">${esc((lugar && lugar.cwd) || (mod.kind === 'expansion' ? 'Mais espaço' : 'workspace'))}</text>
+      const characters = mod.seats.map((s, i) => (typeof s === 'string' && pessoas[s] ? renderCharacter(pessoas[s], 112.5 + i * 225) : '')).join('');
+      const custoMesa = mod.seats.reduce((soma, s) => soma + (typeof s === 'string' && pessoas[s] ? custoDe(pessoas[s]) : 0), 0);
+      const delegacao = mod.kind === 'delegation';
+      const titulo = delegacao
+        ? (mod.coordenacao ? `Equipe de ${mod.lider}` : `Apoio de ${mod.lider}`)
+        : equipa.name;
+      const subtitulo = delegacao
+        ? `${mod.lider} + subagentes`
+        : (mod.kind === 'expansion' ? `Mais espaço do time ${equipa.name}` : equipa.path);
+      const controlo = recrutar && mod.workspaceId && !delegacao
+        ? botaoCena(721, 111, 140, 'Nova sessão', `data-action="nova-sessao" data-workspace-id="${esc(mod.workspaceId)}"`, 'plus')
+        : '';
+      return `<g class="desk-module" data-module-id="${esc(mod.id)}" data-team-id="${esc(mod.teamId)}" data-kind="${mod.kind}" data-seats="4" transform="translate(${pos.x} ${pos.y})" style="${estiloTema(delegacao ? 'violet' : equipa.theme)}">
+        ${controlo}${chairs}${characters}${useMob('desk', 0, 365, LARGURA_MESA, 288)}
+        ${mod.seats.map((s, i) => renderSeat(s, i, pessoas, selecionada, mod, recrutar)).join('')}
+        ${glyph(delegacao ? 'team' : 'browser', 64, 548, 48, '#f7f9f3')}
+        <text class="desk-label" x="139" y="577">${esc(cortar(titulo, 26))}</text>
+        <text class="desk-subtitle" x="141" y="609">${esc(cortarInicio(subtitulo, 52))}</text>
         <text class="desk-counter" x="840" y="610" text-anchor="end">${ocupados}/4 lugares · ${esc(formatoCusto(custoMesa))} gasto</text>
       </g>`;
     }
 
-    // renderOffice(state) -> markup SVG do escritório (estética da demo).
+    // renderOffice(state) -> markup SVG da cena (estética da demo). Aceita o
+    // layout já montado (state.layout) ou monta-o a partir de people/workspaces.
     function renderOffice(state = {}) {
       const bruto = state.people instanceof Map
         ? [...state.people.values()]
         : Object.values(state.people ?? {});
       const pessoas = Object.fromEntries(bruto.map((p) => [p.id, p]));
-      const modulos = Array.isArray(state.modules) && state.modules.length > 0
-        ? state.modules
-        : gerarModulos(bruto);
+      const layout = state.layout ?? montarEscritorio(bruto, state.workspaces ?? null);
       const selecionada = state.selecionada ?? null;
+      const recrutar = state.recrutar === true; // há uiWorkspace para abrir conversas novas
+      const { largura, altura, linhas } = tamanhoMundo(layout.modules.length);
 
-      if (modulos.length === 0) {
-        return '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 2700 880" class="office-scene" '
+      if (layout.modules.length === 0) {
+        return `<svg class="office-scene" xmlns="http://www.w3.org/2000/svg" width="${largura}" height="${altura}" viewBox="0 0 ${largura} ${altura}" `
           + 'role="img" aria-label="Escritório de agentes">'
-          + '<text x="1350" y="440" text-anchor="middle" font-size="22" fill="#8b958e">'
+          + `<text x="${largura / 2}" y="${altura / 2}" text-anchor="middle" font-size="22" fill="#8b958e">`
           + 'Escritório vazio — à espera de telemetria</text></svg>';
       }
 
-      const linhas = Math.ceil(modulos.length / COLUNAS);
-      const largura = COLUNAS * LARGURA_MESA;
-      const altura = linhas * ALTURA_LINHA;
       const grelha = [];
-      for (let r = 0; r <= linhas; r += 1) grelha.push(`<path class="grid-line" d="M0 ${r * ALTURA_LINHA - 20}H${largura}"/>`);
-      for (let c = 0; c <= COLUNAS; c += 1) grelha.push(`<path class="grid-line" d="M${c * LARGURA_MESA - 20} 0V${altura}"/>`);
+      for (let r = 0; r <= linhas; r += 1) grelha.push(`<path class="grid-line" d="M0 ${GRID.originY + r * GRID.pitchY - 20}H${largura}"/>`);
+      for (let c = 0; c <= GRID.cols; c += 1) grelha.push(`<path class="grid-line" d="M${GRID.originX + c * GRID.pitchX - 20} 0V${altura}"/>`);
 
       return `<svg class="office-scene" xmlns="http://www.w3.org/2000/svg" width="${largura}" height="${altura}" viewBox="0 0 ${largura} ${altura}" role="img" aria-label="Escritório de agentes com as mesas de todos os workspaces">`
-        + `<defs>${MOBILIARIO}`
-        + `<pattern id="wg-floor" width="72" height="72" patternUnits="userSpaceOnUse"><rect width="72" height="72" fill="#f2eee4"/><path d="M0 72L72 0M-18 18L18 -18M54 90L90 54" stroke="#ece6d7" stroke-width="2"/></pattern></defs>`
+        + '<defs><pattern id="wg-floor" width="72" height="72" patternUnits="userSpaceOnUse"><rect width="72" height="72" fill="#f2eee4"/><path d="M0 72L72 0M-18 18L18 -18M54 90L90 54" stroke="#ece6d7" stroke-width="2"/></pattern></defs>'
         + `<rect x="0" y="0" width="${largura}" height="${altura}" fill="url(#wg-floor)"/>`
         + grelha.join('')
-        + modulos.map((mod, i) => renderModulo(mod, pessoas, selecionada, i)).join('')
+        + layout.modules.map((mod, i) => renderModulo(mod, i, pessoas, layout.equipas, selecionada, recrutar)).join('')
         + '</svg>';
     }
 
-/* ================================================================
-     * 4. Componentes React (sem JSX, via createElement)
+    /* ================================================================
+     * 5. Componentes React (sem JSX, via createElement)
      * ================================================================ */
 
     const CSS_PAINEL = [
-      '.wg-painel{display:flex;flex-direction:column;height:100%;min-height:0;font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;color:#23272b;background:#f7f5ef}',
+      '.wg-painel{position:relative;display:flex;flex-direction:column;height:100%;min-height:0;font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;color:#23272b;background:#f7f5ef}',
+      '.wg-sprite,.wg-sprite svg{position:absolute;width:0;height:0;overflow:hidden;pointer-events:none}',
       '.wg-toolbar{display:flex;align-items:center;gap:6px;padding:8px 12px;border-bottom:1px solid #e2ddd0}',
       '.wg-toolbar h1{font-size:14px;font-weight:600;margin:0 10px 0 0;white-space:nowrap}',
-      '.wg-toolbar .wg-conta{font-size:12px;color:#64707c;margin-left:auto}',
+      '.wg-toolbar .wg-conta{font-size:12px;color:#64707c;margin-left:auto;white-space:nowrap}',
       '.wg-toolbar button{min-width:30px;height:26px;border:1px solid #cfc9b8;border-radius:6px;background:#fffdf6;cursor:pointer;font-size:14px;line-height:1}',
       '.wg-toolbar button:hover{background:#f1ecdd}',
       '.wg-tela{flex:1;min-height:0;position:relative;overflow:hidden;background:#efece2;touch-action:none;cursor:grab}',
       '.wg-tela:active{cursor:grabbing}',
       '.wg-mundo{position:absolute;top:0;left:0;transform-origin:0 0;will-change:transform}',
       '.wg-svg svg{display:block;width:auto;max-width:none}',
-      '.wg-svg .wg-pessoa{cursor:pointer}',
-      '.wg-banner{position:absolute;left:16px;right:16px;top:12px;padding:8px 12px;border-radius:8px;background:#fff8e1;border:1px solid #e5cf8a;color:#7a6530;font-size:13px}',
+      '.wg-banner{position:absolute;left:16px;right:16px;top:12px;z-index:1;padding:8px 12px;border-radius:8px;background:#fff8e1;border:1px solid #e5cf8a;color:#7a6530;font-size:13px}',
       '.wg-rodape{display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:8px 12px;border-top:1px solid #e2ddd0;font-size:13px;min-height:36px}',
-      '.wg-rodape .wg-chip{padding:2px 10px;border-radius:11px;background:#eef1f5;color:#3d4854}',
-      '.wg-rodape .wg-chip-verde{background:#e9f2ea;color:#2f5d36}',
+      '.wg-chip{padding:2px 10px;border-radius:11px;background:#eef1f5;color:#3d4854;font-size:12.5px;white-space:nowrap}',
+      '.wg-chip-verde{background:#e9f2ea;color:#2f5d36}',
+      '.wg-chip-titulo{max-width:360px;overflow:hidden;text-overflow:ellipsis}',
       '.wg-chip-alerta{background:#f9e5de;border-color:#e2b6a6;color:#a2543a;font-weight:600}',
       '.wg-rodape .wg-dica{color:#8b958e;font-size:12px}',
       '.wg-zoom{display:flex;align-items:center;gap:6px;margin-left:14px}',
@@ -996,24 +1691,26 @@ window.__ModuleLoader__.load({
       '.wg-botao:disabled{opacity:.45;cursor:default}',
       '.wg-zoom-valor{min-width:46px;text-align:center;font-size:12.5px;color:#5d6a62;font-variant-numeric:tabular-nums}',
       '.wg-inspetor{display:flex;align-items:center;gap:12px;padding:9px 12px;border-top:1px solid #e2ddd0;background:#f7f8f2}',
-      '.wg-inspetor-avatar{width:44px;height:44px;border-radius:50%;background:#e6eae2;border:1px solid #d3d8cf;object-fit:cover;flex:none}',
-      '.wg-inspetor-iniciais{display:inline-flex;align-items:center;justify-content:center;font-size:18px;font-weight:700;color:#5d6a62}',
+      '.wg-inspetor-avatar{display:inline-flex;align-items:center;justify-content:center;width:44px;height:44px;border-radius:50%;background:#e6eae2;border:1px solid #d3d8cf;overflow:hidden;flex:none}',
+      '.wg-inspetor-avatar svg{display:block}',
+      '.wg-inspetor-iniciais{font-size:18px;font-weight:700;color:#5d6a62}',
       '.wg-inspetor-corpo{flex:1;min-width:0;display:flex;flex-direction:column;gap:5px}',
+      '.wg-inspetor-topo{display:flex;align-items:center;gap:10px}',
       '.wg-inspetor-nome{font-size:15px;color:#23272b}',
+      '.wg-abrir-conversa{height:26px;padding:0 10px;font-size:12.5px}',
       '.wg-inspetor-chips{display:flex;flex-wrap:wrap;gap:6px}',
       '.wg-ctx-linha{display:flex;align-items:center;gap:9px}',
       '.wg-ctx-barra{flex:1;max-width:280px;height:6px;border-radius:3px;background:#e3e6ea;overflow:hidden}',
       '.wg-ctx-barra>span{display:block;height:100%;background:#4a90d9;border-radius:3px}',
       '.wg-ctx-barra>span.wg-ctx-cheio{background:#c2603f}',
       '.wg-ctx-texto{font-size:11.5px;color:#64707c}',
-      // Botão "Modo jogo" do pé (tarefa 1): o contrato de ui-sidebar diz que
-      // cada ocupante de `sidebar.footer.action` possui a sua própria
-      // geometria e hover chrome. Cor neutra herdada de currentColor para se
-      // fundir com o resto do pé.
+      // Botão "Modo jogo" do pé: cada ocupante de `sidebar.footer.action`
+      // possui a sua própria geometria e hover; cor herdada de currentColor.
       '.wg-jogar{display:inline-flex;align-items:center;gap:6px;height:28px;min-width:28px;padding:0 9px;border:0;background:transparent;border-radius:6px;color:currentColor;cursor:pointer}',
       '.wg-jogar:hover{background:rgba(90,104,120,0.14)}',
       '.wg-jogar .wg-jogar-rotulo{font-size:13px;color:currentColor}',
-      '.wg-svg .office-scene{font-family:var(--font)}',
+      '.wg-svg .office-scene{font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}',
+      '.wg-svg .seat{cursor:pointer}',
       '.wg-svg .seat .seat-card{transition:stroke .12s,fill .12s;stroke:#e7d8c6;stroke-width:1.3;fill:#fff8ee}',
       '.wg-svg .seat:hover .seat-card, .wg-svg .seat:focus-visible .seat-card{stroke:#6b99b9;stroke-width:3;fill:#fffdf5}',
       '.wg-svg .seat.selected .seat-card{stroke:#3b7caf;stroke-width:3;fill:#fffdf9}',
@@ -1022,8 +1719,15 @@ window.__ModuleLoader__.load({
       '.wg-svg .seat-card-name{fill:#293e4e;font-size:20px;font-weight:800}',
       '.wg-svg .seat-card-role{fill:#84929e;font-size:13.5px}',
       '.wg-svg .seat-card-status{font-size:14px;font-weight:700}',
+      '.wg-svg .slot-free{cursor:default}',
       '.wg-svg .slot-free .seat-card{fill:#f9f0e3;stroke:#cfba9f;stroke-dasharray:5 4}',
-      '.wg-svg .slot-free:hover .seat-card, .wg-svg .slot-free:focus-visible .seat-card{stroke:#5e9680;fill:#fff9ed}',
+      '.wg-svg .slot-free.recrutavel{cursor:pointer}',
+      '.wg-svg .slot-free.recrutavel:hover .seat-card, .wg-svg .slot-free.recrutavel:focus-visible .seat-card{stroke:#5e9680;fill:#fff9ed}',
+      '.wg-svg .slot-free.recrutavel:hover .empty-seat-plus{fill:#fffdf4;stroke:#4e9681}',
+      '.wg-svg .scene-action{cursor:pointer;outline:none}',
+      '.wg-svg .scene-action rect{transition:fill .15s}',
+      '.wg-svg .scene-action:hover rect, .wg-svg .scene-action:focus-visible rect{fill:#f9fdfc;stroke:#8195a7;stroke-width:2}',
+      '.wg-svg .scene-action text{font-size:15px;fill:#6c8090;font-weight:700}',
       '.wg-svg .slot-reserved .seat-card{fill:#f6ede3}',
       '.wg-svg .slot-reserved .seat-card-name{fill:#879099}',
       '.wg-svg .slot-reserved .seat-card-role{fill:#a2a4a0}',
@@ -1033,7 +1737,6 @@ window.__ModuleLoader__.load({
       '.wg-svg .character-laptop{transform-box:fill-box;transform-origin:center bottom}',
       '.wg-svg .attention-marker{fill:#e8af50;stroke:#fff8ee;stroke-width:3}',
       '.wg-svg .empty-seat-plus{fill:#f3f1e7;stroke:#a6b5b5;stroke-width:2}',
-      '.wg-svg .slot-free:hover .empty-seat-plus{fill:#fffdf4;stroke:#4e9681}',
       '.wg-svg .empty-seat-plus-sign{fill:#8095a0;font-size:32px;font-weight:500}',
       '.wg-svg .grid-line{stroke:#e6ddca;stroke-width:1.5;stroke-dasharray:2 10;stroke-linecap:round}',
       '.wg-svg .bubble-body{fill:#fffdf6;stroke:#293e4e;stroke-width:2.6}',
@@ -1050,25 +1753,22 @@ window.__ModuleLoader__.load({
       '.wg-svg .context-warn-marker circle{fill:#e8a33d;stroke:#fffdf6;stroke-width:2.5}',
       '.wg-svg .seat:not(.context-over) .context-warn-marker{display:none}',
       '.wg-svg .finish-ribbon rect{fill:#e3f3ea;stroke:#b7dcc6;stroke-width:1.5}',
-      '.wg-svg .finish-ribbon[data-finish="aborted"] rect, .wg-svg .finish-ribbon[data-finish="interrupted"] rect{fill:#fbf1dd;stroke:#e8cf9a}',
-      '.wg-svg .finish-ribbon[data-finish="error"] rect, .wg-svg .finish-ribbon[data-finish="blocked"] rect, .wg-svg .finish-ribbon[data-finish="max-tokens"] rect{fill:#f9e5de;stroke:#e2b6a6}',
       '.wg-svg .finish-ribbon text{font-size:13px;font-weight:700}',
       '.wg-svg .metric-ctx{fill:#68746c}',
       '.wg-svg .metric-cost{fill:#299875}',
       '.wg-svg .metric-speed{fill:#2d5f96}',
+      '.wg-svg .emoji-extra circle{fill:#fffdf6;stroke:#d8dbcf;stroke-width:2}',
       '@keyframes bubble-in{from{opacity:0;transform:translateY(9px) scale(.82)}to{opacity:1;transform:translateY(0) scale(1)}}',
       '@keyframes bubble-out{from{opacity:1;transform:translateY(0) scale(1)}to{opacity:0;transform:translateY(-10px) scale(.94)}}',
       '@keyframes flag-pulse{0%{transform:scale(1);opacity:.7}70%{transform:scale(1.75);opacity:0}100%{transform:scale(1.75);opacity:0}}',
-      '.wg-svg svg{display:block;width:auto;max-width:none}',
-      '.wg-svg .seat{cursor:pointer}',
-      '.wg-svg .emoji-extra circle{fill:#fffdf6;stroke:#d8dbcf;stroke-width:2}',
+      '@media(prefers-reduced-motion:reduce){.wg-svg .question-flag-pulse{animation:none}}',
     ].join('');
 
-    // Painel principal: sala SVG com zoom/pan mínimos e inspeção por pessoa.
+    // Painel principal: sala SVG com zoom/pan e inspeção por pessoa.
     function PainelEscritorio(props) {
       const { getView, getSelecao, subscribe, iniciar, parar, selecionar } = props;
       const temCanal = typeof props.temCanal === 'function' ? props.temCanal : () => false;
-      const [tick, setTick] = react.useState(0);
+      const [, setTick] = react.useState(0);
       const [camera, setCamera] = react.useState({ zoom: 0.3, x: 32, y: 64 });
       const telaRef = react.useRef(null);
       const cameraRef = react.useRef(camera);
@@ -1077,8 +1777,7 @@ window.__ModuleLoader__.load({
       // Face estável do núcleo: assina e liga o adaptador uma única vez.
       react.useEffect(() => {
         // Ordem importa: SUBSCREVER antes de iniciar — a explosão inicial de
-        // eventos (catálogo + projeções) não pode cair antes de haver ouvintes,
-        // senão a UI fica presa no estado vazio até ao próximo evento.
+        // eventos (catálogo + projeções) não pode cair antes de haver ouvintes.
         const desligar = subscribe(() => setTick((t) => t + 1));
         iniciar();
         return () => { desligar(); parar(); };
@@ -1111,14 +1810,15 @@ window.__ModuleLoader__.load({
         return () => tela.removeEventListener('wheel', onWheel);
       }, []);
 
+      const view = getView();
+      const layout = view.layout;
+      const selecionada = getSelecao();
+
+      // Enquadrar toda a sala (mesma geometria do renderOffice).
       const caber = () => {
         const tela = telaRef.current;
         if (!tela) return;
-        const pessoas = Object.values(getView().people);
-        // Mesma geometria do renderOffice: módulos por equipa em colunas de 3.
-        const linhas = Math.max(1, Math.ceil(Math.max(1, gerarModulos(pessoas).length) / COLUNAS));
-        const largura = COLUNAS * LARGURA_MESA;
-        const altura = linhas * ALTURA_LINHA;
+        const { largura, altura } = tamanhoMundo(getView().layout.modules.length);
         const zoom = Math.max(0.12, Math.min(tela.clientWidth / largura, tela.clientHeight / altura, 1.2));
         setCamera({
           zoom,
@@ -1127,57 +1827,112 @@ window.__ModuleLoader__.load({
         });
       };
 
-      // Enquadramento automático: ao montar e sempre que o nº de pessoas muda
-      // (nunca durante a exploração do utilizador — só em mudanças de catálogo).
-      const quantosRef = react.useRef(-1);
+      // Enquadramento automático: ao montar e sempre que a sala muda de forma
+      // (nº de mesas/pessoas) — nunca durante a exploração do utilizador.
+      const formaRef = react.useRef('');
+      const forma = `${layout.modules.length}|${layout.visiveis}`;
       react.useEffect(() => {
-        const n = Object.keys(getView().people).length;
-        if (n !== quantosRef.current) { quantosRef.current = n; caber(); }
+        if (forma !== formaRef.current) {
+          formaRef.current = forma;
+          caber();
+          verificarRefs(); // ponto de verificação: nenhuma referência #… sem destino
+        }
       });
 
+      const podeAgir = typeof props.podeAgir === 'function' && props.podeAgir();
+      const novaSessao = (workspaceId) => { if (workspaceId && typeof props.novaSessao === 'function') props.novaSessao(workspaceId); };
+
+      // Arrastar = explorar a sala. O pan só começa depois de o ponteiro andar
+      // alguns píxeis (os ouvintes vivem na window, sem captura — capturar logo
+      // no pointerdown desviava o alvo do clique para a tela) e um arrastar
+      // nunca dispara a ação do sítio onde o botão é largado.
+      const gesto = react.useRef(null);
       const arrastar = (e) => {
-        const tela = telaRef.current;
-        if (!tela) return;
-        tela.setPointerCapture(e.pointerId);
-        const inicio = { x: e.clientX - cameraRef.current.x, y: e.clientY - cameraRef.current.y };
-        const mover = (ev) => setCamera((c) => ({ ...c, x: ev.clientX - inicio.x, y: ev.clientY - inicio.y }));
+        if (e.button !== undefined && e.button !== 0) return;
+        const inicio = {
+          px: e.clientX, py: e.clientY, moveu: false,
+          x: e.clientX - cameraRef.current.x, y: e.clientY - cameraRef.current.y,
+        };
+        gesto.current = inicio;
+        const mover = (ev) => {
+          if (!inicio.moveu) {
+            if (Math.abs(ev.clientX - inicio.px) + Math.abs(ev.clientY - inicio.py) < 6) return;
+            inicio.moveu = true;
+          }
+          setCamera((c) => ({ ...c, x: ev.clientX - inicio.x, y: ev.clientY - inicio.y }));
+        };
         const soltar = () => {
           window.removeEventListener('pointermove', mover);
           window.removeEventListener('pointerup', soltar);
+          window.removeEventListener('pointercancel', soltar);
         };
         window.addEventListener('pointermove', mover);
         window.addEventListener('pointerup', soltar);
+        window.addEventListener('pointercancel', soltar);
       };
 
-      const clicar = (e) => {
-        const alvo = e.target.closest ? e.target.closest('[data-session-id]') : null;
+      const agirSobre = (el) => {
+        const acao = el && el.closest ? el.closest('[data-action="nova-sessao"]') : null;
+        if (acao) { novaSessao(acao.getAttribute('data-workspace-id')); return true; }
+        const alvo = el && el.closest ? el.closest('[data-session-id]') : null;
         selecionar(alvo ? alvo.getAttribute('data-session-id') : null);
+        return !!alvo;
+      };
+      const clicar = (e) => {
+        const g = gesto.current;
+        gesto.current = null;
+        if (g && g.moveu) return; // fim de um arrastar, não é clique
+        agirSobre(e.target);
+      };
+      // Teclado: Enter/Espaço num lugar ou pessoa com foco (role="button").
+      const teclar = (e) => {
+        if (e.key !== 'Enter' && e.key !== ' ') return;
+        const el = e.target;
+        if (!el || !el.getAttribute || (!el.getAttribute('data-action') && !el.getAttribute('data-session-id'))) return;
+        e.preventDefault();
+        agirSobre(el);
       };
 
-      const view = getView();
-      const selecionada = getSelecao();
-      const pessoas = Object.values(view.people);
-      const svg = renderOffice({ people: view.people, teams: view.teams, modules: view.modules, selecionada });
+      const svg = renderOffice({ people: view.people, layout, selecionada, recrutar: podeAgir });
       const sel = selecionada && view.people[selecionada] ? view.people[selecionada] : null;
+      const chaveSel = sel ? chaveCorpo(sel.avatar, estadoDemo(sel).preset) : null;
+      const sprite = spriteDoPainel([...layout.chaves, chaveSel]);
       const ctx = sel ? formatoCtx(sel.ctx) : null;
+      const equipaSel = sel
+        ? [...layout.equipas.values()].find((eq) => layout.modules.some((m) => m.teamId === eq.id
+          && m.seats.some((s) => s === sel.id || (s && s.reservado === sel.id))))
+        : null;
+      const nWorkspaces = [...layout.equipas.keys()].filter((id) => id !== EQUIPA_SEM_WORKSPACE).length;
 
       const inspetor = sel
         ? h('div', { className: 'wg-inspetor' },
-          AVATARS[sel.avatar]
+          chaveSel
             ? h('span', {
               className: 'wg-inspetor-avatar',
               dangerouslySetInnerHTML: {
-                __html: `<svg viewBox="${AVATARS[sel.avatar].vb}" width="44" height="44">${AVATARS[sel.avatar].corpo}</svg>`,
+                __html: `<svg viewBox="0 0 264 280" width="44" height="44" aria-hidden="true"><use href="#${idSimbolo(...chaveSel.split('|'))}" width="264" height="280"/></svg>`,
               },
             })
             : h('span', { className: 'wg-inspetor-avatar wg-inspetor-iniciais' }, (String(sel.name ?? '?').trim()[0] ?? '?').toUpperCase()),
           h('div', { className: 'wg-inspetor-corpo' },
-            h('strong', { className: 'wg-inspetor-nome' }, sel.name ?? 'Pessoa'),
+            h('div', { className: 'wg-inspetor-topo' },
+              h('strong', { className: 'wg-inspetor-nome' }, sel.name ?? 'Pessoa'),
+              podeAgir && typeof props.abrirConversa === 'function'
+                ? h('button', {
+                  type: 'button', className: 'wg-botao wg-abrir-conversa',
+                  title: 'Abrir a conversa desta pessoa no DSH',
+                  onClick: () => props.abrirConversa(sel.id),
+                }, '💬 Abrir conversa')
+                : null,
+            ),
             h('div', { className: 'wg-inspetor-chips' },
+              sel.title ? h('span', { className: 'wg-chip wg-chip-titulo', title: sel.title }, `💬 ${sel.title}`) : null,
+              equipaSel ? h('span', { className: 'wg-chip', title: equipaSel.path }, `📁 ${equipaSel.name}`) : null,
               h('span', { className: 'wg-chip' }, `${sel.emoji} ${ROTULOS[sel.status] ?? sel.status}`),
               h('span', { className: 'wg-chip' }, nomeModelo(sel.model)),
               h('span', { className: 'wg-chip wg-chip-verde' }, formatoCusto(sel.cost)),
               sel.speed ? h('span', { className: 'wg-chip' }, `⚡ ${sel.speed} tok/s`) : null,
+              sel.subagents > 0 ? h('span', { className: 'wg-chip' }, `🤝 ${sel.subagents} subagente${sel.subagents === 1 ? '' : 's'} a correr`) : null,
               sel.ctx && num(sel.ctx.used) > LIMIAR_CTX
                 ? h('span', { className: 'wg-chip wg-chip-alerta' }, '⚠ contexto >200k')
                 : null,
@@ -1195,7 +1950,14 @@ window.__ModuleLoader__.load({
         )
         : h('div', { className: 'wg-rodape' }, h('span', { className: 'wg-dica' }, 'Clique numa pessoa para inspecionar · use ＋/－ Zoom ou o scroll do rato'));
 
+      const conta = [
+        layout.visiveis === 1 ? '1 pessoa' : `${layout.visiveis} pessoas`,
+        nWorkspaces === 1 ? '1 workspace' : `${nWorkspaces} workspaces`,
+        layout.modules.length === 1 ? '1 mesa' : `${layout.modules.length} mesas`,
+      ].join(' · ');
+
       return h('div', { className: 'wg-painel' },
+        h('div', { className: 'wg-sprite', 'aria-hidden': true, dangerouslySetInnerHTML: { __html: sprite } }),
         h('div', { className: 'wg-toolbar' },
           h('h1', null, 'Escritório'),
           h('div', { className: 'wg-zoom', role: 'group', 'aria-label': 'Zoom da sala' },
@@ -1215,15 +1977,15 @@ window.__ModuleLoader__.load({
               'aria-label': 'Enquadrar toda a sala', onClick: caber,
             }, '⤢ Enquadrar'),
           ),
-          h('span', { className: 'wg-conta' }, pessoas.length === 1 ? '1 pessoa' : `${pessoas.length} pessoas`),
+          h('span', { className: 'wg-conta' }, conta),
         ),
         h('div', {
           className: 'wg-tela', ref: telaRef,
-          onPointerDown: arrastar, onClick: clicar,
+          onPointerDown: arrastar, onClick: clicar, onKeyDown: teclar,
         },
-          pessoas.length === 0
+          layout.visiveis === 0
             ? h('div', { className: 'wg-banner' }, temCanal()
-              ? 'Ligado ao DSH — sem sessões no catálogo. Abra (ou retome) uma conversa e ela aparece aqui. Nada é simulado.'
+              ? 'Ligado ao DSH — sem conversas ativas para sentar. Abra (ou retome) uma conversa e ela aparece na mesa do seu workspace. Nada é simulado.'
               : 'Telemetria indisponível — à espera do host do plugin (nada é simulado)')
             : null,
           h('div', {
@@ -1253,17 +2015,13 @@ window.__ModuleLoader__.load({
       );
     }
 
-    // Botão do pé da barra lateral (tarefa 1): abre o painel do escritório.
-    // Ocupa `sidebar.footer.action`, o slot que ui-sidebar define como
-    // "Optional actions beside Settings at the sidebar foot" — fica justo ao
-    // lado do botão de settings (wide e rail). Tooltip nativo no `title`,
-    // nome acessível no `aria-label`; em wide mostra também o rótulo, como a
-    // própria fila de settings faz.
     // Ação de abertura do painel, preenchida em apply(). Vive em closure para o
     // botão não depender da forma como o slot injeta props (que varia entre
     // versões do runtime).
     let abrirPainel = () => {};
 
+    // Botão do pé da barra lateral: abre o painel do escritório. Tooltip nativo
+    // no `title`, nome acessível no `aria-label`; em wide mostra o rótulo.
     function BotaoModoJogo(props) {
       const wide = props && props.wide;
       return h('button', {
@@ -1286,17 +2044,47 @@ window.__ModuleLoader__.load({
     }
 
     /* ================================================================
-     * 5. Núcleo do painel e face do bundle
+     * 6. Núcleo do painel e face do bundle
      * ================================================================ */
+
+    // Ponte real (catálogo + eventos) — preenchida em apply(). Fica null quando
+    // o runtime não expõe `sessions`: o painel mostra "telemetria indisponível".
+    let superficieDSH = null;
+
+    // Ações reais sobre o DSH, pela API pública de ui-workspace (UiWorkspace):
+    // openSession(id) mostra a conversa; startSession(workspaceId) abre uma
+    // conversa nova nesse workspace. Lido com ctx.get (sem inject: um serviço
+    // ausente no inject derrubaria a UI inteira). Sem o serviço, os botões
+    // simplesmente não aparecem.
+    let ctxDoPlugin = null;
+    const uiWorkspace = () => {
+      const servico = servicoDe(ctxDoPlugin, 'uiWorkspace');
+      return servico && typeof servico.openSession === 'function' ? servico : null;
+    };
+    const ACOES = {
+      podeAgir: () => !!uiWorkspace(),
+      abrirConversa: (sessionId) => {
+        const ui = uiWorkspace();
+        if (!ui || !sessionId) return;
+        try { ui.openSession(sessionId); trace('abrir-conversa', sessionId); } catch (erro) { trace('abrir-conversa-erro', String(erro && erro.message || erro)); }
+      },
+      novaSessao: (workspaceId) => {
+        const ui = uiWorkspace();
+        if (!ui || typeof ui.startSession !== 'function' || !workspaceId) return;
+        try { ui.startSession(workspaceId); trace('nova-sessao', workspaceId); } catch (erro) { trace('nova-sessao-erro', String(erro && erro.message || erro)); }
+      },
+    };
 
     // Núcleo: estado + adaptador + seleção + expirações (ciclo de vida da fibra).
     function criarNucleo() {
-      let estado = createOfficeState(PRECOS);
+      let estado = createOfficeState(PRECOS_USD_POR_TOKEN);
       const ouvintes = new Set();
       let adaptador = null;
       let timerPurga = null;
+      let vistaMemo = null; // vista + layout memorizados por versão do estado
 
       const notificar = () => {
+        vistaMemo = null;
         for (const fn of [...ouvintes]) fn();
       };
 
@@ -1307,9 +2095,8 @@ window.__ModuleLoader__.load({
         return false;
       };
 
-      // Expiração (~1s) só dos balões de output na UI (contrato §2): o timer
-      // jamais muda emoji/expressão/ficha — essas reações vêm dos eventos
-      // do adaptador (tarefa 3).
+      // Expiração (~1s) só dos balões de output na UI: o timer jamais muda
+      // emoji/expressão/ficha — essas reações vêm dos eventos do adaptador.
       const agendarPurga = () => {
         if (timerPurga !== null || !temPendentes()) return;
         timerPurga = setTimeout(() => {
@@ -1323,14 +2110,18 @@ window.__ModuleLoader__.load({
         }, 400);
       };
 
-      const face = {
+      return {
+        ...ACOES,
         getView: () => {
+          if (vistaMemo) return vistaMemo;
           const vista = officeView(estado);
           for (const p of Object.values(vista.people)) {
             p.speed = superficieDSH && typeof superficieDSH.velocidadeDe === 'function'
               ? superficieDSH.velocidadeDe(p.id)
               : null;
           }
+          vista.layout = montarEscritorio(Object.values(vista.people), vista.workspaces);
+          vistaMemo = vista;
           return vista;
         },
         temCanal: () => !!superficieDSH,
@@ -1378,11 +2169,15 @@ window.__ModuleLoader__.load({
           ouvintes.clear();
         },
       };
-      return face;
     }
 
     function injetarEstilos(destino) {
-      if (destino.querySelector(`style[data-plugin-css="dsh-work-game"]`)) return;
+      const existente = destino.querySelector('style[data-plugin-css="dsh-work-game"]');
+      if (existente) {
+        // HMR: uma versão nova do bundle traz CSS novo — substitui o antigo.
+        if (existente.textContent !== CSS_PAINEL) existente.textContent = CSS_PAINEL;
+        return;
+      }
       const el = destino.createElement('style');
       el.setAttribute('data-plugin-css', 'dsh-work-game');
       el.textContent = CSS_PAINEL;
@@ -1392,272 +2187,17 @@ window.__ModuleLoader__.load({
     // O id partilhado pela entrada do pé da barra e pelo painel em `main`.
     const PANEL_ID = 'dsh-work-game';
 
-    // Superfície de transporte real (catálogo + eventos) — preenchida em apply().
-    // Fica null quando o runtime não expõe `sessions`; nesse caso o painel
-    // mostra "telemetria indisponível" e nada é inventado.
-    let superficieDSH = null;
-
-    /* ── Superfície REAL do runtime do browser ─────────────────────────────
-       Cópia embutida de src/surface.js (o bundle não pode importar irmãos —
-       ver cabeçalho). API verificada no checkout deepseek-harness 0.1.6:
-       ctx.sessions.list = ObservableSnapshot<SessionListState> com
-       getSnapshot()/subscribe(fn); SessionSummary {id, displayTitle, cwd,
-       parentId, running, projectionValues}; projectionValues traz
-       tokenUsage (acumulado), contextPressure {projectedTokens?,
-       pressureTokens?, contextWindow?} e modelSelection {lastUsed,next};
-       subagentsByParent[parent].entries lista os filhos diretos. */
-    const LIMIAR_CTX = 200000; /* aviso humano de contexto: >200k */
-    const PRECOS = { /* USD por token — tabela NOSSA (o DSH não publica preços) */
-      'deepseek-chat': { input: 2.7e-7, output: 1.1e-6, cacheRead: 2.7e-8, cacheWrite: 2.7e-7 },
-      'deepseek-reasoner': { input: 5.5e-7, output: 2.19e-6, cacheRead: 5.5e-8, cacheWrite: 5.5e-7 },
-      'mimo-v2.6-pro': { input: 6e-7, output: 2.4e-6, cacheRead: 6e-8, cacheWrite: 6e-7 },
-    };
-
-    function precoDe(precos, modelo) {
-      if (!precos || !modelo) return undefined;
-      const direto = precos instanceof Map ? precos.get(modelo) : precos[modelo];
-      if (direto) return direto;
-      const alvo = String(modelo);
-      const entradas = precos instanceof Map ? [...precos] : Object.entries(precos ?? {});
-      for (const [chave, preco] of entradas) {
-        if (chave && alvo.includes(chave)) return preco;
-      }
-      return undefined;
-    }
-
-    function normalizarLinha(bruto, parentIdForcado) {
-      if (!bruto || typeof bruto !== 'object') return null;
-      const id = bruto.id ?? bruto.sessionId;
-      if (id == null || id === '') return null;
-      return {
-        id: String(id),
-        displayTitle: typeof bruto.displayTitle === 'string' && bruto.displayTitle
-          ? bruto.displayTitle
-          : (typeof bruto.title === 'string' && bruto.title ? bruto.title : null),
-        running: bruto.running === true,
-        parentId: parentIdForcado ?? (bruto.parentId != null ? String(bruto.parentId) : null),
-        cwd: typeof bruto.cwd === 'string' ? bruto.cwd : null,
-        projectionValues: bruto.projectionValues && typeof bruto.projectionValues === 'object'
-          ? bruto.projectionValues
-          : null,
-      };
-    }
-
-    function linhasDoSnapshot(snap) {
-      if (!snap || typeof snap !== 'object') return [];
-      const linhas = [];
-      const vistos = new Set();
-      const byId = snap.byId && typeof snap.byId === 'object' ? snap.byId : {};
-      for (const bruto of Object.values(byId)) {
-        const linha = normalizarLinha(bruto, null);
-        if (linha && !vistos.has(linha.id)) { vistos.add(linha.id); linhas.push(linha); }
-      }
-      const sub = snap.subagentsByParent && typeof snap.subagentsByParent === 'object'
-        ? snap.subagentsByParent : {};
-      for (const [pai, catalogo] of Object.entries(sub)) {
-        const entradas = Array.isArray(catalogo) ? catalogo
-          : (catalogo && Array.isArray(catalogo.entries) ? catalogo.entries : []);
-        for (const bruto of entradas) {
-          const linha = normalizarLinha(bruto, String(pai));
-          if (linha && !vistos.has(linha.id)) { vistos.add(linha.id); linhas.push(linha); }
-        }
-      }
-      return linhas;
-    }
-
-    function modeloDaLinha(linha) {
-      const sel = linha && linha.projectionValues && linha.projectionValues.modelSelection;
-      const m = sel && ((sel.lastUsed && sel.lastUsed.model) || (sel.next && sel.next.model) || sel.model);
-      return typeof m === 'string' && m ? m : null;
-    }
-
-    function bucketsDaLinha(linha) {
-      const tu = linha && linha.projectionValues && linha.projectionValues.tokenUsage;
-      if (!tu || typeof tu !== 'object') return null;
-      return {
-        uncachedInput: num(tu.uncachedInputTokens),
-        output: num(tu.outputTokens),
-        cacheRead: num(tu.cacheReadTokens),
-        cacheWrite: num(tu.cacheWriteTokens),
-      };
-    }
-
-    function pressaoDaLinha(linha) {
-      const cp = linha && linha.projectionValues && linha.projectionValues.contextPressure;
-      if (!cp || typeof cp !== 'object') return null;
-      const janela = Number.isFinite(Number(cp.contextWindow)) ? Number(cp.contextWindow) : null;
-      const usado = Number.isFinite(Number(cp.projectedTokens)) ? Number(cp.projectedTokens)
-        : (Number.isFinite(Number(cp.pressureTokens)) ? Number(cp.pressureTokens) : null);
-      return { usado, janela };
-    }
-
-    function teamDaLinha(linha) {
-      if (!linha || !linha.cwd) return null;
-      const partes = String(linha.cwd).split(/[\\/]/).filter(Boolean);
-      return partes.length ? partes[partes.length - 1] : null;
-    }
-
-    function extrairSuperficie(ctx, opts = {}) {
-      const agora = typeof opts.agora === 'function' ? opts.agora : () => Date.now();
-      let servico = null;
-      try {
-        servico = (ctx && ctx.sessions)
-          || (ctx && ctx.reflect && typeof ctx.reflect.get === 'function' ? ctx.reflect.get('sessions') : null);
-      } catch {
-        servico = null; /* serviço não injetado: falha silenciosa, sem rebentar o apply */
-      }
-      const list = servico && servico.list;
-      if (!list || typeof list.getSnapshot !== 'function') return null;
-
-      try { window.__wgSnap = 'superficie:ok'; } catch { /* sem window */ }
-      const ler = () => {
-        try { return list.getSnapshot(); }
-        catch (erro) {
-          try { window.__wgSnapErr = String(erro && (erro.message || erro)).slice(0, 200); } catch { /* sem window */ }
-          return null;
-        }
-      };
-
-      const catalogo = () => linhasDoSnapshot(ler()).map((l) => ({
-        id: l.id,
-        model: modeloDaLinha(l),
-        name: l.displayTitle ?? undefined,
-        teamId: teamDaLinha(l) ?? undefined,
-      }));
-
-      const anterior = new Map();      // id -> { running, usage, modelo, janela, usado, parentId }
-      const velocidades = new Map();   // id -> { saida, at, v }
-
-      const rastrearVelocidade = (id, deltaSaida) => {
-        const reg = velocidades.get(id) ?? { saida: 0, at: agora(), v: 0 };
-        const t = agora();
-        const dt = Math.max(250, t - reg.at) / 1000;
-        const instante = Math.max(0, num(deltaSaida)) / dt;
-        reg.v = reg.v ? reg.v * 0.6 + instante * 0.4 : instante;
-        reg.saida += Math.max(0, num(deltaSaida));
-        reg.at = t;
-        velocidades.set(id, reg);
-      };
-
-      const difs = (emitir) => {
-        const snap = ler();
-        if (!snap) return;
-        const linhas = linhasDoSnapshot(snap);
-        /* Diagnóstico para leitura headless (mesmo padrão de __wgDiag). */
-        try {
-          window.__wgSnap = JSON.stringify({
-            n: linhas.length,
-            fase: snap.phase ?? null,
-            byId: snap.byId ? Object.keys(snap.byId).length : 0,
-            sub: snap.subagentsByParent ? Object.keys(snap.subagentsByParent).length : 0,
-          });
-        } catch { /* sem window */ }
-        const atuais = new Map(linhas.map((l) => [l.id, l]));
-
-        for (const [id, antes] of [...anterior]) {
-          if (atuais.has(id)) continue;
-          anterior.delete(id);
-          velocidades.delete(id);
-          if (antes.parentId) emitir({ type: 'subagent/end', sessionId: antes.parentId, childId: id, runId: id });
-          emitir({ type: 'session/removed', sessionId: id });
-        }
-
-        for (const [id, linha] of atuais) {
-          let antes = anterior.get(id);
-          if (!antes) {
-            antes = { running: null, usage: null, modelo: null, janela: null, usado: null, parentId: null };
-            anterior.set(id, antes);
-            emitir({
-              type: 'session/added', sessionId: id,
-              model: modeloDaLinha(linha) ?? undefined,
-              name: linha.displayTitle ?? undefined,
-              teamId: teamDaLinha(linha) ?? undefined,
-            });
-          }
-          if (linha.parentId && antes.parentId !== linha.parentId) {
-            if (antes.parentId) emitir({ type: 'subagent/end', sessionId: antes.parentId, childId: id, runId: id });
-            antes.parentId = linha.parentId;
-            emitir({ type: 'subagent/start', sessionId: linha.parentId, childId: id, runId: id });
-          }
-          const aCorrer = linha.running === true;
-          if (antes.running !== aCorrer) {
-            antes.running = aCorrer;
-            emitir({ type: 'status', sessionId: id, status: aCorrer ? 'running' : 'idle' });
-          }
-          const modelo = modeloDaLinha(linha);
-          const pressao = pressaoDaLinha(linha);
-          const janela = pressao ? pressao.janela : null;
-          if (modelo !== antes.modelo || janela !== antes.janela) {
-            antes.modelo = modelo;
-            antes.janela = janela;
-            emitir({ type: 'model', sessionId: id, model: modelo ?? undefined, contextWindow: janela ?? undefined });
-          }
-          const usado = pressao ? pressao.usado : null;
-          if (usado !== null && usado !== antes.usado) {
-            antes.usado = usado;
-            emitir({ type: 'ctx', sessionId: id, used: usado, window: janela ?? undefined });
-          }
-          const atual = bucketsDaLinha(linha);
-          const prev = antes.usage;
-          if (atual) {
-            if (!prev) {
-              antes.usage = atual;
-              if (atual.uncachedInput || atual.output || atual.cacheRead || atual.cacheWrite) {
-                rastrearVelocidade(id, 0);
-                emitir({
-                  type: 'usage', sessionId: id, model: modelo ?? undefined,
-                  uncachedInput: atual.uncachedInput, output: atual.output,
-                  cacheRead: atual.cacheRead, cacheWrite: atual.cacheWrite,
-                });
-              }
-            } else if (
-              prev.uncachedInput !== atual.uncachedInput || prev.output !== atual.output
-              || prev.cacheRead !== atual.cacheRead || prev.cacheWrite !== atual.cacheWrite
-            ) {
-              const delta = {
-                uncachedInput: Math.max(0, atual.uncachedInput - prev.uncachedInput),
-                output: Math.max(0, atual.output - prev.output),
-                cacheRead: Math.max(0, atual.cacheRead - prev.cacheRead),
-                cacheWrite: Math.max(0, atual.cacheWrite - prev.cacheWrite),
-              };
-              antes.usage = atual;
-              rastrearVelocidade(id, delta.output);
-              emitir({ type: 'usage', sessionId: id, model: modelo ?? undefined, ...delta });
-            }
-          }
-        }
-      };
-
-      return {
-        catalogo,
-        assinar(emitir) {
-          if (typeof emitir !== 'function') return null;
-          difs(emitir); /* vislumbre imediato do que já existe */
-          if (typeof list.subscribe !== 'function') return null;
-          try { return list.subscribe(() => difs(emitir)); } catch { return null; }
-        },
-        velocidadeDe(id) {
-          const reg = velocidades.get(String(id));
-          return reg && reg.v >= 1 ? Math.round(reg.v) : null;
-        },
-      };
-    }
-
-    // 'layout' é o serviço que ui-layout fornece via ctx.reflect.provide:
-    // dá a transição pública de painel (ui-layout/src/client/service.ts).
-    // Serviços exigidos ao runner do cliente. NOTA: só pedir nomes de serviço
-    // do catálogo verificado do client-runner (layout, locale, sessions, slots):
-    // 'sessions' TEM de estar declarado para o runner o pôr em ctx.sessions.
-    // comprovadamente injetáveis ('sessions', 'slots', 'locale' são os do
-    // exemplo oficial) — um nome desconhecido faz a ATIVAÇÃO inteira falhar
-    // ("1 entry did not activate / import failed") mesmo com o bundle válido.
+    // Serviços exigidos ao runner do cliente. ATENÇÃO: no Cordis do DSH cada
+    // nome do inject é OBRIGATÓRIO — um serviço ausente deixa a entrada
+    // 'pending' e o boot web aborta a UI inteira. Só se declaram serviços que
+    // o web-app garante ('sessions' TEM de estar declarado para o runner o pôr
+    // em ctx.sessions); 'workspaces' lê-se com ctx.get, sem bloquear (secção 0).
     exports.inject = ['slots', 'layout', 'sessions'];
 
     // A função que o runtime do browser chama (padrão dos exemplos oficiais).
     exports.apply = function apply(ctx) {
+      ctxDoPlugin = ctx;
       superficieDSH = extrairSuperficie(ctx);
-      // Ação de abertura do painel, capturada em closure pelo botão: não
-      // depende da forma como o slot injeta props (varia entre runtimes).
       abrirPainel = () => {
         const lay = ctx.layout ?? (typeof ctx.get === 'function' ? ctx.get('layout') : null);
         if (lay && typeof lay.selectPanel === 'function') lay.selectPanel(PANEL_ID);
@@ -1666,11 +2206,11 @@ window.__ModuleLoader__.load({
       injetarEstilos(document);
       const nucleo = criarNucleo();
 
-      // Cleanup correto: parar o adaptador e limpar timers quando a fibra
-      // do plugin for descartada (reload HMR, unload, dependência morta).
+      // Cleanup: parar o adaptador e limpar timers quando a fibra do plugin
+      // for descartada (reload HMR, unload, dependência morta).
       ctx.effect(() => () => { nucleo.dispose(); }, 'dsh-work-game: escritório');
 
-      // Painel em `main`, keyed: a mesma key que os botões selecionam.
+      // Painel em `main`, keyed: a mesma key que o botão seleciona.
       // Protegido por try/catch para um slot inválido não matar a ativação.
       try {
         ctx.slots.inject('main', () =>
@@ -1685,18 +2225,10 @@ window.__ModuleLoader__.load({
         console.warn('[dsh-work-game] slot main indisponível:', String(erro && erro.message || erro));
       }
 
-      // Botão "Modo jogo" no pé, justo ao lado do botão de settings (tarefa 1).
-      // Achado do checkout (v0.1.6-alpha.2): o item de settings NÃO está em
-      // `sidebar.panellist` — essa lista ordena-se pelo campo `order`
-      // (ascendente, default 0; a única entrada nativa é `plugins` a order 0,
-      // ver ui-sidebar/src/client/index.ts). Settings é o ocupante de
-      // `sidebar.settings` no pé da barra, e o slot contiguo para ações é
-      // `sidebar.footer.action` (também ordenado por `order`). Com order 0
-      // — e sem outros registrantes — o botão fica pegado à fila de settings
-      // em wide e em rail (56px).
-      // DEFESA DE ATIVAÇÃO: nomes de slot são tipados (SlotMap) e um nome
-      // inválido rebenta o apply inteiro — por isso cada inject é protegido e há
-      // fallback para `sidebar.panellist` (slot comprovado nos exemplos oficiais).
+      // Botão "Modo jogo" no pé, ao lado do botão de settings: o slot contíguo
+      // para ações é `sidebar.footer.action` (ordenado por `order`). Nomes de
+      // slot são tipados e um nome inválido rebenta o apply — cada inject é
+      // protegido.
       const registarBotao = (slot, Componente) => {
         try {
           return ctx.slots.inject(slot, () => ctx.slots.register({
@@ -1712,16 +2244,53 @@ window.__ModuleLoader__.load({
           return null;
         }
       };
-      // Só o botão do pé: ele já fica ao lado de settings e abre o painel.
-      // (Uma entrada em sidebar.panellist seria redundante e confundiria com
-      // outra abertura do mesmo painel.)
       const disposers = [
         registarBotao('sidebar.footer.action', BotaoModoJogo),
       ].filter(Boolean);
       ctx.effect(() => () => { for (const libertar of disposers) { try { libertar(); } catch { /* já libertado */ } } }, 'dsh-work-game: botão');
     };
 
+    // ── Pontos de verificação (trace) para diagnóstico headless ────────────
+    function trace(ponto, detalhe) {
+      try {
+        window.__wgTrace = window.__wgTrace || [];
+        window.__wgTrace.push({ t: Date.now(), ponto, detalhe: detalhe ?? null });
+        if (window.__wgTrace.length > 50) window.__wgTrace.splice(0, window.__wgTrace.length - 50);
+      } catch { /* sem window */ }
+    }
+    // Auto-verificação: alguma referência #… do painel sem destino? (ids
+    // partidos = bonecos/mobiliário invisíveis). Procura no painel inteiro:
+    // a cena usa os <symbol>s do sprite.
+    function verificarRefs() {
+      try {
+        if (typeof document === 'undefined') return null;
+        const painel = document.querySelector('.wg-painel');
+        if (!painel) return null;
+        const ids = new Set([...painel.querySelectorAll('[id]')].map((e) => e.id));
+        const refs = [...painel.querySelectorAll('.wg-svg use, .wg-inspetor use')]
+          .map((u) => (u.getAttribute('href') || u.getAttribute('xlink:href') || '').replace(/^#/, ''));
+        const partidas = refs.filter((id) => id && !ids.has(id));
+        const resumo = { refs: refs.length, partidas: partidas.length, exemplos: [...new Set(partidas)].slice(0, 5) };
+        trace('refs-verificadas', resumo);
+        if (partidas.length) console.warn('[dsh-work-game] referências partidas na cena:', resumo);
+        return resumo;
+      } catch (erro) {
+        trace('refs-erro', String(erro && erro.message || erro));
+        return null;
+      }
+    }
+
     // Exposto apenas para testes (não faz parte do contrato do runtime).
+    exports.__verificarRefs = verificarRefs;
+    exports.__trace = trace;
+    exports.__renderOffice = renderOffice;
+    exports.__montarEscritorio = montarEscritorio;
+    exports.__spriteDoPainel = spriteDoPainel;
+    exports.__prepararCorpo = prepararCorpo;
+    exports.__chaveCorpo = chaveCorpo;
+    exports.__createOfficeState = createOfficeState;
+    exports.__applyEvent = applyEvent;
+    exports.__officeView = officeView;
     exports.__extrairSuperficie = extrairSuperficie;
     exports.__precoDe = precoDe;
 

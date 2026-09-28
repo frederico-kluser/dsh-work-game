@@ -35,8 +35,11 @@ O `state.js` nunca vê o DSH: recebe apenas objetos `{type, ...}`:
 
 | type | campos | origem DSH |
 |---|---|---|
-| `session/added` | `sessionId, workspaceId?, model?` | catálogo de sessões |
+| `session/added` | `sessionId, model?, title?, cwd?, parentId?, subagent, blank` | catálogo de sessões |
+| `session/meta` | `sessionId, title?, cwd?, parentId?, subagent, blank` (só em mudança) | catálogo de sessões |
 | `session/removed` | `sessionId` | catálogo de sessões |
+| `workspaces` | `fonte: 'dsh'\|'nenhuma', items: [{id, title, path, sessionIds}], archived` | `ctx.get('workspaces').list` |
+| `ctx` | `sessionId, used, window?` | projeção `contextPressure` |
 | `status` | `sessionId, status: 'idle'\|'running'` | `agent/status` |
 | `turn/end` | `sessionId, kind: 'completed'\|'aborted'\|'blocked'\|'error'\|'max-tokens'\|'interrupted'` | `turn/end.reason.kind` |
 | `tool` | `sessionId, phase: 'call'\|'result', name, ok?` | `tool/call`, `tool/result` |
@@ -44,7 +47,7 @@ O `state.js` nunca vê o DSH: recebe apenas objetos `{type, ...}`:
 | `question/answered` | `sessionId, id` | retorno do waterfall |
 | `approval` | `sessionId, id, toolName, callId?, reason?` | `approval/asked` |
 | `approval/decided` | `sessionId, id, outcome` | `approval/decided` |
-| `subagent/start` | `sessionId, childId, runId, local` | `subagent/start` |
+| `subagent/start` | `sessionId, childId, runId, local` | `subagent/start` (no browser: subagente `origin: 'subagent'` A CORRER) |
 | `subagent/end` | `sessionId, childId, runId, stopReason` | `subagent/end` |
 | `usage` | `sessionId, provider, model, uncachedInput, output, cacheRead, cacheWrite` | `tokenUsage` + `deriveTurnTokenUsage` |
 | `model` | `sessionId, provider, model, contextWindow?` | `request/header` + `request/context` |
@@ -133,31 +136,71 @@ máquinas com `reasoningEfforts` (obrigatório no schema pi-ai).
 - `ctx.sessions` (ou `ctx.reflect.get('sessions')`) → `ISessions`;
 - `.list` é um `ObservableSnapshot<SessionListState>`: `getSnapshot()` + `subscribe(fn)`
   (**não** é `list()` — nome de método verificado no `.d.ts`);
-- `SessionListState` = `{ ids, byId: Record<id, SessionSummary>, subagentsByParent }`;
-- `SessionSummary` = `{ id, displayTitle, cwd?, parentId?, origin?, running, updatedAt,
-  projectionValues? }` com `projectionValues` = `tokenUsage` (acumulado),
-  `contextPressure {projectedTokens?, pressureTokens?, contextWindow?}` e
-  `modelSelection {lastUsed, next}`;
-- `subagentsByParent[parent].entries` lista os filhos diretos (`SubagentListEntry`).
+- `SessionListState` = `{ ids, byId: Record<id, SessionSummary>, phase, subagentsByParent }`
+  — só `ids` (ordem do host) exprime a pertença ao catálogo; `byId` junta linhas locais;
+- `SessionSummary` = `{ id, title?, displayTitle, cwd?, parentId?, origin?: 'subagent',
+  running, blank, updatedAt, projectionValues? }` com `projectionValues` = `tokenUsage`
+  (acumulado), `contextPressure {projectedTokens?, pressureTokens?, contextWindow?}` e
+  `modelSelection {lastUsed, next}`; **não há `workspaceId`** na sessão;
+- `subagentsByParent[parent].entries` lista os filhos diretos (`SubagentListEntry`
+  `{kind: 'child', id, activity: 'running'|'inactive', label?}` ou `{kind: 'diagnostic'}`).
 
-`extrairSuperficie(ctx, {agora})` devolve `{catalogo(), assinar(fn), velocidadeDe(id)}`
-ou `null` sem canal (e o painel diz "à espera do host", nunca inventa). Diffa snapshots
-sucessivos e emite o vocabulário §1 com estas regras:
+**Workspaces** (`packages/api/workspace-controller/src/client/{service,model}.ts`):
+`ctx.get('workspaces').list` é `{ items: WorkspaceView[], archivedSessionIds, state, phase }`
+com `WorkspaceView { workspaceId, path, title, sessionIds }` na ordem do DSH. A pertença de
+uma conversa vem **só** de `sessionIds` (primeiro workspace que a reclama — o
+`owningGroupKey` de `ui-workspace/tree.ts`); o resto é *Ungrouped*. Enquanto `phase` é
+`'pending'` não se emite nada (a sala agrupa por pasta até a baseline chegar).
+
+`extrairSuperficie(ctx, {agora, intervaloWorkspaces})` devolve
+`{catalogo(), assinar(fn), velocidadeDe(id)}` ou `null` sem canal (e o painel diz "à
+espera do host", nunca inventa). `assinar` devolve sempre a função de libertação. Diffa
+snapshots sucessivos e emite o vocabulário §1 com estas regras:
 
 - `usage` leva **deltas** (o estado soma): o 1.º vislumbre emite o acumulado para o
   custo estimado total aparecer; depois só deltas positivos (anti-dupla-contagem por sessão);
 - `status` só em mudança (running/idle); `model`/`ctx` saem das projeções
   (`projectedTokens ?? pressureTokens`, janela de `contextPressure`);
-- filhos (`parentId`/`entries`) pareiam `subagent/start|end` com `runId = childId`;
+- `session/meta` quando título, pasta, origem ou "em branco" mudam (o DSH gera o título
+  depois do 1.º turno);
+- **delegação** = subagente (`origin: 'subagent'` ou listado em `entries`) **a correr**:
+  `subagent/start|end` com `runId = childId`. Os terminados ficam no catálogo e não contam;
+  um fork tem `parentId` mas é uma conversa normal;
+- `workspaces` sempre que a lista do DSH muda; ligação **tardia** (sondagem de 1 s por até
+  60 s e religação a cada notificação de sessões) e `fonte: 'nenhuma'` se o serviço sumir;
 - velocidade de tokens calculada aqui (o estado é puro e sem relógio) por deltas de
   `output` sobre o tempo — `velocidadeDe(id)` → tok/s ou `null`;
 - preços são NOSSOS (`PRECOS_USD_POR_TOKEN`, USD/token; resolução por chave exata e
   por inclusão para ids namespaced) — o DSH não publica preços; sem preço → "custo —".
 
 O bundle (`client.js`) não pode importar irmãos (module table do loader), por isso a
-fonte vive em `surface.js` e está embutida no bundle; o teste de paridade
-`tests/plugin/client-surface.test.mjs` exige que os dois emitam exatamente os mesmos
-eventos para o mesmo cenário (guarda contra drift).
+fonte vive em `surface.js` e está embutida no bundle (secção 0, o texto de `surface.js`
+sem `export`); os testes de paridade de `tests/plugin/client-surface.test.mjs` exigem o
+mesmo texto e os mesmos eventos para o mesmo cenário (guarda contra drift).
+
+### A sala no bundle (`montarEscritorio` + `renderOffice`)
+
+- **Mesas**: uma por workspace do DSH (ordem do DSH; título; caminho com `~`), cores
+  azul/verde/coral por ordem (violeta = delegação), workspace vazio = 4 lugares livres,
+  órfãs em **Sem workspace**; sem serviço de workspaces, agrupa por pasta (`cwd`).
+- **Visibilidade** = barra do DSH (`ui-workspace/tree.ts`): sem lugar próprio para
+  subagentes, arquivadas (`archivedSessionIds`) e conversas em branco que não correm.
+- **Delegação**: quem tem subagentes a correr senta-se no lugar 0 da mesa violeta
+  "Equipe de …" (mais de 3 filhos → "Apoio de …") e o lugar de casa fica reservado.
+- **Geometria da demo**: grelha 3 colunas, *pitch* 940×730, origem 40, mundo 2900 de largura.
+- **Bonecos**: cada corpo Avataaars (identidade × expressão) vira um `<symbol>` único no
+  sprite do painel (ids com escopo `wgav-<id>-<expr>-…`) e cada pessoa é um `<use>`. O
+  pipeline dos bustos sem círculo deixou `mask="url(#…)"` para uma máscara inexistente: o
+  Chromium ignora-a, outros motores podem não desenhar o boneco — `prepararCorpo` retira
+  SÓ essa referência pendurada (o desenho fica o do Chromium em todos os motores). A arte
+  continua byte a byte a da demo (testado contra `assets/`).
+- **Nomes**: nome curto de pessoa (lista da demo) na ficha; o título da conversa vai para
+  o tooltip e para o inspetor. Associação estável em `localStorage`
+  (`dsh-work-game:assoc`), com migração dos nomes antigos que eram títulos.
+- **Ações** (API pública `UiWorkspace`, lida com `ctx.get('uiWorkspace')`): inspetor →
+  **Abrir conversa** (`openSession(id)`); **Nova sessão** e lugares livres das mesas de
+  workspace → `startSession(workspaceId)` (reutiliza a conversa em branco do workspace, se
+  houver). Arrastar só começa após 6 px e nunca dispara cliques.
 
 Futuro (lado host, `adapter.js`): eventos de fio em tempo real (turn/end, tool/*,
 user-questions, approval/*) via `SessionReference` + `eventSource` (modelo
@@ -174,6 +217,24 @@ user-questions, approval/*) via `SessionReference` + `eventSource` (modelo
    registados depois, essa explosão perde-se e a sala fica presa no estado vazio
    até ao próximo evento. O efeito do painel subscreve primeiro e `iniciar()`
    termina com `notificar()`.
+3. **Todo o nome no `inject` é OBRIGATÓRIO** (Cordis do DSH: sem modo opcional).
+   Um serviço ausente deixa a entrada `pending` e `assertEntriesActive` aborta o boot
+   web — a UI inteira não monta. Por isso só se declaram `slots`, `layout` e
+   `sessions`; `workspaces` e `uiWorkspace` leem-se com `ctx.get(nome)` (não bloqueia
+   e devolve `undefined` se o serviço faltar). Nunca tocar em `ctx.workspaces` sem o
+   declarar: o proxy do Cordis reclama de propriedades não registadas.
+4. **`ctx.get` devolve um proxy novo a cada chamada** (`getTraceable`); a propriedade
+   `list` é o próprio modelo, estável — compare-se por `list`, não pelo serviço.
+5. **Painéis `main` inativos são desmontados** (não escondidos): cada abertura do
+   Modo jogo remonta o painel; o núcleo (estado + ponte) sobrevive e só re-subscreve.
+6. **`client.js` é lido para memória e recarregado pelo client-hmr** (mtime/tamanho a
+   cada 500 ms) — mudar o ficheiro no disco basta, sem reiniciar o `dsh web`. Mas a
+   instalação `file:` do pnpm é uma **cópia**: o DSH continua a servir a cópia antiga.
+   Instalar com `dsh plugin --profile web add link:<repo>/dsh-plugin`.
+7. **Sem CSP** na página do DSH: `<style>` inline, SVG por `innerHTML` e `data:` passam.
 
-Validação: `node scripts/verify-dsh-panel.mjs <url-de-um-dsh-web>` — ativação,
-abertura do painel, canal real, pessoas do catálogo e chips de telemetria.
+Validação: `node scripts/verify-dsh-panel.mjs <url-de-um-dsh-web> [pasta] [--acoes]
+[--recrutar]` — ativação, canal real, workspaces → mesas, bonecos (`<use>` → `<symbol>`
+com caixa real, 0 referências partidas), inspetor, rato real (clicar seleciona, arrastar
+não clica, Abrir conversa navega, lugar livre recruta) e zero erros de consola. Validado
+em Chrome, Brave e Safari (WebKit, via `safaridriver`) no macmini, 2026-09-28.
