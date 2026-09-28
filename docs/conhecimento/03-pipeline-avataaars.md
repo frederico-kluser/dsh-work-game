@@ -57,6 +57,7 @@ Composição: opções fixas da pessoa (topType, hairColor, accessoriesType, fac
 
 - 8 identidades nomeadas (`rui`, `bia`, `lia`, `pesquisa`, `codigo`, `testes`, `alex`, `maya`) × 14 presets = **112** em `assets/avatars/expressions/<id>/<preset>.svg`;
 - 12 identidades totalmente aleatórias (`r01`..`r12`) × 4 presets (`idle`, `working`, `success`, `error`) = **48** em `assets/avatars/random/<id>/<preset>.svg`.
+- Fora destas contagens e da demo: **8** SVGs em `assets/avatars/sleeping/<id>.svg` (1 por identidade nomeada) — o preset `sleeping` do plugin (quem está Disponível dorme no Modo jogo, embutido no `dsh-plugin/src/client.js`), triple `Close`/`DefaultNatural`/`Serious`; proveniência em `assets/AVATARS-EXPRESSIONS.md`.
 
 Contrato `window.DSH_EXPRESSIONS` (script puro, sem módulos): `presets[{id,label,eyeType,eyebrowType,mouthType,when}]`, `namedIdentityIds`, `randomIdentityIds`, `identities`, `basePreset='idle'` e `resolve(identityId, presetId)` → caminho local com cadeia de fallback: preset pedido → `idle` → `assets/avatars/<id>.svg` (só nomeadas) → `null`. As identidades aleatórias têm só 4 presets renderizados; os restantes estados caem em `idle`.
 

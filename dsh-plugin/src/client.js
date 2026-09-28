@@ -23,7 +23,20 @@
  *     de delegação da demo ("Equipe de …"), com o lugar de casa do líder reservado;
  *   - a cena da demo portada 1:1 (geometria, cores dos temas, mobiliário,
  *     fichas, bandeira ❓, aviso >200k) e os bustos Avataaars com a expressão
- *     do estado, desenhados por <use> a partir de um sprite de <symbol>s.
+ *     do estado, desenhados por <use> a partir de um sprite de <symbol>s;
+ *   - FILTROS da sala (toolbar, guardados em localStorage): arquivadas, "Sem
+ *     workspace", só quem trabalha, conversas em branco — com o contador de
+ *     quem ficou escondido;
+ *   - a BARRA LATERAL da demo ao clicar numa pessoa ("UMA PESSOA, MUITAS
+ *     IDEIAS"): Contexto (janela real), Custo (4 buckets reais + estimativa) e
+ *     Atividade (o histórico da conversa + os eventos ao vivo); Esc fecha;
+ *   - a cena viva: quem dorme fecha os olhos e solta "zzz", quem trabalha
+ *     balança — em degraus de 0,2 s num relógio comum (a sala parada não gasta
+ *     CPU a 60 fps); a câmara nunca desce do zoom legível com a pessoa aberta;
+ *   - o CELULAR (iPhone + iMessage) com a conversa REAL da pessoa: abre com o
+ *     clique nela (e com "Conversa"), mostra as mensagens do alvo 'chat' do
+ *     uiConversation e envia prompts pela sessão retida — com rótulo próprio
+ *     ('dshWorkGame') e libertada ao fechar, trocar de pessoa ou desmontar.
  *
  * Botão "Modo jogo": slot `sidebar.footer.action` (order 0), colado ao botão de
  * settings do pé da barra; o clique abre o painel via
@@ -108,8 +121,11 @@ window.__ModuleLoader__.load({
      *   model  {sessionId, model?, contextWindow?}
      *   ctx    {sessionId, used, window?}                          — projected ?? pressure
      *
-     * Velocidade de tokens: calculada aqui (o estado é puro e sem relógio) a partir
-     * dos deltas de `output` sobre o tempo — `velocidadeDe(id)` devolve tok/s ou null.
+     * Velocidade de tokens: calculada aqui (o estado é puro e sem relógio) SÓ dentro
+     * do turno — os tokens de `output` do turno a dividir pelo tempo desde que ele
+     * começou (status → running) até à última atualização de usage; o tempo parado
+     * antes do turno não conta. `velocidadeDe(id)` devolve tok/s enquanto a sessão
+     * corre e null fora do turno (nunca fica presa a quem já está parado).
      *
      * Honestidade: nada é inventado. Sem canal (`ctx.sessions` ausente) devolve-se
      * `null` e o painel diz "à espera do host"; sem projeções, os campos ficam
@@ -370,17 +386,18 @@ window.__ModuleLoader__.load({
 
       /* estado anterior por sessão para diff (só muda o que mudou) */
       const anterior = new Map();      // id -> { running, usage, modelo, janela, usado, meta, paiAtivo }
-      const velocidades = new Map();   // id -> { saida, at, v }
+      const velocidades = new Map();   // id -> { inicio, saida, v } — só do turno EM CURSO
 
+      /* velocidade: um registo por turno (criado quando a sessão passa a correr,
+         apagado quando pára) — sem turno, nada conta e velocidadeDe dá null */
+      const comecarTurno = (id) => { velocidades.set(id, { inicio: agora(), saida: 0, v: null }); };
+      const acabarTurno = (id) => { velocidades.delete(id); };
       const rastrearVelocidade = (id, deltaSaida) => {
-        const reg = velocidades.get(id) ?? { saida: 0, at: agora(), v: 0 };
-        const t = agora();
-        const dt = Math.max(250, t - reg.at) / 1000;
-        const instante = Math.max(0, num(deltaSaida)) / dt;
-        reg.v = reg.v ? reg.v * 0.6 + instante * 0.4 : instante;
-        reg.saida += Math.max(0, num(deltaSaida));
-        reg.at = t;
-        velocidades.set(id, reg);
+        const reg = velocidades.get(id);
+        const d = Math.max(0, num(deltaSaida));
+        if (!reg || !d) return;
+        reg.saida += d;
+        reg.v = reg.saida / (Math.max(250, agora() - reg.inicio) / 1000);
       };
 
       const difs = (emitir) => {
@@ -430,6 +447,7 @@ window.__ModuleLoader__.load({
           const aCorrer = linha.running === true;
           if (antes.running !== aCorrer) {
             antes.running = aCorrer;
+            if (aCorrer) comecarTurno(id); else acabarTurno(id);
             emitir({ type: 'status', sessionId: id, status: aCorrer ? 'running' : 'idle' });
           }
 
@@ -467,7 +485,7 @@ window.__ModuleLoader__.load({
             if (!prev) {
               antes.usage = atual;
               if (atual.uncachedInput || atual.output || atual.cacheRead || atual.cacheWrite) {
-                rastrearVelocidade(id, 0);
+                /* o acumulado do 1.º vislumbre não é velocidade (não se sabe quando foi produzido) */
                 emitir({
                   type: 'usage', sessionId: id, model: modelo ?? undefined,
                   uncachedInput: atual.uncachedInput, output: atual.output,
@@ -530,9 +548,10 @@ window.__ModuleLoader__.load({
             wsList = null;
           };
         },
+        /** tok/s do turno em curso (só enquanto corre); null fora do turno ou sem produção. */
         velocidadeDe(id) {
           const reg = velocidades.get(String(id));
-          return reg && reg.v >= 1 ? Math.round(reg.v) : null;
+          return reg && reg.v !== null && reg.v >= 1 ? Math.round(reg.v) : null;
         },
       };
     }
@@ -573,10 +592,43 @@ window.__ModuleLoader__.load({
       { id: 'caramelo', forma: 'hexagono', paleta: { fundo: '#a0713f', borde: '#6e4c26', acento: '#c9996a' } },
     ];
 
-    const aleatorioDe = (lista) => lista[Math.floor(Math.random() * lista.length)];
+    // Hash estável de um texto (FNV-1a com a mistura final do MurmurHash3: ids
+    // curtos e parecidos não caem no mesmo valor só por azar dos bits baixos).
+    // O mesmo de faseDe.
+    function hashEstavel(texto) {
+      let h = 2166136261;
+      for (const c of String(texto)) h = Math.imul(h ^ c.codePointAt(0), 16777619) >>> 0;
+      h ^= h >>> 16; h = Math.imul(h, 0x85ebca6b) >>> 0;
+      h ^= h >>> 13; h = Math.imul(h, 0xc2b2ae35) >>> 0;
+      h ^= h >>> 16;
+      return h >>> 0;
+    }
 
-    // Associador: cache em memória + localStorage. Cria { name, avatar, style }
-    // na primeira visita de cada id e reutiliza-o depois, mesmo após recarregar.
+    // Identidade de uma conversa DERIVADA do id (nada de sorteio): a mesma
+    // conversa é a mesma pessoa — nome, boneco e estilo — em qualquer browser
+    // ou perfil, e dá para a encontrar pelo nome em testes e verificações.
+    // Desempate contra homónimos: se o nome preferido já é de outra pessoa
+    // (`ocupado(nome)`), o seguinte da lista (sondagem linear, também fixa).
+    function identidadeDe(id, ocupado = () => false) {
+      const ids = identidades();
+      const base = hashEstavel(`${id}|nome`) % NOMES.length;
+      let nome = NOMES[base];
+      for (let k = 0; k < NOMES.length; k += 1) {
+        const n = NOMES[(base + k) % NOMES.length];
+        if (!ocupado(n)) { nome = n; break; }
+      }
+      return {
+        name: nome,
+        avatar: ids[hashEstavel(`${id}|avatar`) % ids.length],
+        style: ESTILOS[hashEstavel(`${id}|estilo`) % ESTILOS.length],
+      };
+    }
+
+    // Associador: cache em memória + localStorage da identidade DERIVADA
+    // (identidadeDe) — marcada `v: 2`. Entradas antigas (sorteadas com
+    // Math.random, ou nomes que eram o título da conversa) são trocadas UMA
+    // vez pela derivada, para a mesma conversa ter o mesmo nome em todo o lado.
+    const VERSAO_ASSOC = 2;
     function criarAssociador() {
       let cache = null; // null = ainda não lido
 
@@ -599,37 +651,18 @@ window.__ModuleLoader__.load({
         }
       };
 
-      // Prefere um nome que ainda ninguém usa (menos homónimos na sala). O
-      // conjunto dos usados é mantido à parte: com milhares de conversas no
-      // catálogo, recalculá-lo a cada pessoa nova custava O(n²).
-      let usados = null;
-      const nomeLivre = () => {
-        if (usados === null) usados = new Set(Object.values(cache).map((a) => a && a.name));
-        const livres = NOMES.filter((n) => !usados.has(n));
-        const nome = aleatorioDe(livres.length ? livres : NOMES);
-        usados.add(nome);
-        return nome;
-      };
-
       return {
-        para(id) {
+        // `ocupado(nome)`: o nome já é de outra pessoa na sala (desempate).
+        // Só se consulta ao derivar uma identidade nova — depois, O(1).
+        para(id, ocupado) {
           if (cache === null) ler();
-          let a = cache[id];
-          if (typeof a !== 'object' || a === null) {
-            a = { name: nomeLivre(), avatar: aleatorioDe(identidades()), style: aleatorioDe(ESTILOS) };
-            cache[id] = a;
-            guardar();
-            return a;
-          }
-          // Migrações de versões anteriores: nomes que eram o TÍTULO da conversa
-          // (não cabiam na ficha) passam a nome de pessoa; avatares antigos
-          // (data:/http ou identidade desconhecida) passam a uma identidade real.
-          let mudou = false;
-          if (!NOMES_VALIDOS.has(a.name)) { a.name = nomeLivre(); mudou = true; }
-          if (typeof a.avatar !== 'string' || !EXPR_AVATARS[a.avatar]) { a.avatar = aleatorioDe(identidades()); mudou = true; }
-          if (!a.style) { a.style = aleatorioDe(ESTILOS); mudou = true; }
-          if (mudou) { cache[id] = a; guardar(); }
-          return a;
+          const a = cache[id];
+          if (a && typeof a === 'object' && a.v === VERSAO_ASSOC && NOMES_VALIDOS.has(a.name)
+            && typeof a.avatar === 'string' && EXPR_AVATARS[a.avatar] && a.style) return a;
+          const nova = { ...identidadeDe(id, typeof ocupado === 'function' ? ocupado : undefined), v: VERSAO_ASSOC };
+          cache[id] = nova;
+          guardar();
+          return nova;
         },
       };
     }
@@ -648,11 +681,7 @@ window.__ModuleLoader__.load({
       trabalho: 5, retry: 4, compactacao: 4, concluido: 2, ocioso: 0,
     };
 
-    // Estado visual: id -> rótulo e expression Avataaars derivada.
-    const ROTULOS = {
-      idle: 'à espera', working: 'a trabalhar', tool: 'ferramenta',
-      waiting: 'a aguardar', error: 'erro', done: 'concluído',
-    };
+    // Estado visual: id -> expression Avataaars derivada.
     const EXPRESSAO = {
       idle: 'idle', working: 'working', tool: 'tool',
       waiting: 'waiting', error: 'error', done: 'success',
@@ -678,6 +707,12 @@ window.__ModuleLoader__.load({
         ctx: null, // { used, window } | null -> UI mostra "CTX —"
         model: modelo ?? null,
         cost: null, // null -> "custo indisponível", nunca zero inventado
+        // Os 4 buckets reais de tokens (projeção tokenUsage do DSH), somados a
+        // partir dos eventos `usage`; null até ao 1.º `usage` ("—", nunca zero).
+        tokens: null,
+        // Linha do tempo dos eventos reais recebidos (os últimos MAX_ATIVIDADE).
+        activity: [],
+        statusVisto: false, // já chegou algum `status`? (o 1.º não é transição)
         question: null, // persistente até question/answered
         approvals: [],
         subagents: 0, // subagentes A CORRER (delegação em curso)
@@ -688,6 +723,20 @@ window.__ModuleLoader__.load({
         },
       };
     }
+
+    // Atividade por pessoa: só eventos REAIS recebidos, com a hora de chegada
+    // (`evento.at`, carimbada pelo núcleo — o estado continua sem relógio).
+    const MAX_ATIVIDADE = 50;
+    function registar(p, evento, tipo, texto) {
+      const at = Number.isFinite(Number(evento && evento.at)) ? Number(evento.at) : null;
+      p.activity = [...p.activity, { at, tipo, texto }].slice(-MAX_ATIVIDADE);
+    }
+    const TEXTO_FIM_DE_TURNO = {
+      completed: ['turno-concluido', 'Turno concluído'],
+      error: ['turno-erro', 'Erro no turno'],
+      blocked: ['turno-erro', 'Turno bloqueado'],
+      'max-tokens': ['turno-erro', 'Turno parou: máximo de tokens'],
+    };
 
     // Regra §2: só o emoji mais relevante fica visível (o resto fica no painel).
     function emojiDa(p) {
@@ -744,7 +793,11 @@ window.__ModuleLoader__.load({
       switch (evento.type) {
         case 'session/added':
           if (!pessoas.has(evento.sessionId)) {
-            const asoc = associador.para(evento.sessionId);
+            // Desempate de homónimos: o nome preferido já é de outra pessoa da sala?
+            const asoc = associador.para(evento.sessionId, (nome) => {
+              for (const outra of pessoas.values()) if (outra.name === nome) return true;
+              return false;
+            });
             pessoas.set(evento.sessionId, criarPessoa(evento.sessionId, evento.model, asoc, evento));
           }
           break;
@@ -753,7 +806,13 @@ window.__ModuleLoader__.load({
           // pasta, fim do "em branco", origem de subagente).
           const pessoa = p(evento.sessionId);
           if (!pessoa) break;
-          if ('title' in evento) pessoa.title = typeof evento.title === 'string' && evento.title ? evento.title : null;
+          if ('title' in evento) {
+            const titulo = typeof evento.title === 'string' && evento.title ? evento.title : null;
+            if (titulo && titulo !== pessoa.title) {
+              registar(pessoa, evento, 'titulo', pessoa.title ? `Título mudou: ${titulo}` : `A conversa ganhou título: ${titulo}`);
+            }
+            pessoa.title = titulo;
+          }
           if ('cwd' in evento) pessoa.cwd = typeof evento.cwd === 'string' && evento.cwd ? evento.cwd : null;
           if ('parentId' in evento) pessoa.parentId = evento.parentId != null ? String(evento.parentId) : null;
           if ('subagent' in evento) pessoa.subagent = evento.subagent === true;
@@ -777,6 +836,16 @@ window.__ModuleLoader__.load({
           const pessoa = p(evento.sessionId);
           if (!pessoa) break;
           const emExecucao = evento.status === 'running';
+          // Só transições entram na linha do tempo; o 1.º `status` é o que já
+          // se passava quando o painel abriu (parado não conta).
+          if (!pessoa.statusVisto) {
+            if (emExecucao) registar(pessoa, evento, 'trabalho-inicio', 'Já estava a trabalhar');
+          } else if (emExecucao && !pessoa.running) {
+            registar(pessoa, evento, 'trabalho-inicio', 'Começou a trabalhar');
+          } else if (!emExecucao && pessoa.running) {
+            registar(pessoa, evento, 'trabalho-fim', 'Terminou de trabalhar');
+          }
+          pessoa.statusVisto = true;
           pessoa.running = emExecucao;
           pessoa.flags.ocioso = !emExecucao;
           // Nova execução supera as marcas transitórias; arranque de turno
@@ -795,6 +864,8 @@ window.__ModuleLoader__.load({
           pessoa.flags.ferramenta = false;
           pessoa.flags.retry = false;
           pessoa.flags.compactacao = false;
+          const [tipoFim, textoFim] = TEXTO_FIM_DE_TURNO[kind] ?? ['turno-interrompido', 'Turno interrompido'];
+          registar(pessoa, evento, tipoFim, textoFim);
           if (kind === 'completed') {
             pessoa.flags.erro = false;
             pessoa.flags.concluido = true;
@@ -818,12 +889,17 @@ window.__ModuleLoader__.load({
           pessoa.flags.concluido = false;
           pessoa.flags.retry = false;
           pessoa.flags.compactacao = false;
+          const ferramenta = typeof evento.name === 'string' && evento.name ? evento.name : 'ferramenta';
           if (evento.phase === 'call') {
             pessoa.flags.ferramenta = true;
             pessoa.flags.erro = false;
+            registar(pessoa, evento, 'ferramenta', `Usou a ferramenta ${ferramenta}`);
           } else {
             pessoa.flags.ferramenta = false;
-            if (evento.ok === false) pessoa.flags.erro = true;
+            if (evento.ok === false) {
+              pessoa.flags.erro = true;
+              registar(pessoa, evento, 'ferramenta-erro', `A ferramenta ${ferramenta} falhou`);
+            }
           }
           break;
         }
@@ -833,11 +909,15 @@ window.__ModuleLoader__.load({
           pessoa.question = evento.text ?? 'Pergunta';
           pessoa.flags.concluido = false;
           pessoa.flags.retry = false;
+          registar(pessoa, evento, 'pergunta', `Fez uma pergunta: ${pessoa.question}`);
           break;
         }
         case 'question/answered': {
           const pessoa = p(evento.sessionId);
-          if (pessoa) pessoa.question = null;
+          if (pessoa) {
+            if (pessoa.question) registar(pessoa, evento, 'pergunta-respondida', 'Pergunta respondida');
+            pessoa.question = null;
+          }
           break;
         }
         case 'approval': {
@@ -846,11 +926,17 @@ window.__ModuleLoader__.load({
           pessoa.approvals = [...pessoa.approvals, { id: evento.id, toolName: evento.toolName ?? 'ferramenta' }];
           pessoa.flags.concluido = false;
           pessoa.flags.retry = false;
+          registar(pessoa, evento, 'aprovacao', `Pediu aprovação: ${evento.toolName ?? 'ferramenta'}`);
           break;
         }
         case 'approval/decided': {
           const pessoa = p(evento.sessionId);
-          if (pessoa) pessoa.approvals = pessoa.approvals.filter((a) => a.id !== evento.id);
+          if (pessoa) {
+            if (pessoa.approvals.some((a) => a.id === evento.id)) {
+              registar(pessoa, evento, 'aprovacao-decidida', `Aprovação decidida${evento.outcome ? ` (${evento.outcome})` : ''}`);
+            }
+            pessoa.approvals = pessoa.approvals.filter((a) => a.id !== evento.id);
+          }
           break;
         }
         case 'subagent/start': {
@@ -860,17 +946,32 @@ window.__ModuleLoader__.load({
           pessoa.flags.ocioso = false;
           pessoa.flags.concluido = false;
           pessoa.flags.retry = false;
+          const filho = evento.childId != null ? p(String(evento.childId)) : null;
+          registar(pessoa, evento, 'subagente-inicio', `Delegou a um subagente${filho ? ` (${filho.name})` : ''}`);
           break;
         }
         case 'subagent/end': {
           const pessoa = p(evento.sessionId);
-          if (pessoa) pessoa.subagents = Math.max(0, pessoa.subagents - 1);
+          if (pessoa) {
+            pessoa.subagents = Math.max(0, pessoa.subagents - 1);
+            const filho = evento.childId != null ? p(String(evento.childId)) : null;
+            registar(pessoa, evento, 'subagente-fim', `Subagente terminou${filho ? ` (${filho.name})` : ''}`);
+          }
           break;
         }
         case 'usage': {
           const pessoa = p(evento.sessionId);
           if (!pessoa) break;
           pessoa.model = evento.model ?? pessoa.model;
+          // Buckets reais acumulados (o 1.º `usage` traz o acumulado do DSH,
+          // os seguintes só deltas — a soma é o total da projeção tokenUsage).
+          const t = pessoa.tokens ?? { uncachedInput: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
+          pessoa.tokens = {
+            uncachedInput: t.uncachedInput + num(evento.uncachedInput),
+            output: t.output + num(evento.output),
+            cacheRead: t.cacheRead + num(evento.cacheRead),
+            cacheWrite: t.cacheWrite + num(evento.cacheWrite),
+          };
           const preco = precoDe(estado.precos, pessoa.model);
           if (!preco) {
             pessoa.cost = null; // sem preço conhecido -> custo indisponível
@@ -886,7 +987,11 @@ window.__ModuleLoader__.load({
         case 'model': {
           const pessoa = p(evento.sessionId);
           if (!pessoa) break;
-          pessoa.model = evento.model ?? pessoa.model;
+          const novo = evento.model ?? pessoa.model;
+          if (pessoa.model && novo && novo !== pessoa.model) {
+            registar(pessoa, evento, 'modelo', `Trocou de modelo: ${pessoa.model} → ${novo}`);
+          }
+          pessoa.model = novo;
           if (evento.contextWindow != null) {
             pessoa.ctx = { used: pessoa.ctx ? pessoa.ctx.used : null, window: evento.contextWindow };
           }
@@ -895,6 +1000,10 @@ window.__ModuleLoader__.load({
         case 'ctx': {
           const pessoa = p(evento.sessionId);
           if (!pessoa) break;
+          const antes = pessoa.ctx && pessoa.ctx.used != null ? num(pessoa.ctx.used) : null;
+          if (antes !== null && antes < LIMIAR_CTX && num(evento.used) >= LIMIAR_CTX) {
+            registar(pessoa, evento, 'contexto-alto', `O contexto passou de ${LIMIAR_CTX / 1000}k tokens`);
+          }
           pessoa.ctx = { used: evento.used, window: evento.window ?? (pessoa.ctx ? pessoa.ctx.window : null) };
           break;
         }
@@ -904,13 +1013,17 @@ window.__ModuleLoader__.load({
           pessoa.flags.retry = true;
           pessoa.flags.ocioso = false;
           pessoa.flags.concluido = false;
+          registar(pessoa, evento, 'retry', 'Nova tentativa do modelo');
           break;
         }
         case 'compaction': {
           const pessoa = p(evento.sessionId);
           if (!pessoa) break;
           pessoa.flags.compactacao = evento.phase === 'start';
-          if (evento.phase === 'start') pessoa.flags.ocioso = false;
+          if (evento.phase === 'start') {
+            pessoa.flags.ocioso = false;
+            registar(pessoa, evento, 'compactacao', 'Compactou o contexto');
+          }
           break;
         }
         default:
@@ -932,6 +1045,7 @@ window.__ModuleLoader__.load({
         subagents: p.subagents, outputs: p.outputs,
         title: p.title, cwd: p.cwd, parentId: p.parentId, subagent: p.subagent,
         blank: p.blank, running: p.running,
+        tokens: p.tokens, activity: p.activity,
       };
     }
 
@@ -1001,6 +1115,10 @@ window.__ModuleLoader__.load({
     // createAdapter({ onEvent, sessions, projections, surface }) -> { start, stop }.
     // `surface` é a ponte real (secção 0). Sem canal, o painel mostra
     // "telemetria indisponível" — nunca inventa sessões nem eventos.
+    // `sessions` pode ser uma FUNÇÃO: o catálogo relê-se em cada start() —
+    // uma lista guardada do 1.º arranque traria de volta, ao reabrir o painel,
+    // conversas entretanto apagadas no DSH ("fantasmas": a ponte já não as tem
+    // e nunca mais emitiria session/removed para elas).
     function createAdapter({ onEvent, sessions = [], projections = {}, surface = null }) {
       let ativo = false;
       const limpeza = [];
@@ -1008,8 +1126,10 @@ window.__ModuleLoader__.load({
         start() {
           if (ativo) return;
           ativo = true;
-          // Semente inicial a partir do catálogo de sessões fornecido.
-          for (const sessao of sessions) {
+          // Semente inicial a partir do catálogo de sessões ATUAL.
+          let catalogo = [];
+          try { catalogo = (typeof sessions === 'function' ? sessions() : sessions) ?? []; } catch { catalogo = []; }
+          for (const sessao of Array.isArray(catalogo) ? catalogo : []) {
             onEvent({
               type: 'session/added', sessionId: sessao.id, model: sessao.model,
               title: sessao.title, cwd: sessao.cwd, parentId: sessao.parentId,
@@ -1048,7 +1168,12 @@ window.__ModuleLoader__.load({
      * DSH (nada é simulado — sem dados, mostra "—").
      * ================================================================ */
 
-    const GRID = { cols: 3, pitchX: 940, pitchY: 730, originX: 40, originY: 40 }; // = demo
+    // = demo, exceto originY: o topo do mundo é a parede do escritório
+    // (FUNDO_ESCRITORIO, 0–360; o chão começa em 360) e a 1.ª fila de mesas
+    // começa 50 acima do rodapé — só os balões (y 2–50 da mesa) sobem ao
+    // ripado; botão "Nova sessão", cadeiras e cabeças ficam no chão.
+    const ALTURA_PAREDE = 360;
+    const GRID = { cols: 3, pitchX: 940, pitchY: 730, originX: 40, originY: ALTURA_PAREDE - 50 };
     const LARGURA_MESA = 900; // = demo (W)
     const TEMAS = { // = demo (THEMES)
       blue: { color: '#2869a6', panel: '#25629b', stroke: '#244e72' },
@@ -1077,21 +1202,116 @@ window.__ModuleLoader__.load({
     }
 
     // Câmara. `tudo` (botão Enquadrar) mostra a sala inteira. O enquadramento
-    // automático também, desde que os bonecos continuem legíveis; numa sala
-    // grande (dezenas de mesas) em que caber tudo exigiria um zoom abaixo de
-    // ZOOM_LEGIVEL, mostra a largura inteira alinhada ao topo — os workspaces
-    // vêm primeiro e o resto desce com o scroll — em vez de pessoas minúsculas.
+    // automático também, desde que os bonecos continuem legíveis; senão (sala
+    // grande, ou a tela estreita com a barra lateral aberta) fica no zoom de
+    // sempre, ZOOM_FOCO — fichas, olhos fechados, "zzz" e balanço à vista — e
+    // mostra o início da sala (os workspaces vêm primeiro) ou, com uma pessoa
+    // selecionada (`foco`, centro do lugar no mundo), centra-a na zona visível
+    // (`tela.zona` {esq, dir} em px da tela — zonaVisivel: sem o celular e sem
+    // a barra lateral quando se sobrepõe à sala, onde quer que estejam;
+    // `tela.visivel` = zona [0, visivel], legado).
+    // A sala encosta SEMPRE ao topo: a parede fica colada à toolbar e o chão
+    // continua até ao fundo da tela (renderOffice prolonga-o para baixo).
     const ZOOM_LEGIVEL = 0.3;
-    function enquadramento(mundo, tela, tudo = false) {
+    const ZOOM_MIN_ENQUADRAR = 0.12; // "Enquadrar" numa sala enorme: nunca menos (ver SANGRIA)
+    const ZOOM_FOCO = 0.4; // = painel 1160 / mundo 2900: o tamanho "de sempre" dos bonecos
+    // Posição num eixo: cabe → centrada (x) ou no início (y); não cabe → o
+    // início, ou o foco no meio da vista sem mostrar vazio antes do mundo.
+    function eixoCamara(vista, extensao, zoom, foco, centrar) {
+      const tamanho = extensao * zoom;
+      if (tamanho <= vista) return centrar ? (vista - tamanho) / 2 : 0;
+      if (!Number.isFinite(foco)) return 0;
+      return Math.min(0, Math.max(vista - tamanho, vista / 2 - foco * zoom));
+    }
+    function enquadramento(mundo, tela, tudo = false, foco = null) {
       const ajusteTotal = Math.min(tela.w / mundo.largura, tela.h / mundo.altura, 1.2);
-      const cabe = tudo || ajusteTotal >= ZOOM_LEGIVEL;
-      const zoom = Math.max(0.12, cabe ? ajusteTotal : Math.min(tela.w / mundo.largura, 1.2));
-      const alturaVista = mundo.altura * zoom;
+      const alvo = tudo ? null : foco;
+      let zoom;
+      if (tudo) zoom = Math.max(ZOOM_MIN_ENQUADRAR, ajusteTotal);
+      else {
+        zoom = ajusteTotal >= ZOOM_LEGIVEL ? ajusteTotal : Math.max(ZOOM_FOCO, Math.min(tela.w / mundo.largura, 1.2));
+        if (alvo) zoom = Math.max(zoom, ZOOM_FOCO);
+      }
+      let esq = 0;
+      let largura = tela.w;
+      const z = tela.zona;
+      if (alvo && z && Number.isFinite(z.esq) && Number.isFinite(z.dir) && Math.min(tela.w, z.dir) > Math.max(0, z.esq)) {
+        esq = Math.max(0, z.esq);
+        largura = Math.min(tela.w, z.dir) - esq;
+      } else if (alvo && Number.isFinite(tela.visivel) && tela.visivel > 0) {
+        largura = Math.min(tela.w, tela.visivel);
+      }
       return {
         zoom,
-        x: (tela.w - mundo.largura * zoom) / 2,
-        y: cabe && alturaVista <= tela.h ? (tela.h - alturaVista) / 2 : 12,
+        x: esq + eixoCamara(largura, mundo.largura, zoom, alvo ? alvo.x : null, true),
+        y: eixoCamara(tela.h, mundo.altura, zoom, alvo ? alvo.y : null, false),
       };
+    }
+    // Zona da tela (px desde a esquerda da tela) onde se vê a sala com uma
+    // pessoa aberta: a tela menos o que flutua POR CIMA dela (`obstaculos`
+    // [{esq, dir}] — o celular e, com a janela ≤ 800 px, a barra lateral, que
+    // aí se sobrepõe à sala; as posições REAIS, onde quer que estejam), com `margem` de
+    // folga de cada lado de cada obstáculo. O que não cruza a tela não conta
+    // (a barra lateral ao lado da tela, o celular por cima da barra). Fica o
+    // maior troço livre; mais estreito do que `minimo`, alarga-se à volta do
+    // seu centro, sem sair da tela. Se as folgas comem o espaço todo (ex.: 40
+    // px entre o celular e a barra, menos do que 2 × margem), conta a folga
+    // REAL entre os obstáculos (margem 0), alargada ao mínimo à volta do
+    // centro dela; só sem folga nenhuma (obstáculos sobrepostos a tapar a
+    // tela) fica a tela inteira.
+    function zonaVisivel(largura, obstaculos = [], margem = 24, minimo = 160) {
+      const w = Math.max(0, Number(largura) || 0);
+      const validos = (obstaculos || []).filter((o) => o && Number.isFinite(o.esq) && Number.isFinite(o.dir)
+        && o.dir > o.esq && o.dir > 0 && o.esq < w); // o que não cruza a tela não conta
+      const livresCom = (folga) => {
+        let livres = [[0, w]];
+        for (const o of validos) {
+          const a = o.esq - folga;
+          const b = o.dir + folga;
+          const novos = [];
+          for (const [x0, x1] of livres) {
+            if (b <= x0 || a >= x1) { novos.push([x0, x1]); continue; }
+            if (a > x0) novos.push([x0, a]);
+            if (b < x1) novos.push([b, x1]);
+          }
+          livres = novos;
+        }
+        return livres;
+      };
+      let livres = livresCom(Math.max(0, margem));
+      if (!livres.length && margem > 0) livres = livresCom(0);
+      if (!livres.length) return { esq: 0, dir: w };
+      let [esq, dir] = livres.reduce((m, l) => (l[1] - l[0] > m[1] - m[0] ? l : m));
+      const alvo = Math.min(Math.max(0, minimo), w);
+      if (dir - esq < alvo) {
+        esq = Math.min(Math.max(0, (esq + dir) / 2 - alvo / 2), w - alvo);
+        dir = esq + alvo;
+      }
+      return { esq, dir };
+    }
+    // Caixa horizontal de LAYOUT de um elemento (offsetLeft/offsetWidth: sem
+    // transformações — ex.: a entrada animada do celular) em px desde `origemX`
+    // (a esquerda da tela no ecrã). null se não estiver no layout.
+    function caixaDeLayout(el, origemX = 0) {
+      if (!el || !Number.isFinite(el.offsetLeft) || !(el.offsetWidth > 0)) return null;
+      const pai = el.offsetParent;
+      const base = pai && typeof pai.getBoundingClientRect === 'function'
+        ? pai.getBoundingClientRect().left + (pai.clientLeft || 0)
+        : 0;
+      const esq = base + el.offsetLeft - origemX;
+      return { esq, dir: esq + el.offsetWidth };
+    }
+    // Centro (no mundo) de quem está sentado no lugar `id`: do alto da cabeça
+    // (y 147 da mesa) ao fim da ficha (y 503). null se não estiver na sala.
+    function centroDoLugar(layout, id) {
+      if (!layout || !Array.isArray(layout.modules) || id == null) return null;
+      for (let i = 0; i < layout.modules.length; i += 1) {
+        const j = layout.modules[i].seats.indexOf(id);
+        if (j < 0) continue;
+        const pos = posicaoGrelha(i);
+        return { x: pos.x + 112.5 + j * 225, y: pos.y + 325 };
+      }
+      return null;
     }
 
     const ESCAPES = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
@@ -1188,8 +1408,148 @@ window.__ModuleLoader__.load({
   <symbol id="wg-icon-alert" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="m12 3 10 18H2ZM12 9v5"/><path d="M12 17v.1"/></g></symbol>
   <symbol id="wg-icon-grid" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></g></symbol>
   <symbol id="wg-icon-hand" viewBox="0 0 24 24"><path d="M8 13V5q0-3 3-1v7-8q3-2 3 1v7-6q3-2 3 1v7-4q3-1 3 2v6q0 6-7 6h-1q-3 0-5-3l-4-5q-1-3 2-3Z" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></symbol>`;
+    // Fundo de escritório (topo do mundo, 2900×360): forro ripado, parede,
+    // janela grande à esquerda, figueira, quadros, relógio e estante baixa.
+    // Arte original no mesmo traço do furniture.svg, sem ids nem <defs>; é o
+    // corpo de assets/office-backdrop.svg, byte a byte (fonte:
+    // dsh-plugin/src/cenario-fundo.txt). O chão começa em y=360.
+    const FUNDO_ESCRITORIO = `<g class="wg-bg" pointer-events="none" stroke-linejoin="round" stroke-linecap="round">
+  <g class="wg-bg-parede">
+  <rect width="2900" height="360" fill="#e4e8dc"/>
+  <rect width="2900" height="24" fill="#efe6d4"/>
+  <path d="M14 0V24M44 0V24M74 0V24M104 0V24M134 0V24M164 0V24M194 0V24M224 0V24M254 0V24M284 0V24M314 0V24M344 0V24M374 0V24M404 0V24M434 0V24M464 0V24M494 0V24M524 0V24M554 0V24M584 0V24M614 0V24M644 0V24M674 0V24M704 0V24M734 0V24M764 0V24M794 0V24M824 0V24M854 0V24M884 0V24M914 0V24M944 0V24M974 0V24M1004 0V24M1034 0V24M1064 0V24M1094 0V24M1124 0V24M1154 0V24M1184 0V24M1214 0V24M1244 0V24M1274 0V24M1304 0V24M1334 0V24M1364 0V24M1394 0V24M1424 0V24M1454 0V24M1484 0V24M1514 0V24M1544 0V24M1574 0V24M1604 0V24M1634 0V24M1664 0V24M1694 0V24M1724 0V24M1754 0V24M1784 0V24M1814 0V24M1844 0V24M1874 0V24M1904 0V24M1934 0V24M1964 0V24M1994 0V24M2024 0V24M2054 0V24M2084 0V24M2114 0V24M2144 0V24M2174 0V24M2204 0V24M2234 0V24M2264 0V24M2294 0V24M2324 0V24M2354 0V24M2384 0V24M2414 0V24M2444 0V24M2474 0V24M2504 0V24M2534 0V24M2564 0V24M2594 0V24M2624 0V24M2654 0V24M2684 0V24M2714 0V24M2744 0V24M2774 0V24M2804 0V24M2834 0V24M2864 0V24M2894 0V24" stroke="#e0d3bb" stroke-width="2"/>
+  <rect y="22" width="2900" height="12" fill="#faf6ed"/>
+  <rect y="34" width="2900" height="10" fill="#f1ebdd"/>
+  <rect y="44" width="2900" height="6" fill="#fbf8f1"/>
+  <path d="M0 23H2900M0 34H2900" stroke="#dcd1bc" stroke-width="2"/>
+  <path d="M0 50H2900" stroke="#d3c8b1" stroke-width="2.5"/>
+  <rect y="51" width="2900" height="12" fill="#fbf6e4" opacity=".7"/>
+  <rect y="63" width="2900" height="14" fill="#fbf6e4" opacity=".3"/>
+  <rect y="252" width="2900" height="82" fill="#e2cfae"/>
+  <path d="M17 254V332M43 254V332M69 254V332M95 254V332M121 254V332M147 254V332M173 254V332M199 254V332M225 254V332M251 254V332M277 254V332M303 254V332M329 254V332M355 254V332M381 254V332M407 254V332M433 254V332M459 254V332M485 254V332M511 254V332M537 254V332M563 254V332M589 254V332M615 254V332M641 254V332M667 254V332M693 254V332M719 254V332M745 254V332M771 254V332M797 254V332M823 254V332M849 254V332M875 254V332M901 254V332M927 254V332M953 254V332M979 254V332M1005 254V332M1031 254V332M1057 254V332M1083 254V332M1109 254V332M1135 254V332M1161 254V332M1187 254V332M1213 254V332M1239 254V332M1265 254V332M1291 254V332M1317 254V332M1343 254V332M1369 254V332M1395 254V332M1421 254V332M1447 254V332M1473 254V332M1499 254V332M1525 254V332M1551 254V332M1577 254V332M1603 254V332M1629 254V332M1655 254V332M1681 254V332M1707 254V332M1733 254V332M1759 254V332M1785 254V332M1811 254V332M1837 254V332M1863 254V332M1889 254V332M1915 254V332M1941 254V332M1967 254V332M1993 254V332M2019 254V332M2045 254V332M2071 254V332M2097 254V332M2123 254V332M2149 254V332M2175 254V332M2201 254V332M2227 254V332M2253 254V332M2279 254V332M2305 254V332M2331 254V332M2357 254V332M2383 254V332M2409 254V332M2435 254V332M2461 254V332M2487 254V332M2513 254V332M2539 254V332M2565 254V332M2591 254V332M2617 254V332M2643 254V332M2669 254V332M2695 254V332M2721 254V332M2747 254V332M2773 254V332M2799 254V332M2825 254V332M2851 254V332M2877 254V332" stroke="#ead9bd" stroke-width="2"/>
+  <path d="M13 254V332M39 254V332M65 254V332M91 254V332M117 254V332M143 254V332M169 254V332M195 254V332M221 254V332M247 254V332M273 254V332M299 254V332M325 254V332M351 254V332M377 254V332M403 254V332M429 254V332M455 254V332M481 254V332M507 254V332M533 254V332M559 254V332M585 254V332M611 254V332M637 254V332M663 254V332M689 254V332M715 254V332M741 254V332M767 254V332M793 254V332M819 254V332M845 254V332M871 254V332M897 254V332M923 254V332M949 254V332M975 254V332M1001 254V332M1027 254V332M1053 254V332M1079 254V332M1105 254V332M1131 254V332M1157 254V332M1183 254V332M1209 254V332M1235 254V332M1261 254V332M1287 254V332M1313 254V332M1339 254V332M1365 254V332M1391 254V332M1417 254V332M1443 254V332M1469 254V332M1495 254V332M1521 254V332M1547 254V332M1573 254V332M1599 254V332M1625 254V332M1651 254V332M1677 254V332M1703 254V332M1729 254V332M1755 254V332M1781 254V332M1807 254V332M1833 254V332M1859 254V332M1885 254V332M1911 254V332M1937 254V332M1963 254V332M1989 254V332M2015 254V332M2041 254V332M2067 254V332M2093 254V332M2119 254V332M2145 254V332M2171 254V332M2197 254V332M2223 254V332M2249 254V332M2275 254V332M2301 254V332M2327 254V332M2353 254V332M2379 254V332M2405 254V332M2431 254V332M2457 254V332M2483 254V332M2509 254V332M2535 254V332M2561 254V332M2587 254V332M2613 254V332M2639 254V332M2665 254V332M2691 254V332M2717 254V332M2743 254V332M2769 254V332M2795 254V332M2821 254V332M2847 254V332M2873 254V332M2899 254V332" stroke="#d0b78f" stroke-width="3"/>
+  <rect y="238" width="2900" height="14" fill="#f4ecdc"/>
+  <path d="M0 246H2900" stroke="#e6d9c1" stroke-width="2"/>
+  <path d="M0 238H2900M0 252H2900" stroke="#cdbb9b" stroke-width="2.5"/>
+  <rect y="334" width="2900" height="26" fill="#cdb089"/>
+  <path d="M0 339H2900" stroke="#dcc49f" stroke-width="3"/>
+  <path d="M0 334H2900M0 359H2900" stroke="#b09370" stroke-width="2.5"/>
+  </g>
+  <g class="wg-bg-janela">
+  <rect x="98" y="66" width="724" height="174" rx="8" fill="#f7f3ea" stroke="#d2c6af" stroke-width="2.5"/>
+  <rect x="110" y="78" width="700" height="154" rx="6" fill="#a2bac7"/>
+  <rect x="119" y="87" width="682" height="136" rx="4" fill="#cde6ee"/>
+  <circle cx="706" cy="122" r="18" fill="#f4eed6"/>
+  <path d="M234 132H294Q302 132 300 124Q298 117 288 118Q286 106 273 105Q262 104 257 114Q250 109 243 114Q238 118 239 123Q230 124 230 128Q230 132 234 132Z" fill="#e8f4f6"/>
+  <path d="M520 110H562Q568 110 567 104Q565 99 558 100Q555 92 546 92Q538 92 535 99Q529 96 524 100Q520 103 521 106Q516 107 516 109Q516 110 520 110Z" fill="#e8f4f6"/>
+  <path d="M119 223V170H155V146H193V176H223V128H259V164H295V154H331V223ZM381 223V164H407V136H441V160H477V118H513V168H549V148H587V223ZM655 223V160H689V136H725V172H761V150H801V223Z" fill="#b7d8e3"/>
+  <path d="M119 223V188H163V174H205V196H245V184H283V223ZM437 223V192H471V170H511V190H547V223ZM589 223V186H629V174H667V194H709V223Z" fill="#a9cedb"/>
+  <path d="M231 140h6M243 140h6M231 152h6M243 152h6M487 130h6M499 130h6M487 142h6M499 142h6M699 150h6M711 150h6" stroke="#d6ecf1" stroke-width="5" stroke-linecap="butt"/>
+  <path d="M315 223Q317 200 337 202Q343 190 361 196Q377 188 387 202Q405 200 409 223ZM711 223Q711 204 729 204Q737 194 753 200Q769 194 779 204Q801 204 801 223Z" fill="#b5d5c2"/>
+  <path d="M169 172L203 126M183 178L211 140M599 150L627 112" stroke="#e7f4f5" stroke-width="4" opacity=".75"/>
+  <path d="M346 87V223M573 87V223" stroke="#a2bac7" stroke-width="7"/>
+  <path d="M119 218H801" stroke="#e7f4f5" stroke-width="8"/>
+  <rect x="92" y="230" width="736" height="12" rx="4" fill="#faf7f0" stroke="#d2c6af" stroke-width="2.5"/>
+  <path d="M84 62H836" stroke="#b39a78" stroke-width="5"/>
+  <circle cx="82" cy="62" r="7" fill="#c9b08b" stroke="#a68c69" stroke-width="2"/>
+  <circle cx="838" cy="62" r="7" fill="#c9b08b" stroke="#a68c69" stroke-width="2"/>
+  <g fill="#efe2cc" stroke="#d4c2a2" stroke-width="2.5">
+  <path d="M88 64H152Q144 150 164 238Q146 244 128 238Q110 244 92 238Q82 150 88 64Z"/>
+  <path d="M88 64H152Q144 150 164 238Q146 244 128 238Q110 244 92 238Q82 150 88 64Z" transform="translate(920 0) scale(-1 1)"/>
+  </g>
+  <g fill="none" stroke="#e2d1b3" stroke-width="2.5">
+  <path d="M110 68Q104 150 110 236M132 68Q128 150 142 236"/>
+  <path d="M110 68Q104 150 110 236M132 68Q128 150 142 236" transform="translate(920 0) scale(-1 1)"/>
+  </g>
+  <path d="M94 59v7M116 59v7M138 59v7M826 59v7M804 59v7M782 59v7" stroke="#a68c69" stroke-width="3"/>
+  </g>
+  <g class="wg-bg-planta">
+  <path d="M908 300C906 262 912 214 906 150M907 246C894 232 884 222 874 210M909 212C922 200 932 188 938 176" fill="none" stroke="#8a735d" stroke-width="4"/>
+  <g transform="translate(907 284) rotate(-100) scale(0.7)"><path d="M0 0C9-5 21-24 21-41C21-57 11-64 0-64C-11-64-21-57-21-41C-21-24-9-5 0 0Z" fill="#64986b" stroke="#477454" stroke-width="2.4"/><path d="M0-4V-52" stroke="#a7c69b" stroke-width="2" fill="none"/></g>
+  <g transform="translate(909 280) rotate(98) scale(0.6)"><path d="M0 0C9-5 21-24 21-41C21-57 11-64 0-64C-11-64-21-57-21-41C-21-24-9-5 0 0Z" fill="#79a477" stroke="#477454" stroke-width="2.4"/><path d="M0-4V-52" stroke="#a7c69b" stroke-width="2" fill="none"/></g>
+  <g transform="translate(906 262) rotate(-84) scale(0.8)"><path d="M0 0C9-5 21-24 21-41C21-57 11-64 0-64C-11-64-21-57-21-41C-21-24-9-5 0 0Z" fill="#5d9264" stroke="#477454" stroke-width="2.4"/><path d="M0-4V-52" stroke="#a7c69b" stroke-width="2" fill="none"/></g>
+  <g transform="translate(909 258) rotate(84) scale(0.8)"><path d="M0 0C9-5 21-24 21-41C21-57 11-64 0-64C-11-64-21-57-21-41C-21-24-9-5 0 0Z" fill="#83aa79" stroke="#477454" stroke-width="2.4"/><path d="M0-4V-52" stroke="#a7c69b" stroke-width="2" fill="none"/></g>
+  <g transform="translate(907 232) rotate(-66) scale(0.9)"><path d="M0 0C9-5 21-24 21-41C21-57 11-64 0-64C-11-64-21-57-21-41C-21-24-9-5 0 0Z" fill="#64986b" stroke="#477454" stroke-width="2.4"/><path d="M0-4V-52" stroke="#a7c69b" stroke-width="2" fill="none"/></g>
+  <g transform="translate(909 222) rotate(64) scale(0.9)"><path d="M0 0C9-5 21-24 21-41C21-57 11-64 0-64C-11-64-21-57-21-41C-21-24-9-5 0 0Z" fill="#79a477" stroke="#477454" stroke-width="2.4"/><path d="M0-4V-52" stroke="#a7c69b" stroke-width="2" fill="none"/></g>
+  <g transform="translate(874 210) rotate(-48) scale(0.9)"><path d="M0 0C9-5 21-24 21-41C21-57 11-64 0-64C-11-64-21-57-21-41C-21-24-9-5 0 0Z" fill="#83aa79" stroke="#477454" stroke-width="2.4"/><path d="M0-4V-52" stroke="#a7c69b" stroke-width="2" fill="none"/></g>
+  <g transform="translate(938 176) rotate(50) scale(0.8)"><path d="M0 0C9-5 21-24 21-41C21-57 11-64 0-64C-11-64-21-57-21-41C-21-24-9-5 0 0Z" fill="#5d9264" stroke="#477454" stroke-width="2.4"/><path d="M0-4V-52" stroke="#a7c69b" stroke-width="2" fill="none"/></g>
+  <g transform="translate(907 176) rotate(-30) scale(0.9)"><path d="M0 0C9-5 21-24 21-41C21-57 11-64 0-64C-11-64-21-57-21-41C-21-24-9-5 0 0Z" fill="#79a477" stroke="#477454" stroke-width="2.4"/><path d="M0-4V-52" stroke="#a7c69b" stroke-width="2" fill="none"/></g>
+  <g transform="translate(909 170) rotate(34) scale(0.9)"><path d="M0 0C9-5 21-24 21-41C21-57 11-64 0-64C-11-64-21-57-21-41C-21-24-9-5 0 0Z" fill="#64986b" stroke="#477454" stroke-width="2.4"/><path d="M0-4V-52" stroke="#a7c69b" stroke-width="2" fill="none"/></g>
+  <g transform="translate(906 152) rotate(0) scale(1)"><path d="M0 0C9-5 21-24 21-41C21-57 11-64 0-64C-11-64-21-57-21-41C-21-24-9-5 0 0Z" fill="#5d9264" stroke="#477454" stroke-width="2.4"/><path d="M0-4V-52" stroke="#a7c69b" stroke-width="2" fill="none"/></g>
+  <path d="M878 302H938L931 352Q908 360 885 352Z" fill="#fffaf0" stroke="#d8d4c8" stroke-width="2.5"/>
+  <rect x="874" y="294" width="68" height="11" rx="4" fill="#f4efe4" stroke="#d8d4c8" stroke-width="2.5"/>
+  </g>
+  <g class="wg-bg-quadros" transform="translate(84 0)">
+  <path d="M1030 106L1049 90L1068 106" fill="none" stroke="#b7a283" stroke-width="2"/><circle cx="1049" cy="90" r="3" fill="#b7a283"/>
+  <rect x="990" y="104" width="118" height="86" rx="4" fill="#fbf8f1" stroke="#b7a283" stroke-width="2.5"/>
+  <rect x="1002" y="116" width="94" height="62" fill="#d9e8eb"/>
+  <circle cx="1074" cy="134" r="8" fill="#eed7aa"/>
+  <path d="M1002 178V158Q1024 138 1046 154Q1066 136 1096 156V178Z" fill="#b3cdb0"/>
+  <path d="M1002 178V168Q1040 152 1070 168Q1084 162 1096 166V178Z" fill="#95b898"/>
+  <rect x="1128" y="118" width="66" height="90" rx="4" fill="#fbf8f1" stroke="#b7a283" stroke-width="2.5"/>
+  <rect x="1138" y="128" width="46" height="70" fill="#f1e3cf"/>
+  <circle cx="1161" cy="152" r="13" fill="#dfb29d"/>
+  <rect x="1144" y="174" width="34" height="10" rx="3" fill="#a9bfd3"/>
+  <rect x="1150" y="187" width="22" height="5" rx="2" fill="#b6cdb3"/>
+  </g>
+  <g class="wg-bg-relogio">
+  <circle cx="1664" cy="138" r="30" fill="#fdfbf6" stroke="#8c9da7" stroke-width="5"/>
+  <path d="M1664 116V122M1686 138H1680M1664 160V154M1642 138H1648" stroke="#b3bfc6" stroke-width="3"/>
+  <path d="M1664 138L1652 131" stroke="#56666f" stroke-width="4"/>
+  <path d="M1664 138L1680 128" stroke="#56666f" stroke-width="3"/>
+  <circle cx="1664" cy="138" r="3.5" fill="#56666f"/>
+  </g>
+  <g class="wg-bg-estante">
+  <path d="M2424 352V358M2686 352V358" stroke="#b8a283" stroke-width="6"/>
+  <rect x="2410" y="262" width="290" height="90" rx="6" fill="#f7f2e7" stroke="#c8b99e" stroke-width="2.5"/>
+  <rect x="2416" y="268" width="85" height="37" rx="3" fill="#ece3d1"/>
+  <rect x="2416" y="311" width="85" height="35" rx="3" fill="#ece3d1"/>
+  <rect x="2513" y="268" width="84" height="37" rx="3" fill="#ece3d1"/>
+  <rect x="2513" y="311" width="84" height="35" rx="3" fill="#ece3d1"/>
+  <rect x="2609" y="268" width="85" height="37" rx="3" fill="#ece3d1"/>
+  <rect x="2609" y="311" width="85" height="35" rx="3" fill="#ece3d1"/>
+  <path d="M2414 308H2696M2507 266V348M2603 266V348" stroke="#c8b99e" stroke-width="2.5"/>
+  <rect x="2402" y="254" width="306" height="11" rx="4" fill="#fbf8f1" stroke="#c8b99e" stroke-width="2.5"/>
+  <rect x="2422" y="271" width="12" height="34" rx="2" fill="#a9bfd2" stroke="#9fa8a8" stroke-width="1.5"/>
+  <rect x="2435" y="275" width="10" height="30" rx="2" fill="#d8b6a4" stroke="#9fa8a8" stroke-width="1.5"/>
+  <rect x="2446" y="269" width="14" height="36" rx="2" fill="#b6cdb3" stroke="#9fa8a8" stroke-width="1.5"/>
+  <rect x="2461" y="277" width="9" height="28" rx="2" fill="#cdc2dc" stroke="#9fa8a8" stroke-width="1.5"/>
+  <rect x="2471" y="273" width="12" height="32" rx="2" fill="#e3cfa6" stroke="#9fa8a8" stroke-width="1.5"/>
+  <rect x="2521" y="281" width="68" height="24" rx="5" fill="#dcc8a6" stroke="#bda57f" stroke-width="2"/>
+  <path d="M2530 288H2580M2530 297H2580" stroke="#c9b28c" stroke-width="2"/>
+  <rect x="2616" y="295" width="60" height="10" rx="2" fill="#a9bfd2" stroke="#9fa8a8" stroke-width="1.5"/>
+  <rect x="2620" y="285" width="52" height="10" rx="2" fill="#e3cfa6" stroke="#9fa8a8" stroke-width="1.5"/>
+  <rect x="2614" y="275" width="56" height="10" rx="2" fill="#b6cdb3" stroke="#9fa8a8" stroke-width="1.5"/>
+  <rect x="2424" y="310" width="16" height="36" rx="2" fill="#b6cdb3" stroke="#9fa8a8" stroke-width="1.5"/>
+  <rect x="2442" y="310" width="16" height="36" rx="2" fill="#a9bfd2" stroke="#9fa8a8" stroke-width="1.5"/>
+  <rect x="2460" y="310" width="16" height="36" rx="2" fill="#cdc2dc" stroke="#9fa8a8" stroke-width="1.5"/>
+  <rect x="2518" y="320" width="34" height="26" rx="3" fill="#b6cdb3" stroke="#9fa8a8" stroke-width="1.5"/>
+  <rect x="2527" y="326" width="16" height="5" rx="2" fill="#9dbb9a"/>
+  <rect x="2558" y="320" width="34" height="26" rx="3" fill="#d8b6a4" stroke="#9fa8a8" stroke-width="1.5"/>
+  <rect x="2567" y="326" width="16" height="5" rx="2" fill="#c7a08c"/>
+  <rect x="2618" y="314" width="11" height="32" rx="2" fill="#d8b6a4" stroke="#9fa8a8" stroke-width="1.5"/>
+  <rect x="2630" y="310" width="13" height="36" rx="2" fill="#e3cfa6" stroke="#9fa8a8" stroke-width="1.5"/>
+  <rect x="2644" y="316" width="10" height="30" rx="2" fill="#a9bfd2" stroke="#9fa8a8" stroke-width="1.5"/>
+  <path d="M2434 250Q2404 250 2400 270Q2396 292 2403 314Q2407 326 2399 340" fill="none" stroke="#477454" stroke-width="2"/>
+  <g transform="translate(2416 251) rotate(-120) scale(0.3)"><path d="M0 0C9-5 21-24 21-41C21-57 11-64 0-64C-11-64-21-57-21-41C-21-24-9-5 0 0Z" fill="#79a477" stroke="#477454" stroke-width="2.4"/><path d="M0-4V-52" stroke="#a7c69b" stroke-width="2" fill="none"/></g>
+  <g transform="translate(2400 272) rotate(200) scale(0.3)"><path d="M0 0C9-5 21-24 21-41C21-57 11-64 0-64C-11-64-21-57-21-41C-21-24-9-5 0 0Z" fill="#5d9264" stroke="#477454" stroke-width="2.4"/><path d="M0-4V-52" stroke="#a7c69b" stroke-width="2" fill="none"/></g>
+  <g transform="translate(2398 294) rotate(-150) scale(0.3)"><path d="M0 0C9-5 21-24 21-41C21-57 11-64 0-64C-11-64-21-57-21-41C-21-24-9-5 0 0Z" fill="#64986b" stroke="#477454" stroke-width="2.4"/><path d="M0-4V-52" stroke="#a7c69b" stroke-width="2" fill="none"/></g>
+  <g transform="translate(2404 316) rotate(160) scale(0.3)"><path d="M0 0C9-5 21-24 21-41C21-57 11-64 0-64C-11-64-21-57-21-41C-21-24-9-5 0 0Z" fill="#79a477" stroke="#477454" stroke-width="2.4"/><path d="M0-4V-52" stroke="#a7c69b" stroke-width="2" fill="none"/></g>
+  <g transform="translate(2400 338) rotate(-165) scale(0.3)"><path d="M0 0C9-5 21-24 21-41C21-57 11-64 0-64C-11-64-21-57-21-41C-21-24-9-5 0 0Z" fill="#5d9264" stroke="#477454" stroke-width="2.4"/><path d="M0-4V-52" stroke="#a7c69b" stroke-width="2" fill="none"/></g>
+  <path d="M2426 224H2468L2463 253H2431Z" fill="#fffaf0" stroke="#d8d4c8" stroke-width="2.5"/>
+  <g transform="translate(2440 224) rotate(-40) scale(0.4)"><path d="M0 0C9-5 21-24 21-41C21-57 11-64 0-64C-11-64-21-57-21-41C-21-24-9-5 0 0Z" fill="#5d9264" stroke="#477454" stroke-width="2.4"/><path d="M0-4V-52" stroke="#a7c69b" stroke-width="2" fill="none"/></g>
+  <g transform="translate(2448 224) rotate(8) scale(0.5)"><path d="M0 0C9-5 21-24 21-41C21-57 11-64 0-64C-11-64-21-57-21-41C-21-24-9-5 0 0Z" fill="#79a477" stroke="#477454" stroke-width="2.4"/><path d="M0-4V-52" stroke="#a7c69b" stroke-width="2" fill="none"/></g>
+  <g transform="translate(2456 224) rotate(52) scale(0.4)"><path d="M0 0C9-5 21-24 21-41C21-57 11-64 0-64C-11-64-21-57-21-41C-21-24-9-5 0 0Z" fill="#64986b" stroke="#477454" stroke-width="2.4"/><path d="M0-4V-52" stroke="#a7c69b" stroke-width="2" fill="none"/></g>
+  <path d="M2632 253H2672" stroke="#8c9da7" stroke-width="5"/>
+  <path d="M2652 252V210" stroke="#8c9da7" stroke-width="3.5"/>
+  <path d="M2628 212L2636 178H2668L2676 212Z" fill="#f6ead2" stroke="#c8b99e" stroke-width="2.5"/>
+  </g>
+</g>`;
+
     // Expressões REAIS da demo (8 identidades × 6 estados usados pelo
-    // plugin) — os mesmos bonecos da demo, preparados como <symbol> (abaixo).
+    // plugin) — os mesmos bonecos da demo, preparados como <symbol> (abaixo) —
+    // e, por identidade, o 'sleeping' (olhos fechados, quem está Disponível)
+    // de assets/avatars/sleeping/<id>.svg. Todos byte a byte (testado).
     const EXPR_AVATARS = {
       rui: {
         idle: { vb: '0 0 264 280', corpo: `<desc>Created with getavataaars.com</desc><defs><circle id="react-path-1060401" cx="120" cy="120" r="120"></circle><path d="M12,160 C12,226.27417 65.72583,280 132,280 C198.27417,280 252,226.27417 252,160 L264,160 L264,-1.42108547e-14 L-3.19744231e-14,-1.42108547e-14 L-3.19744231e-14,160 L12,160 Z" id="react-path-1060402"></path><path d="M124,144.610951 L124,163 L128,163 L128,163 C167.764502,163 200,195.235498 200,235 L200,244 L0,244 L0,235 C-4.86974701e-15,195.235498 32.235498,163 72,163 L72,163 L76,163 L76,144.610951 C58.7626345,136.422372 46.3722246,119.687011 44.3051388,99.8812385 C38.4803105,99.0577866 34,94.0521096 34,88 L34,74 C34,68.0540074 38.3245733,63.1180731 44,62.1659169 L44,56 L44,56 C44,25.072054 69.072054,5.68137151e-15 100,0 L100,0 L100,0 C130.927946,-5.68137151e-15 156,25.072054 156,56 L156,62.1659169 C161.675427,63.1180731 166,68.0540074 166,74 L166,88 C166,94.0521096 161.51969,99.0577866 155.694861,99.8812385 C153.627775,119.687011 141.237365,136.422372 124,144.610951 Z" id="react-path-1060403"></path></defs><g id="Avataaar" stroke="none" stroke-width="1" fill="none" fill-rule="evenodd"><g transform="translate(-825.000000, -1100.000000)" id="Avataaar/Circle"><g transform="translate(825.000000, 1100.000000)"><g id="Mask"></g><g id="Avataaar" stroke-width="1" fill-rule="evenodd" mask="url(#react-mask-1060405)"><g id="Body" transform="translate(32.000000, 36.000000)"><mask id="react-mask-1060406" fill="white"><use xlink:href="#react-path-1060403"></use></mask><use fill="#D0C6AC" xlink:href="#react-path-1060403"></use><g id="Skin/👶🏽-03-Brown" mask="url(#react-mask-1060406)" fill="#EDB98A"><g transform="translate(0.000000, 0.000000)" id="Color"><rect x="0" y="0" width="264" height="280"></rect></g></g><path d="M156,79 L156,102 C156,132.927946 130.927946,158 100,158 C69.072054,158 44,132.927946 44,102 L44,79 L44,94 C44,124.927946 69.072054,150 100,150 C130.927946,150 156,124.927946 156,94 L156,79 Z" id="Neck-Shadow" fill-opacity="0.100000001" fill="#000000" mask="url(#react-mask-1060406)"></path></g><g id="Clothing/Hoodie" transform="translate(0.000000, 170.000000)"><defs><path d="M108,13.0708856 C90.0813006,15.075938 76.2798424,20.5518341 76.004203,34.6449676 C50.1464329,45.5680933 32,71.1646257 32,100.999485 L32,100.999485 L32,110 L232,110 L232,100.999485 C232,71.1646257 213.853567,45.5680933 187.995797,34.6449832 C187.720158,20.5518341 173.918699,15.075938 156,13.0708856 L156,32 L156,32 C156,45.254834 145.254834,56 132,56 L132,56 C118.745166,56 108,45.254834 108,32 L108,13.0708856 Z" id="react-path-1060407"></path></defs><mask id="react-mask-1060408" fill="white"><use xlink:href="#react-path-1060407"></use></mask><use id="Hoodie" fill="#B7C1DB" fill-rule="evenodd" xlink:href="#react-path-1060407"></use><g id="Color/Palette/Gray-01" mask="url(#react-mask-1060408)" fill-rule="evenodd" fill="#262E33"><rect id="🖍Color" x="0" y="0" width="264" height="110"></rect></g><path d="M102,61.7390531 L102,110 L95,110 L95,58.1502625 C97.2037542,59.4600576 99.5467694,60.6607878 102,61.7390531 Z M169,58.1502625 L169,98.5 C169,100.432997 167.432997,102 165.5,102 C163.567003,102 162,100.432997 162,98.5 L162,61.7390531 C164.453231,60.6607878 166.796246,59.4600576 169,58.1502625 Z" id="Straps" fill="#F4F4F4" fill-rule="evenodd" mask="url(#react-mask-1060408)"></path><path d="M90.9601329,12.7243537 C75.9093095,15.5711782 65.5,21.2428847 65.5,32.3076923 C65.5,52.0200095 98.5376807,68 132,68 C165.462319,68 198.5,52.0200095 198.5,32.3076923 C198.5,21.2428847 188.09069,15.5711782 173.039867,12.7243537 C182.124921,16.0744598 188,21.7060546 188,31.0769231 C188,51.4689754 160.178795,68 132,68 C103.821205,68 76,51.4689754 76,31.0769231 C76,21.7060546 81.8750795,16.0744598 90.9601329,12.7243537 Z" id="Shadow" fill-opacity="0.16" fill="#000000" fill-rule="evenodd" mask="url(#react-mask-1060408)"></path></g><g id="Face" transform="translate(76.000000, 82.000000)" fill="#000000"><g id="Mouth/Smile" transform="translate(2.000000, 52.000000)"><defs><path d="M35.117844,15.1280772 C36.1757121,24.6198025 44.2259873,32 54,32 C63.8042055,32 71.8740075,24.574136 72.8917593,15.0400546 C72.9736685,14.272746 72.1167429,13 71.042767,13 C56.1487536,13 44.7379213,13 37.0868244,13 C36.0066168,13 35.0120058,14.1784435 35.117844,15.1280772 Z" id="react-path-1060409"></path></defs><mask id="react-mask-1060410" fill="white"><use xlink:href="#react-path-1060409"></use></mask><use id="Mouth" fill-opacity="0.699999988" fill="#000000" fill-rule="evenodd" xlink:href="#react-path-1060409"></use><rect id="Teeth" fill="#FFFFFF" fill-rule="evenodd" mask="url(#react-mask-1060410)" x="39" y="2" width="31" height="16" rx="5"></rect><g id="Tongue" stroke-width="1" fill-rule="evenodd" mask="url(#react-mask-1060410)" fill="#FF4F6D"><g transform="translate(38.000000, 24.000000)"><circle cx="11" cy="11" r="11"></circle><circle cx="21" cy="11" r="11"></circle></g></g></g><g id="Nose/Default" transform="translate(28.000000, 40.000000)" fill-opacity="0.16"><path d="M16,8 C16,12.418278 21.372583,16 28,16 L28,16 C34.627417,16 40,12.418278 40,8" id="Nose"></path></g><g id="Eyes/Default-😀" transform="translate(0.000000, 8.000000)" fill-opacity="0.599999964"><circle id="Eye" cx="30" cy="22" r="6"></circle><circle id="Eye" cx="82" cy="22" r="6"></circle></g><g id="Eyebrow/Natural/Default-Natural" fill-opacity="0.599999964"><path d="M26.0390934,6.21012364 C20.2775554,6.98346216 11.2929313,12.0052479 12.04426,17.8178111 C12.0689481,18.0080543 12.3567302,18.0673468 12.4809077,17.9084937 C14.9674041,14.7203351 34.1927973,10.0365481 41.1942673,11.0147151 C41.8350523,11.1044465 42.2580662,10.4430343 41.8210501,10.0302067 C38.0765663,6.49485426 31.2003792,5.51224825 26.0390934,6.21012364" id="Eyebrow" transform="translate(27.000000, 12.000000) rotate(5.000000) translate(-27.000000, -12.000000) "></path><path d="M85.0390934,6.21012364 C79.2775554,6.98346216 70.2929313,12.0052479 71.04426,17.8178111 C71.0689481,18.0080543 71.3567302,18.0673468 71.4809077,17.9084937 C73.9674041,14.7203351 93.1927973,10.0365481 100.194267,11.0147151 C100.835052,11.1044465 101.258066,10.4430343 100.82105,10.0302067 C97.0765663,6.49485426 90.2003792,5.51224825 85.0390934,6.21012364" id="Eyebrow" transform="translate(86.000000, 12.000000) scale(-1, 1) rotate(5.000000) translate(-86.000000, -12.000000) "></path></g></g><g id="Top" stroke-width="1" fill-rule="evenodd"><defs><rect id="react-path-1060415" x="0" y="0" width="264" height="280"></rect><path d="M94.2519269,52.0221149 C94.3749353,51.9677149 94.0696712,51.9468149 93.3361345,51.9595149 C94.2276637,51.9577149 94.5329279,51.9785149 94.2519269,52.0221149 M86.1169775,36.3015924 C86.1148422,36.2819924 86.1337548,36.4526924 86.1169775,36.3015924 M193.765056,70.7656665 C193.500946,67.448734 193.03295,64.1518864 192.246676,60.9110823 C191.622233,58.3353492 190.769007,55.8775343 189.760006,53.4200433 C189.150703,51.9353766 187.727538,49.8961062 187.560324,48.2944933 C187.395466,46.7168527 188.626521,44.969138 188.889285,43.1323368 C189.144311,41.3447761 189.100909,39.4652134 188.734183,37.6938503 C187.901144,33.6710288 185.140271,29.9300447 180.877167,28.8814158 C179.925362,28.6471994 177.913417,28.9358396 177.240862,28.3815597 C176.469729,27.7459682 175.932761,25.5806808 175.234637,24.7121687 C173.244224,22.2362125 170.13984,20.6417265 166.865887,21.1976261 C164.454917,21.606776 165.839391,22.1053363 164.032005,20.6864317 C163.027041,19.8976114 162.276095,18.6931622 161.300066,17.8392279 C159.832826,16.5563826 158.149588,15.4581893 156.408146,14.556958 C151.851325,12.19892 146.654249,10.4848961 141.564162,9.64942693 C132.278934,8.12523827 122.368926,9.45408458 113.368668,11.8688141 C108.890239,13.0703477 104.381531,14.5951842 100.222053,16.6117782 C98.4385542,17.4764029 97.4090304,18.1936301 95.5494951,18.4200717 C92.6207355,18.7767416 90.1404579,18.7589243 87.3661268,20.0009517 C78.8298269,23.8229236 74.9849256,32.6897818 78.3066539,41.1750259 C78.974835,42.8815988 79.8795374,44.3801954 81.1267416,45.7586062 C82.6474761,47.4392631 83.1975648,47.1085093 81.8877817,49.0411999 C79.9289949,51.9311653 78.2777195,55.0129095 76.9332826,58.2128958 C73.4043038,66.6145606 72.8138416,76.0771643 73.043634,85.0373203 C73.1240445,88.1741362 73.2586228,91.3495022 73.753198,94.4561907 C73.966841,95.8009106 74.0267283,98.3293468 75.0353925,99.3271154 C75.5471264,99.8331265 76.2762042,100.115288 77.0035997,99.9137903 C78.7130802,99.4401742 78.1253096,98.1787097 78.1650102,97.0076274 C78.364859,91.1240324 78.0950295,85.9191145 79.4943071,80.1064647 C80.5278683,75.8118486 82.2504702,71.9114806 84.4827873,68.0713675 C87.3213795,63.1871608 90.3857268,58.8977279 94.2895061,54.7155226 C95.2073299,53.7320079 95.4078515,53.3150832 96.6385698,53.243814 C97.5705244,53.1900382 98.9338023,53.8282213 99.8398505,54.0491558 C101.837665,54.5360539 103.83918,55.0174448 105.873331,55.3452831 C109.613261,55.9481556 113.316519,55.9886494 117.090094,55.8704074 C124.516459,55.6381346 131.974787,55.1172217 139.175061,53.2470535 C143.956964,52.00535 148.196516,49.7762443 152.776887,48.1422364 C152.858644,48.1130808 154.006596,47.2951049 154.207791,47.3284719 C154.488723,47.3747968 156.184746,49.1542588 156.471061,49.3784327 C158.696649,51.1238798 161.137899,51.8566566 163.541467,53.2081794 C166.504881,54.8745825 163.634999,52.4899804 165.269452,54.5668292 C165.745859,55.1716454 165.989782,56.2931632 166.371984,56.9783192 C167.587899,59.1610999 169.279548,61.0795367 171.302932,62.6017816 C173.258018,64.0725184 176.196198,64.7829426 177.193087,66.697168 C177.961865,68.1740599 178.220929,70.1812592 178.841334,71.7579279 C180.468722,75.8931602 182.617937,79.7494709 184.767152,83.6443317 C186.498502,86.7830913 188.392354,89.5250111 188.584801,93.1117947 C188.651754,94.3603012 187.463764,101.849397 190.357534,99.5716982 C190.786502,99.2341415 191.711391,95.415733 191.901483,94.7678314 C192.672616,92.135083 192.94682,89.3866841 193.29605,86.6816947 C193.990474,81.3021672 194.218584,76.1837441 193.765056,70.7656665" id="react-path-1060414"></path><filter x="-0.8%" y="-2.0%" width="101.5%" height="108.0%" filterUnits="objectBoundingBox" id="react-filter-1060411"><feOffset dx="0" dy="2" in="SourceAlpha" result="shadowOffsetOuter1"></feOffset><feColorMatrix values="0 0 0 0 0   0 0 0 0 0   0 0 0 0 0  0 0 0 0.16 0" type="matrix" in="shadowOffsetOuter1" result="shadowMatrixOuter1"></feColorMatrix><feMerge><feMergeNode in="shadowMatrixOuter1"></feMergeNode><feMergeNode in="SourceGraphic"></feMergeNode></feMerge></filter></defs><mask id="react-mask-1060413" fill="white"><use xlink:href="#react-path-1060415"></use></mask><g id="Mask"></g><g id="Top/Short-Hair/Short-Curly" mask="url(#react-mask-1060413)"><g transform="translate(-1.000000, 0.000000)"><g id="Facial-Hair/Beard-Medium" transform="translate(49.000000, 72.000000)"><defs><path d="M105.017591,94.1296214 C101.150441,99.7213834 98.257542,95.9467308 94.1374777,92.8762163 C91.6567227,91.0272796 87.9608129,88.7275108 84.5044337,88.8410391 C81.0477114,88.7275108 77.3518016,91.0272796 74.8710466,92.8762163 C70.7509822,95.9467308 67.8580835,99.7213834 63.9909333,94.1296214 C61.0884259,89.9323547 62.3028943,82.8739117 65.014944,78.9027173 C68.8738581,73.2512381 74.1088724,75.9847769 79.9622738,75.3400279 C81.5538829,75.1648137 83.1526985,74.7228407 84.5044337,74 C85.856169,74.7228407 87.4546414,75.1648137 89.0462504,75.3400279 C94.899995,75.9847769 100.134666,73.2512381 103.993923,78.9027173 C106.70563,82.8739117 107.920098,89.9323547 105.017591,94.1296214 M140.39109,26 C136.966521,40.0748212 135.393023,54.4337754 132.909944,68.6711471 C132.392536,71.6390145 131.826063,74.5963095 131.224594,77.5496398 C131.098329,78.1697764 130.973781,80.4725746 130.362704,80.7643064 C128.511632,81.6484223 124.739149,76.9466834 123.730409,75.8851496 C121.196893,73.219256 118.684993,70.5292442 115.599415,68.437233 C109.364783,64.2102603 102.065485,61.7108818 94.4700836,61.117837 C91.2922091,60.8693859 86.9951134,61.3025234 84.000116,63.1104016 C81.0051185,61.3025234 76.7080229,60.8693859 73.5298053,61.117837 C65.9344039,61.7108818 58.6351055,64.2102603 52.4004739,68.437233 C49.3148957,70.5292442 46.8033387,73.219256 44.2694796,75.8851496 C43.2607395,76.9466834 39.4882573,81.6484223 37.6371849,80.7643064 C37.0261079,80.4725746 36.9015594,78.1697764 36.7752954,77.5496398 C36.1738255,74.5963095 35.6073527,71.6390145 35.0899445,68.6711471 C32.6072086,54.4337754 31.0337113,40.0748212 27.6091415,26 C26.6127533,26 25.7385119,44.7478165 25.6273446,46.4945731 C25.174784,53.5889755 24.6463963,60.5254529 25.3216346,67.6261326 C26.485803,79.8749043 27.6993791,95.2339402 37.032627,104.58753 C45.4659003,113.039493 57.7103052,114.806417 68.2713185,120.141327 C69.631059,120.828202 71.4347824,121.676306 73.3798667,122.37111 C75.4289129,123.934171 79.4926946,125 84.1740722,125 C89.0846465,125 93.3155222,123.827456 95.2540874,122.137856 C96.9548781,121.49261 98.5180822,120.752874 99.7285704,120.141327 C110.288776,114.805245 122.533989,113.039493 130.967262,104.58753 C140.30051,95.2339402 141.514086,79.8749043 142.678597,67.6261326 C143.353493,60.5254529 142.825105,53.5889755 142.372887,46.4945731 C142.261377,44.7478165 141.387136,26 140.39109,26 Z" id="react-path-1060417"></path></defs><mask id="react-mask-1060416" fill="white"><use xlink:href="#react-path-1060417"></use></mask><use id="Beardness" fill="#252E32" fill-rule="evenodd" xlink:href="#react-path-1060417"></use><g id="Color/Hair/Brown" mask="url(#react-mask-1060416)" fill="#2C1B18"><g transform="translate(-32.000000, 0.000000)" id="Color"><rect x="0" y="0" width="264" height="244"></rect></g></g></g><mask id="react-mask-1060412" fill="white"><use xlink:href="#react-path-1060414"></use></mask><use id="Short-Hair" stroke="none" fill="#28354B" fill-rule="evenodd" xlink:href="#react-path-1060414"></use><g id="Skin/👶🏽-03-Brown" mask="url(#react-mask-1060412)" fill="#2C1B18"><g transform="translate(0.000000, 0.000000) " id="Color"><rect x="0" y="0" width="264" height="280"></rect></g></g><g id="Top/_Resources/Prescription-02" fill="none" transform="translate(62.000000, 85.000000)" stroke-width="1"><defs><filter x="-0.8%" y="-2.4%" width="101.5%" height="109.8%" filterUnits="objectBoundingBox" id="react-filter-1060418"><feOffset dx="0" dy="2" in="SourceAlpha" result="shadowOffsetOuter1"></feOffset><feColorMatrix values="0 0 0 0 0   0 0 0 0 0   0 0 0 0 0  0 0 0 0.2 0" type="matrix" in="shadowOffsetOuter1" result="shadowMatrixOuter1"></feColorMatrix><feMerge><feMergeNode in="shadowMatrixOuter1"></feMergeNode><feMergeNode in="SourceGraphic"></feMergeNode></feMerge></filter></defs><g id="Wayfarers" filter="url(#react-filter-1060418)" transform="translate(6.000000, 7.000000)" fill="#252C2F"><path d="M34,41 L31.2421498,41 C17.3147125,41 9,33.3359286 9,20.5 C9,10.127 10.8170058,0 32.5299306,0 L35.4700694,0 C57.1829942,0 59,10.127 59,20.5 C59,32.5686429 48.7212748,41 34,41 Z M32.3853606,6 C13,6 13,12.8410159 13,21.5015498 C13,28.5719428 16.116254,37 30.9709365,37 L34,37 C46.3649085,37 55,30.6270373 55,21.5015498 C55,12.8410159 55,6 35.6146394,6 L32.3853606,6 Z" id="Left" fill-rule="nonzero"></path><path d="M96,41 L93.2421498,41 C79.3147125,41 71,33.3359286 71,20.5 C71,10.127 72.8170058,0 94.5299306,0 L97.4700694,0 C119.182994,0 121,10.127 121,20.5 C121,32.5686429 110.721275,41 96,41 Z M94.3853606,6 C75,6 75,12.8410159 75,21.5015498 C75,28.5719428 78.1194833,37 92.9709365,37 L96,37 C108.364909,37 117,30.6270373 117,21.5015498 C117,12.8410159 117,6 97.6146394,6 L94.3853606,6 Z" id="Right" fill-rule="nonzero"></path><path d="M2.95454545,5.77156439 C3.64590909,5.09629136 11.2095455,0 32.5,0 C50.3513636,0 54.1302273,1.85267217 59.8502273,4.6518809 L60.2689233,4.85850899 C60.6666014,4.99901896 62.7002447,5.68982981 65.0790606,5.76579519 C67.2462948,5.67278567 69.1000195,5.08540191 69.641698,4.89719767 C76.1703915,1.7220864 82.5610971,0 97.5,0 C118.790455,0 126.354091,5.09629136 127.045455,5.77156439 C128.679318,5.77156439 130,7.06150904 130,8.65734659 L130,11.5431288 C130,13.1389663 128.679318,14.428911 127.045455,14.428911 C127.045455,14.428911 120.143997,14.428911 120.143997,17.3146932 C120.143997,20.2004754 118.181818,13.1389663 118.181818,11.5431288 L118.181818,8.73240251 C114.578575,7.35340151 108.128411,4.78617535 97.5,4.78617535 C85.6584651,4.78617535 79.7610984,6.88602813 74.7022935,8.97112368 L74.7588636,9.10752861 L74.7563667,11.0937608 L72.5391666,16.4436339 L69.8004908,15.3608351 C69.5558969,15.2641292 69.0281396,15.090392 68.2963505,14.9099044 C66.256272,14.4067419 64.1589087,14.253569 62.3040836,14.6343084 C61.6235903,14.7739931 60.9922286,14.9836085 60.4128127,15.266732 L57.7704824,16.5578701 L55.1266751,11.3962031 L55.2440909,9.10175705 L55.3248203,8.90683855 C50.9620526,6.87386374 46.9392639,4.78617535 32.5,4.78617535 C21.8721459,4.78617535 15.422131,7.3524397 11.8181818,8.7314671 L11.8181818,11.5431288 C11.8181818,13.1389663 8.86363636,20.2004754 8.86363636,17.3146932 C8.86363636,14.428911 2.95454545,14.428911 2.95454545,14.428911 C1.32363636,14.428911 0,13.1389663 0,11.5431288 L0,8.65734659 C0,7.06150904 1.32363636,5.77156439 2.95454545,5.77156439 Z" id="Stuff" fill-rule="nonzero"></path></g></g></g></g></g></g></g></g></g>` },
@@ -1198,6 +1558,7 @@ window.__ModuleLoader__.load({
         waiting: { vb: '0 0 264 280', corpo: `<desc>Created with getavataaars.com</desc><defs><circle id="react-path-1462159" cx="120" cy="120" r="120"></circle><path d="M12,160 C12,226.27417 65.72583,280 132,280 C198.27417,280 252,226.27417 252,160 L264,160 L264,-1.42108547e-14 L-3.19744231e-14,-1.42108547e-14 L-3.19744231e-14,160 L12,160 Z" id="react-path-1462160"></path><path d="M124,144.610951 L124,163 L128,163 L128,163 C167.764502,163 200,195.235498 200,235 L200,244 L0,244 L0,235 C-4.86974701e-15,195.235498 32.235498,163 72,163 L72,163 L76,163 L76,144.610951 C58.7626345,136.422372 46.3722246,119.687011 44.3051388,99.8812385 C38.4803105,99.0577866 34,94.0521096 34,88 L34,74 C34,68.0540074 38.3245733,63.1180731 44,62.1659169 L44,56 L44,56 C44,25.072054 69.072054,5.68137151e-15 100,0 L100,0 L100,0 C130.927946,-5.68137151e-15 156,25.072054 156,56 L156,62.1659169 C161.675427,63.1180731 166,68.0540074 166,74 L166,88 C166,94.0521096 161.51969,99.0577866 155.694861,99.8812385 C153.627775,119.687011 141.237365,136.422372 124,144.610951 Z" id="react-path-1462161"></path></defs><g id="Avataaar" stroke="none" stroke-width="1" fill="none" fill-rule="evenodd"><g transform="translate(-825.000000, -1100.000000)" id="Avataaar/Circle"><g transform="translate(825.000000, 1100.000000)"><g id="Mask"></g><g id="Avataaar" stroke-width="1" fill-rule="evenodd" mask="url(#react-mask-1462163)"><g id="Body" transform="translate(32.000000, 36.000000)"><mask id="react-mask-1462164" fill="white"><use xlink:href="#react-path-1462161"></use></mask><use fill="#D0C6AC" xlink:href="#react-path-1462161"></use><g id="Skin/👶🏽-03-Brown" mask="url(#react-mask-1462164)" fill="#EDB98A"><g transform="translate(0.000000, 0.000000)" id="Color"><rect x="0" y="0" width="264" height="280"></rect></g></g><path d="M156,79 L156,102 C156,132.927946 130.927946,158 100,158 C69.072054,158 44,132.927946 44,102 L44,79 L44,94 C44,124.927946 69.072054,150 100,150 C130.927946,150 156,124.927946 156,94 L156,79 Z" id="Neck-Shadow" fill-opacity="0.100000001" fill="#000000" mask="url(#react-mask-1462164)"></path></g><g id="Clothing/Hoodie" transform="translate(0.000000, 170.000000)"><defs><path d="M108,13.0708856 C90.0813006,15.075938 76.2798424,20.5518341 76.004203,34.6449676 C50.1464329,45.5680933 32,71.1646257 32,100.999485 L32,100.999485 L32,110 L232,110 L232,100.999485 C232,71.1646257 213.853567,45.5680933 187.995797,34.6449832 C187.720158,20.5518341 173.918699,15.075938 156,13.0708856 L156,32 L156,32 C156,45.254834 145.254834,56 132,56 L132,56 C118.745166,56 108,45.254834 108,32 L108,13.0708856 Z" id="react-path-1462165"></path></defs><mask id="react-mask-1462166" fill="white"><use xlink:href="#react-path-1462165"></use></mask><use id="Hoodie" fill="#B7C1DB" fill-rule="evenodd" xlink:href="#react-path-1462165"></use><g id="Color/Palette/Gray-01" mask="url(#react-mask-1462166)" fill-rule="evenodd" fill="#262E33"><rect id="🖍Color" x="0" y="0" width="264" height="110"></rect></g><path d="M102,61.7390531 L102,110 L95,110 L95,58.1502625 C97.2037542,59.4600576 99.5467694,60.6607878 102,61.7390531 Z M169,58.1502625 L169,98.5 C169,100.432997 167.432997,102 165.5,102 C163.567003,102 162,100.432997 162,98.5 L162,61.7390531 C164.453231,60.6607878 166.796246,59.4600576 169,58.1502625 Z" id="Straps" fill="#F4F4F4" fill-rule="evenodd" mask="url(#react-mask-1462166)"></path><path d="M90.9601329,12.7243537 C75.9093095,15.5711782 65.5,21.2428847 65.5,32.3076923 C65.5,52.0200095 98.5376807,68 132,68 C165.462319,68 198.5,52.0200095 198.5,32.3076923 C198.5,21.2428847 188.09069,15.5711782 173.039867,12.7243537 C182.124921,16.0744598 188,21.7060546 188,31.0769231 C188,51.4689754 160.178795,68 132,68 C103.821205,68 76,51.4689754 76,31.0769231 C76,21.7060546 81.8750795,16.0744598 90.9601329,12.7243537 Z" id="Shadow" fill-opacity="0.16" fill="#000000" fill-rule="evenodd" mask="url(#react-mask-1462166)"></path></g><g id="Face" transform="translate(76.000000, 82.000000)" fill="#000000"><g id="Mouth/Sad" transform="translate(2.000000, 52.000000)" fill-opacity="0.699999988" fill="#000000"><path d="M40.0582943,16.6539438 C40.7076459,23.6831146 46.7016363,28.3768187 54,28.3768187 C61.3416045,28.3768187 67.3633339,23.627332 67.9526838,16.5287605 C67.9840218,16.1513016 67.0772329,15.8529531 66.6289111,16.077395 C61.0902255,18.8502083 56.8805885,20.2366149 54,20.2366149 C51.1558456,20.2366149 47.0072148,18.8804569 41.5541074,16.168141 C41.0473376,15.9160792 40.0197139,16.2363147 40.0582943,16.6539438 Z" id="Mouth" transform="translate(54.005357, 22.188409) scale(1, -1) translate(-54.005357, -22.188409) "></path></g><g id="Nose/Default" transform="translate(28.000000, 40.000000)" fill-opacity="0.16"><path d="M16,8 C16,12.418278 21.372583,16 28,16 L28,16 C34.627417,16 40,12.418278 40,8" id="Nose"></path></g><g id="Eyes/Default-😀" transform="translate(0.000000, 8.000000)" fill-opacity="0.599999964"><circle id="Eye" cx="30" cy="22" r="6"></circle><circle id="Eye" cx="82" cy="22" r="6"></circle></g><g id="Eyebrow/Outline/Sad-Concerned" fill-opacity="0.599999964" fill-rule="nonzero"><path d="M15.9726042,19.4088529 C17.452356,11.0203704 30.0622688,5.22829657 39.2106453,8.9774793 C40.2254706,9.39337449 41.4016967,8.94600219 41.8378196,7.97824531 C42.2739426,7.01048842 41.8048116,5.88881678 40.7899862,5.47292159 C29.3457328,0.782843812 13.9550264,7.85221132 12.0280273,18.7760684 C11.84479,19.8148122 12.5792704,20.798534 13.6685352,20.9732726 C14.7578,21.1480113 15.7893668,20.4475967 15.9726042,19.4088529 Z" id="Eyebrow" transform="translate(27.000414, 12.500000) scale(-1, -1) translate(-27.000414, -12.500000) "></path><path d="M73.9726042,19.4088529 C75.452356,11.0203704 88.0622688,5.22829657 97.2106453,8.9774793 C98.2254706,9.39337449 99.4016967,8.94600219 99.8378196,7.97824531 C100.273943,7.01048842 99.8048116,5.88881678 98.7899862,5.47292159 C87.3457328,0.782843812 71.9550264,7.85221132 70.0280273,18.7760684 C69.84479,19.8148122 70.5792704,20.798534 71.6685352,20.9732726 C72.7578,21.1480113 73.7893668,20.4475967 73.9726042,19.4088529 Z" id="Eyebrow" transform="translate(85.000414, 12.500000) scale(1, -1) translate(-85.000414, -12.500000) "></path></g></g><g id="Top" stroke-width="1" fill-rule="evenodd"><defs><rect id="react-path-1462171" x="0" y="0" width="264" height="280"></rect><path d="M94.2519269,52.0221149 C94.3749353,51.9677149 94.0696712,51.9468149 93.3361345,51.9595149 C94.2276637,51.9577149 94.5329279,51.9785149 94.2519269,52.0221149 M86.1169775,36.3015924 C86.1148422,36.2819924 86.1337548,36.4526924 86.1169775,36.3015924 M193.765056,70.7656665 C193.500946,67.448734 193.03295,64.1518864 192.246676,60.9110823 C191.622233,58.3353492 190.769007,55.8775343 189.760006,53.4200433 C189.150703,51.9353766 187.727538,49.8961062 187.560324,48.2944933 C187.395466,46.7168527 188.626521,44.969138 188.889285,43.1323368 C189.144311,41.3447761 189.100909,39.4652134 188.734183,37.6938503 C187.901144,33.6710288 185.140271,29.9300447 180.877167,28.8814158 C179.925362,28.6471994 177.913417,28.9358396 177.240862,28.3815597 C176.469729,27.7459682 175.932761,25.5806808 175.234637,24.7121687 C173.244224,22.2362125 170.13984,20.6417265 166.865887,21.1976261 C164.454917,21.606776 165.839391,22.1053363 164.032005,20.6864317 C163.027041,19.8976114 162.276095,18.6931622 161.300066,17.8392279 C159.832826,16.5563826 158.149588,15.4581893 156.408146,14.556958 C151.851325,12.19892 146.654249,10.4848961 141.564162,9.64942693 C132.278934,8.12523827 122.368926,9.45408458 113.368668,11.8688141 C108.890239,13.0703477 104.381531,14.5951842 100.222053,16.6117782 C98.4385542,17.4764029 97.4090304,18.1936301 95.5494951,18.4200717 C92.6207355,18.7767416 90.1404579,18.7589243 87.3661268,20.0009517 C78.8298269,23.8229236 74.9849256,32.6897818 78.3066539,41.1750259 C78.974835,42.8815988 79.8795374,44.3801954 81.1267416,45.7586062 C82.6474761,47.4392631 83.1975648,47.1085093 81.8877817,49.0411999 C79.9289949,51.9311653 78.2777195,55.0129095 76.9332826,58.2128958 C73.4043038,66.6145606 72.8138416,76.0771643 73.043634,85.0373203 C73.1240445,88.1741362 73.2586228,91.3495022 73.753198,94.4561907 C73.966841,95.8009106 74.0267283,98.3293468 75.0353925,99.3271154 C75.5471264,99.8331265 76.2762042,100.115288 77.0035997,99.9137903 C78.7130802,99.4401742 78.1253096,98.1787097 78.1650102,97.0076274 C78.364859,91.1240324 78.0950295,85.9191145 79.4943071,80.1064647 C80.5278683,75.8118486 82.2504702,71.9114806 84.4827873,68.0713675 C87.3213795,63.1871608 90.3857268,58.8977279 94.2895061,54.7155226 C95.2073299,53.7320079 95.4078515,53.3150832 96.6385698,53.243814 C97.5705244,53.1900382 98.9338023,53.8282213 99.8398505,54.0491558 C101.837665,54.5360539 103.83918,55.0174448 105.873331,55.3452831 C109.613261,55.9481556 113.316519,55.9886494 117.090094,55.8704074 C124.516459,55.6381346 131.974787,55.1172217 139.175061,53.2470535 C143.956964,52.00535 148.196516,49.7762443 152.776887,48.1422364 C152.858644,48.1130808 154.006596,47.2951049 154.207791,47.3284719 C154.488723,47.3747968 156.184746,49.1542588 156.471061,49.3784327 C158.696649,51.1238798 161.137899,51.8566566 163.541467,53.2081794 C166.504881,54.8745825 163.634999,52.4899804 165.269452,54.5668292 C165.745859,55.1716454 165.989782,56.2931632 166.371984,56.9783192 C167.587899,59.1610999 169.279548,61.0795367 171.302932,62.6017816 C173.258018,64.0725184 176.196198,64.7829426 177.193087,66.697168 C177.961865,68.1740599 178.220929,70.1812592 178.841334,71.7579279 C180.468722,75.8931602 182.617937,79.7494709 184.767152,83.6443317 C186.498502,86.7830913 188.392354,89.5250111 188.584801,93.1117947 C188.651754,94.3603012 187.463764,101.849397 190.357534,99.5716982 C190.786502,99.2341415 191.711391,95.415733 191.901483,94.7678314 C192.672616,92.135083 192.94682,89.3866841 193.29605,86.6816947 C193.990474,81.3021672 194.218584,76.1837441 193.765056,70.7656665" id="react-path-1462170"></path><filter x="-0.8%" y="-2.0%" width="101.5%" height="108.0%" filterUnits="objectBoundingBox" id="react-filter-1462167"><feOffset dx="0" dy="2" in="SourceAlpha" result="shadowOffsetOuter1"></feOffset><feColorMatrix values="0 0 0 0 0   0 0 0 0 0   0 0 0 0 0  0 0 0 0.16 0" type="matrix" in="shadowOffsetOuter1" result="shadowMatrixOuter1"></feColorMatrix><feMerge><feMergeNode in="shadowMatrixOuter1"></feMergeNode><feMergeNode in="SourceGraphic"></feMergeNode></feMerge></filter></defs><mask id="react-mask-1462169" fill="white"><use xlink:href="#react-path-1462171"></use></mask><g id="Mask"></g><g id="Top/Short-Hair/Short-Curly" mask="url(#react-mask-1462169)"><g transform="translate(-1.000000, 0.000000)"><g id="Facial-Hair/Beard-Medium" transform="translate(49.000000, 72.000000)"><defs><path d="M105.017591,94.1296214 C101.150441,99.7213834 98.257542,95.9467308 94.1374777,92.8762163 C91.6567227,91.0272796 87.9608129,88.7275108 84.5044337,88.8410391 C81.0477114,88.7275108 77.3518016,91.0272796 74.8710466,92.8762163 C70.7509822,95.9467308 67.8580835,99.7213834 63.9909333,94.1296214 C61.0884259,89.9323547 62.3028943,82.8739117 65.014944,78.9027173 C68.8738581,73.2512381 74.1088724,75.9847769 79.9622738,75.3400279 C81.5538829,75.1648137 83.1526985,74.7228407 84.5044337,74 C85.856169,74.7228407 87.4546414,75.1648137 89.0462504,75.3400279 C94.899995,75.9847769 100.134666,73.2512381 103.993923,78.9027173 C106.70563,82.8739117 107.920098,89.9323547 105.017591,94.1296214 M140.39109,26 C136.966521,40.0748212 135.393023,54.4337754 132.909944,68.6711471 C132.392536,71.6390145 131.826063,74.5963095 131.224594,77.5496398 C131.098329,78.1697764 130.973781,80.4725746 130.362704,80.7643064 C128.511632,81.6484223 124.739149,76.9466834 123.730409,75.8851496 C121.196893,73.219256 118.684993,70.5292442 115.599415,68.437233 C109.364783,64.2102603 102.065485,61.7108818 94.4700836,61.117837 C91.2922091,60.8693859 86.9951134,61.3025234 84.000116,63.1104016 C81.0051185,61.3025234 76.7080229,60.8693859 73.5298053,61.117837 C65.9344039,61.7108818 58.6351055,64.2102603 52.4004739,68.437233 C49.3148957,70.5292442 46.8033387,73.219256 44.2694796,75.8851496 C43.2607395,76.9466834 39.4882573,81.6484223 37.6371849,80.7643064 C37.0261079,80.4725746 36.9015594,78.1697764 36.7752954,77.5496398 C36.1738255,74.5963095 35.6073527,71.6390145 35.0899445,68.6711471 C32.6072086,54.4337754 31.0337113,40.0748212 27.6091415,26 C26.6127533,26 25.7385119,44.7478165 25.6273446,46.4945731 C25.174784,53.5889755 24.6463963,60.5254529 25.3216346,67.6261326 C26.485803,79.8749043 27.6993791,95.2339402 37.032627,104.58753 C45.4659003,113.039493 57.7103052,114.806417 68.2713185,120.141327 C69.631059,120.828202 71.4347824,121.676306 73.3798667,122.37111 C75.4289129,123.934171 79.4926946,125 84.1740722,125 C89.0846465,125 93.3155222,123.827456 95.2540874,122.137856 C96.9548781,121.49261 98.5180822,120.752874 99.7285704,120.141327 C110.288776,114.805245 122.533989,113.039493 130.967262,104.58753 C140.30051,95.2339402 141.514086,79.8749043 142.678597,67.6261326 C143.353493,60.5254529 142.825105,53.5889755 142.372887,46.4945731 C142.261377,44.7478165 141.387136,26 140.39109,26 Z" id="react-path-1462173"></path></defs><mask id="react-mask-1462172" fill="white"><use xlink:href="#react-path-1462173"></use></mask><use id="Beardness" fill="#252E32" fill-rule="evenodd" xlink:href="#react-path-1462173"></use><g id="Color/Hair/Brown" mask="url(#react-mask-1462172)" fill="#2C1B18"><g transform="translate(-32.000000, 0.000000)" id="Color"><rect x="0" y="0" width="264" height="244"></rect></g></g></g><mask id="react-mask-1462168" fill="white"><use xlink:href="#react-path-1462170"></use></mask><use id="Short-Hair" stroke="none" fill="#28354B" fill-rule="evenodd" xlink:href="#react-path-1462170"></use><g id="Skin/👶🏽-03-Brown" mask="url(#react-mask-1462168)" fill="#2C1B18"><g transform="translate(0.000000, 0.000000) " id="Color"><rect x="0" y="0" width="264" height="280"></rect></g></g><g id="Top/_Resources/Prescription-02" fill="none" transform="translate(62.000000, 85.000000)" stroke-width="1"><defs><filter x="-0.8%" y="-2.4%" width="101.5%" height="109.8%" filterUnits="objectBoundingBox" id="react-filter-1462174"><feOffset dx="0" dy="2" in="SourceAlpha" result="shadowOffsetOuter1"></feOffset><feColorMatrix values="0 0 0 0 0   0 0 0 0 0   0 0 0 0 0  0 0 0 0.2 0" type="matrix" in="shadowOffsetOuter1" result="shadowMatrixOuter1"></feColorMatrix><feMerge><feMergeNode in="shadowMatrixOuter1"></feMergeNode><feMergeNode in="SourceGraphic"></feMergeNode></feMerge></filter></defs><g id="Wayfarers" filter="url(#react-filter-1462174)" transform="translate(6.000000, 7.000000)" fill="#252C2F"><path d="M34,41 L31.2421498,41 C17.3147125,41 9,33.3359286 9,20.5 C9,10.127 10.8170058,0 32.5299306,0 L35.4700694,0 C57.1829942,0 59,10.127 59,20.5 C59,32.5686429 48.7212748,41 34,41 Z M32.3853606,6 C13,6 13,12.8410159 13,21.5015498 C13,28.5719428 16.116254,37 30.9709365,37 L34,37 C46.3649085,37 55,30.6270373 55,21.5015498 C55,12.8410159 55,6 35.6146394,6 L32.3853606,6 Z" id="Left" fill-rule="nonzero"></path><path d="M96,41 L93.2421498,41 C79.3147125,41 71,33.3359286 71,20.5 C71,10.127 72.8170058,0 94.5299306,0 L97.4700694,0 C119.182994,0 121,10.127 121,20.5 C121,32.5686429 110.721275,41 96,41 Z M94.3853606,6 C75,6 75,12.8410159 75,21.5015498 C75,28.5719428 78.1194833,37 92.9709365,37 L96,37 C108.364909,37 117,30.6270373 117,21.5015498 C117,12.8410159 117,6 97.6146394,6 L94.3853606,6 Z" id="Right" fill-rule="nonzero"></path><path d="M2.95454545,5.77156439 C3.64590909,5.09629136 11.2095455,0 32.5,0 C50.3513636,0 54.1302273,1.85267217 59.8502273,4.6518809 L60.2689233,4.85850899 C60.6666014,4.99901896 62.7002447,5.68982981 65.0790606,5.76579519 C67.2462948,5.67278567 69.1000195,5.08540191 69.641698,4.89719767 C76.1703915,1.7220864 82.5610971,0 97.5,0 C118.790455,0 126.354091,5.09629136 127.045455,5.77156439 C128.679318,5.77156439 130,7.06150904 130,8.65734659 L130,11.5431288 C130,13.1389663 128.679318,14.428911 127.045455,14.428911 C127.045455,14.428911 120.143997,14.428911 120.143997,17.3146932 C120.143997,20.2004754 118.181818,13.1389663 118.181818,11.5431288 L118.181818,8.73240251 C114.578575,7.35340151 108.128411,4.78617535 97.5,4.78617535 C85.6584651,4.78617535 79.7610984,6.88602813 74.7022935,8.97112368 L74.7588636,9.10752861 L74.7563667,11.0937608 L72.5391666,16.4436339 L69.8004908,15.3608351 C69.5558969,15.2641292 69.0281396,15.090392 68.2963505,14.9099044 C66.256272,14.4067419 64.1589087,14.253569 62.3040836,14.6343084 C61.6235903,14.7739931 60.9922286,14.9836085 60.4128127,15.266732 L57.7704824,16.5578701 L55.1266751,11.3962031 L55.2440909,9.10175705 L55.3248203,8.90683855 C50.9620526,6.87386374 46.9392639,4.78617535 32.5,4.78617535 C21.8721459,4.78617535 15.422131,7.3524397 11.8181818,8.7314671 L11.8181818,11.5431288 C11.8181818,13.1389663 8.86363636,20.2004754 8.86363636,17.3146932 C8.86363636,14.428911 2.95454545,14.428911 2.95454545,14.428911 C1.32363636,14.428911 0,13.1389663 0,11.5431288 L0,8.65734659 C0,7.06150904 1.32363636,5.77156439 2.95454545,5.77156439 Z" id="Stuff" fill-rule="nonzero"></path></g></g></g></g></g></g></g></g></g>` },
         error: { vb: '0 0 264 280', corpo: `<desc>Created with getavataaars.com</desc><defs><circle id="react-path-1462252" cx="120" cy="120" r="120"></circle><path d="M12,160 C12,226.27417 65.72583,280 132,280 C198.27417,280 252,226.27417 252,160 L264,160 L264,-1.42108547e-14 L-3.19744231e-14,-1.42108547e-14 L-3.19744231e-14,160 L12,160 Z" id="react-path-1462253"></path><path d="M124,144.610951 L124,163 L128,163 L128,163 C167.764502,163 200,195.235498 200,235 L200,244 L0,244 L0,235 C-4.86974701e-15,195.235498 32.235498,163 72,163 L72,163 L76,163 L76,144.610951 C58.7626345,136.422372 46.3722246,119.687011 44.3051388,99.8812385 C38.4803105,99.0577866 34,94.0521096 34,88 L34,74 C34,68.0540074 38.3245733,63.1180731 44,62.1659169 L44,56 L44,56 C44,25.072054 69.072054,5.68137151e-15 100,0 L100,0 L100,0 C130.927946,-5.68137151e-15 156,25.072054 156,56 L156,62.1659169 C161.675427,63.1180731 166,68.0540074 166,74 L166,88 C166,94.0521096 161.51969,99.0577866 155.694861,99.8812385 C153.627775,119.687011 141.237365,136.422372 124,144.610951 Z" id="react-path-1462254"></path></defs><g id="Avataaar" stroke="none" stroke-width="1" fill="none" fill-rule="evenodd"><g transform="translate(-825.000000, -1100.000000)" id="Avataaar/Circle"><g transform="translate(825.000000, 1100.000000)"><g id="Mask"></g><g id="Avataaar" stroke-width="1" fill-rule="evenodd" mask="url(#react-mask-1462256)"><g id="Body" transform="translate(32.000000, 36.000000)"><mask id="react-mask-1462257" fill="white"><use xlink:href="#react-path-1462254"></use></mask><use fill="#D0C6AC" xlink:href="#react-path-1462254"></use><g id="Skin/👶🏽-03-Brown" mask="url(#react-mask-1462257)" fill="#EDB98A"><g transform="translate(0.000000, 0.000000)" id="Color"><rect x="0" y="0" width="264" height="280"></rect></g></g><path d="M156,79 L156,102 C156,132.927946 130.927946,158 100,158 C69.072054,158 44,132.927946 44,102 L44,79 L44,94 C44,124.927946 69.072054,150 100,150 C130.927946,150 156,124.927946 156,94 L156,79 Z" id="Neck-Shadow" fill-opacity="0.100000001" fill="#000000" mask="url(#react-mask-1462257)"></path></g><g id="Clothing/Hoodie" transform="translate(0.000000, 170.000000)"><defs><path d="M108,13.0708856 C90.0813006,15.075938 76.2798424,20.5518341 76.004203,34.6449676 C50.1464329,45.5680933 32,71.1646257 32,100.999485 L32,100.999485 L32,110 L232,110 L232,100.999485 C232,71.1646257 213.853567,45.5680933 187.995797,34.6449832 C187.720158,20.5518341 173.918699,15.075938 156,13.0708856 L156,32 L156,32 C156,45.254834 145.254834,56 132,56 L132,56 C118.745166,56 108,45.254834 108,32 L108,13.0708856 Z" id="react-path-1462258"></path></defs><mask id="react-mask-1462259" fill="white"><use xlink:href="#react-path-1462258"></use></mask><use id="Hoodie" fill="#B7C1DB" fill-rule="evenodd" xlink:href="#react-path-1462258"></use><g id="Color/Palette/Gray-01" mask="url(#react-mask-1462259)" fill-rule="evenodd" fill="#262E33"><rect id="🖍Color" x="0" y="0" width="264" height="110"></rect></g><path d="M102,61.7390531 L102,110 L95,110 L95,58.1502625 C97.2037542,59.4600576 99.5467694,60.6607878 102,61.7390531 Z M169,58.1502625 L169,98.5 C169,100.432997 167.432997,102 165.5,102 C163.567003,102 162,100.432997 162,98.5 L162,61.7390531 C164.453231,60.6607878 166.796246,59.4600576 169,58.1502625 Z" id="Straps" fill="#F4F4F4" fill-rule="evenodd" mask="url(#react-mask-1462259)"></path><path d="M90.9601329,12.7243537 C75.9093095,15.5711782 65.5,21.2428847 65.5,32.3076923 C65.5,52.0200095 98.5376807,68 132,68 C165.462319,68 198.5,52.0200095 198.5,32.3076923 C198.5,21.2428847 188.09069,15.5711782 173.039867,12.7243537 C182.124921,16.0744598 188,21.7060546 188,31.0769231 C188,51.4689754 160.178795,68 132,68 C103.821205,68 76,51.4689754 76,31.0769231 C76,21.7060546 81.8750795,16.0744598 90.9601329,12.7243537 Z" id="Shadow" fill-opacity="0.16" fill="#000000" fill-rule="evenodd" mask="url(#react-mask-1462259)"></path></g><g id="Face" transform="translate(76.000000, 82.000000)" fill="#000000"><g id="Mouth/Grimace" transform="translate(2.000000, 52.000000)"><defs><rect id="react-path-1462260" x="24" y="9" width="60" height="22" rx="11"></rect></defs><rect id="Mouth" fill-opacity="0.599999964" fill="#000000" fill-rule="evenodd" x="22" y="7" width="64" height="26" rx="13"></rect><mask id="react-mask-1462261" fill="white"><use xlink:href="#react-path-1462260"></use></mask><use id="Mouth" fill="#FFFFFF" fill-rule="evenodd" xlink:href="#react-path-1462260"></use><path d="M71,22 L62,22 L62,34 L58,34 L58,22 L49,22 L49,34 L45,34 L45,22 L36,22 L36,34 L32,34 L32,22 L24,22 L24,18 L32,18 L32,6 L36,6 L36,18 L45,18 L45,6 L49,6 L49,18 L58,18 L58,6 L62,6 L62,18 L71,18 L71,6 L75,6 L75,18 L83.8666667,18 L83.8666667,22 L75,22 L75,34 L71,34 L71,22 Z" id="Grimace-Teeth" fill="#E6E6E6" fill-rule="evenodd" mask="url(#react-mask-1462261)"></path></g><g id="Nose/Default" transform="translate(28.000000, 40.000000)" fill-opacity="0.16"><path d="M16,8 C16,12.418278 21.372583,16 28,16 L28,16 C34.627417,16 40,12.418278 40,8" id="Nose"></path></g><g id="Eyes/Cry-😢" transform="translate(0.000000, 8.000000)"><circle id="Eye" fill-opacity="0.599999964" fill="#000000" fill-rule="evenodd" cx="30" cy="22" r="6"></circle><path d="M25,27 C25,27 19,34.2706667 19,38.2706667 C19,41.5846667 21.686,44.2706667 25,44.2706667 C28.314,44.2706667 31,41.5846667 31,38.2706667 C31,34.2706667 25,27 25,27 Z" id="Drop" fill="#92D9FF" fill-rule="nonzero"></path><circle id="Eye" fill-opacity="0.599999964" fill="#000000" fill-rule="evenodd" cx="82" cy="22" r="6"></circle></g><g id="Eyebrow/Natural/Angry-Natural" fill-opacity="0.599999964"><path d="M44.8565785,12.2282877 C44.8578785,12.2192877 44.8578785,12.2192877 44.8565785,12.2282877 M17.5862288,7.89238094 C15.2441598,8.3302947 13.0866155,9.78806858 12.1523766,12.0987479 C11.8009169,12.967391 11.3917103,14.9243181 11.7083227,15.8073302 C11.8284629,16.14295 12.0332321,16.1008692 12.9555234,16.0430509 C14.643791,15.9369937 16.9330912,13.6622369 18.7484684,13.2557982 C21.2753939,12.6899315 23.9825295,13.1148447 26.4961798,13.6882381 C30.8109365,14.6725177 36.4854008,17.7875215 40.9461842,16.1699775 C41.2783949,16.0495512 45.6210294,12.9225732 44.3685187,12.2769925 C43.9238011,11.9068186 41.1370145,12.0854053 40.6216067,11.9988489 C38.2277647,11.5971998 35.7297127,10.9345131 33.373373,10.3265657 C28.2329017,9.00016592 22.9666484,6.88073171 17.5862288,7.89238094" id="Eyebrows-The-Web" transform="translate(28.094701, 12.127505) rotate(17.000000) translate(-28.094701, -12.127505) "></path><path d="M100.918293,12.2094196 C100.919593,12.2004196 100.919593,12.2004196 100.918293,12.2094196 M73.5862288,7.89238094 C71.2441598,8.3302947 69.0866155,9.78806858 68.1523766,12.0987479 C67.8009169,12.967391 67.3917103,14.9243181 67.7083227,15.8073302 C67.8284629,16.14295 68.0332321,16.1008692 68.9555234,16.0430509 C70.643791,15.9369937 72.9330912,13.6622369 74.7484684,13.2557982 C77.2753939,12.6899315 79.9825295,13.1148447 82.4961798,13.6882381 C86.8109365,14.6725177 92.4854008,17.7875215 96.9461842,16.1699775 C97.2783949,16.0495512 101.621029,12.9225732 100.368519,12.2769925 C99.9238011,11.9068186 97.1370145,12.0854053 96.6216067,11.9988489 C94.2277647,11.5971998 91.7297127,10.9345131 89.373373,10.3265657 C84.2329017,9.00016592 78.9666484,6.88073171 73.5862288,7.89238094" id="Eyebrows-The-Web" transform="translate(84.094701, 12.127505) scale(-1, 1) rotate(17.000000) translate(-84.094701, -12.127505) "></path></g></g><g id="Top" stroke-width="1" fill-rule="evenodd"><defs><rect id="react-path-1462266" x="0" y="0" width="264" height="280"></rect><path d="M94.2519269,52.0221149 C94.3749353,51.9677149 94.0696712,51.9468149 93.3361345,51.9595149 C94.2276637,51.9577149 94.5329279,51.9785149 94.2519269,52.0221149 M86.1169775,36.3015924 C86.1148422,36.2819924 86.1337548,36.4526924 86.1169775,36.3015924 M193.765056,70.7656665 C193.500946,67.448734 193.03295,64.1518864 192.246676,60.9110823 C191.622233,58.3353492 190.769007,55.8775343 189.760006,53.4200433 C189.150703,51.9353766 187.727538,49.8961062 187.560324,48.2944933 C187.395466,46.7168527 188.626521,44.969138 188.889285,43.1323368 C189.144311,41.3447761 189.100909,39.4652134 188.734183,37.6938503 C187.901144,33.6710288 185.140271,29.9300447 180.877167,28.8814158 C179.925362,28.6471994 177.913417,28.9358396 177.240862,28.3815597 C176.469729,27.7459682 175.932761,25.5806808 175.234637,24.7121687 C173.244224,22.2362125 170.13984,20.6417265 166.865887,21.1976261 C164.454917,21.606776 165.839391,22.1053363 164.032005,20.6864317 C163.027041,19.8976114 162.276095,18.6931622 161.300066,17.8392279 C159.832826,16.5563826 158.149588,15.4581893 156.408146,14.556958 C151.851325,12.19892 146.654249,10.4848961 141.564162,9.64942693 C132.278934,8.12523827 122.368926,9.45408458 113.368668,11.8688141 C108.890239,13.0703477 104.381531,14.5951842 100.222053,16.6117782 C98.4385542,17.4764029 97.4090304,18.1936301 95.5494951,18.4200717 C92.6207355,18.7767416 90.1404579,18.7589243 87.3661268,20.0009517 C78.8298269,23.8229236 74.9849256,32.6897818 78.3066539,41.1750259 C78.974835,42.8815988 79.8795374,44.3801954 81.1267416,45.7586062 C82.6474761,47.4392631 83.1975648,47.1085093 81.8877817,49.0411999 C79.9289949,51.9311653 78.2777195,55.0129095 76.9332826,58.2128958 C73.4043038,66.6145606 72.8138416,76.0771643 73.043634,85.0373203 C73.1240445,88.1741362 73.2586228,91.3495022 73.753198,94.4561907 C73.966841,95.8009106 74.0267283,98.3293468 75.0353925,99.3271154 C75.5471264,99.8331265 76.2762042,100.115288 77.0035997,99.9137903 C78.7130802,99.4401742 78.1253096,98.1787097 78.1650102,97.0076274 C78.364859,91.1240324 78.0950295,85.9191145 79.4943071,80.1064647 C80.5278683,75.8118486 82.2504702,71.9114806 84.4827873,68.0713675 C87.3213795,63.1871608 90.3857268,58.8977279 94.2895061,54.7155226 C95.2073299,53.7320079 95.4078515,53.3150832 96.6385698,53.243814 C97.5705244,53.1900382 98.9338023,53.8282213 99.8398505,54.0491558 C101.837665,54.5360539 103.83918,55.0174448 105.873331,55.3452831 C109.613261,55.9481556 113.316519,55.9886494 117.090094,55.8704074 C124.516459,55.6381346 131.974787,55.1172217 139.175061,53.2470535 C143.956964,52.00535 148.196516,49.7762443 152.776887,48.1422364 C152.858644,48.1130808 154.006596,47.2951049 154.207791,47.3284719 C154.488723,47.3747968 156.184746,49.1542588 156.471061,49.3784327 C158.696649,51.1238798 161.137899,51.8566566 163.541467,53.2081794 C166.504881,54.8745825 163.634999,52.4899804 165.269452,54.5668292 C165.745859,55.1716454 165.989782,56.2931632 166.371984,56.9783192 C167.587899,59.1610999 169.279548,61.0795367 171.302932,62.6017816 C173.258018,64.0725184 176.196198,64.7829426 177.193087,66.697168 C177.961865,68.1740599 178.220929,70.1812592 178.841334,71.7579279 C180.468722,75.8931602 182.617937,79.7494709 184.767152,83.6443317 C186.498502,86.7830913 188.392354,89.5250111 188.584801,93.1117947 C188.651754,94.3603012 187.463764,101.849397 190.357534,99.5716982 C190.786502,99.2341415 191.711391,95.415733 191.901483,94.7678314 C192.672616,92.135083 192.94682,89.3866841 193.29605,86.6816947 C193.990474,81.3021672 194.218584,76.1837441 193.765056,70.7656665" id="react-path-1462265"></path><filter x="-0.8%" y="-2.0%" width="101.5%" height="108.0%" filterUnits="objectBoundingBox" id="react-filter-1462262"><feOffset dx="0" dy="2" in="SourceAlpha" result="shadowOffsetOuter1"></feOffset><feColorMatrix values="0 0 0 0 0   0 0 0 0 0   0 0 0 0 0  0 0 0 0.16 0" type="matrix" in="shadowOffsetOuter1" result="shadowMatrixOuter1"></feColorMatrix><feMerge><feMergeNode in="shadowMatrixOuter1"></feMergeNode><feMergeNode in="SourceGraphic"></feMergeNode></feMerge></filter></defs><mask id="react-mask-1462264" fill="white"><use xlink:href="#react-path-1462266"></use></mask><g id="Mask"></g><g id="Top/Short-Hair/Short-Curly" mask="url(#react-mask-1462264)"><g transform="translate(-1.000000, 0.000000)"><g id="Facial-Hair/Beard-Medium" transform="translate(49.000000, 72.000000)"><defs><path d="M105.017591,94.1296214 C101.150441,99.7213834 98.257542,95.9467308 94.1374777,92.8762163 C91.6567227,91.0272796 87.9608129,88.7275108 84.5044337,88.8410391 C81.0477114,88.7275108 77.3518016,91.0272796 74.8710466,92.8762163 C70.7509822,95.9467308 67.8580835,99.7213834 63.9909333,94.1296214 C61.0884259,89.9323547 62.3028943,82.8739117 65.014944,78.9027173 C68.8738581,73.2512381 74.1088724,75.9847769 79.9622738,75.3400279 C81.5538829,75.1648137 83.1526985,74.7228407 84.5044337,74 C85.856169,74.7228407 87.4546414,75.1648137 89.0462504,75.3400279 C94.899995,75.9847769 100.134666,73.2512381 103.993923,78.9027173 C106.70563,82.8739117 107.920098,89.9323547 105.017591,94.1296214 M140.39109,26 C136.966521,40.0748212 135.393023,54.4337754 132.909944,68.6711471 C132.392536,71.6390145 131.826063,74.5963095 131.224594,77.5496398 C131.098329,78.1697764 130.973781,80.4725746 130.362704,80.7643064 C128.511632,81.6484223 124.739149,76.9466834 123.730409,75.8851496 C121.196893,73.219256 118.684993,70.5292442 115.599415,68.437233 C109.364783,64.2102603 102.065485,61.7108818 94.4700836,61.117837 C91.2922091,60.8693859 86.9951134,61.3025234 84.000116,63.1104016 C81.0051185,61.3025234 76.7080229,60.8693859 73.5298053,61.117837 C65.9344039,61.7108818 58.6351055,64.2102603 52.4004739,68.437233 C49.3148957,70.5292442 46.8033387,73.219256 44.2694796,75.8851496 C43.2607395,76.9466834 39.4882573,81.6484223 37.6371849,80.7643064 C37.0261079,80.4725746 36.9015594,78.1697764 36.7752954,77.5496398 C36.1738255,74.5963095 35.6073527,71.6390145 35.0899445,68.6711471 C32.6072086,54.4337754 31.0337113,40.0748212 27.6091415,26 C26.6127533,26 25.7385119,44.7478165 25.6273446,46.4945731 C25.174784,53.5889755 24.6463963,60.5254529 25.3216346,67.6261326 C26.485803,79.8749043 27.6993791,95.2339402 37.032627,104.58753 C45.4659003,113.039493 57.7103052,114.806417 68.2713185,120.141327 C69.631059,120.828202 71.4347824,121.676306 73.3798667,122.37111 C75.4289129,123.934171 79.4926946,125 84.1740722,125 C89.0846465,125 93.3155222,123.827456 95.2540874,122.137856 C96.9548781,121.49261 98.5180822,120.752874 99.7285704,120.141327 C110.288776,114.805245 122.533989,113.039493 130.967262,104.58753 C140.30051,95.2339402 141.514086,79.8749043 142.678597,67.6261326 C143.353493,60.5254529 142.825105,53.5889755 142.372887,46.4945731 C142.261377,44.7478165 141.387136,26 140.39109,26 Z" id="react-path-1462268"></path></defs><mask id="react-mask-1462267" fill="white"><use xlink:href="#react-path-1462268"></use></mask><use id="Beardness" fill="#252E32" fill-rule="evenodd" xlink:href="#react-path-1462268"></use><g id="Color/Hair/Brown" mask="url(#react-mask-1462267)" fill="#2C1B18"><g transform="translate(-32.000000, 0.000000)" id="Color"><rect x="0" y="0" width="264" height="244"></rect></g></g></g><mask id="react-mask-1462263" fill="white"><use xlink:href="#react-path-1462265"></use></mask><use id="Short-Hair" stroke="none" fill="#28354B" fill-rule="evenodd" xlink:href="#react-path-1462265"></use><g id="Skin/👶🏽-03-Brown" mask="url(#react-mask-1462263)" fill="#2C1B18"><g transform="translate(0.000000, 0.000000) " id="Color"><rect x="0" y="0" width="264" height="280"></rect></g></g><g id="Top/_Resources/Prescription-02" fill="none" transform="translate(62.000000, 85.000000)" stroke-width="1"><defs><filter x="-0.8%" y="-2.4%" width="101.5%" height="109.8%" filterUnits="objectBoundingBox" id="react-filter-1462269"><feOffset dx="0" dy="2" in="SourceAlpha" result="shadowOffsetOuter1"></feOffset><feColorMatrix values="0 0 0 0 0   0 0 0 0 0   0 0 0 0 0  0 0 0 0.2 0" type="matrix" in="shadowOffsetOuter1" result="shadowMatrixOuter1"></feColorMatrix><feMerge><feMergeNode in="shadowMatrixOuter1"></feMergeNode><feMergeNode in="SourceGraphic"></feMergeNode></feMerge></filter></defs><g id="Wayfarers" filter="url(#react-filter-1462269)" transform="translate(6.000000, 7.000000)" fill="#252C2F"><path d="M34,41 L31.2421498,41 C17.3147125,41 9,33.3359286 9,20.5 C9,10.127 10.8170058,0 32.5299306,0 L35.4700694,0 C57.1829942,0 59,10.127 59,20.5 C59,32.5686429 48.7212748,41 34,41 Z M32.3853606,6 C13,6 13,12.8410159 13,21.5015498 C13,28.5719428 16.116254,37 30.9709365,37 L34,37 C46.3649085,37 55,30.6270373 55,21.5015498 C55,12.8410159 55,6 35.6146394,6 L32.3853606,6 Z" id="Left" fill-rule="nonzero"></path><path d="M96,41 L93.2421498,41 C79.3147125,41 71,33.3359286 71,20.5 C71,10.127 72.8170058,0 94.5299306,0 L97.4700694,0 C119.182994,0 121,10.127 121,20.5 C121,32.5686429 110.721275,41 96,41 Z M94.3853606,6 C75,6 75,12.8410159 75,21.5015498 C75,28.5719428 78.1194833,37 92.9709365,37 L96,37 C108.364909,37 117,30.6270373 117,21.5015498 C117,12.8410159 117,6 97.6146394,6 L94.3853606,6 Z" id="Right" fill-rule="nonzero"></path><path d="M2.95454545,5.77156439 C3.64590909,5.09629136 11.2095455,0 32.5,0 C50.3513636,0 54.1302273,1.85267217 59.8502273,4.6518809 L60.2689233,4.85850899 C60.6666014,4.99901896 62.7002447,5.68982981 65.0790606,5.76579519 C67.2462948,5.67278567 69.1000195,5.08540191 69.641698,4.89719767 C76.1703915,1.7220864 82.5610971,0 97.5,0 C118.790455,0 126.354091,5.09629136 127.045455,5.77156439 C128.679318,5.77156439 130,7.06150904 130,8.65734659 L130,11.5431288 C130,13.1389663 128.679318,14.428911 127.045455,14.428911 C127.045455,14.428911 120.143997,14.428911 120.143997,17.3146932 C120.143997,20.2004754 118.181818,13.1389663 118.181818,11.5431288 L118.181818,8.73240251 C114.578575,7.35340151 108.128411,4.78617535 97.5,4.78617535 C85.6584651,4.78617535 79.7610984,6.88602813 74.7022935,8.97112368 L74.7588636,9.10752861 L74.7563667,11.0937608 L72.5391666,16.4436339 L69.8004908,15.3608351 C69.5558969,15.2641292 69.0281396,15.090392 68.2963505,14.9099044 C66.256272,14.4067419 64.1589087,14.253569 62.3040836,14.6343084 C61.6235903,14.7739931 60.9922286,14.9836085 60.4128127,15.266732 L57.7704824,16.5578701 L55.1266751,11.3962031 L55.2440909,9.10175705 L55.3248203,8.90683855 C50.9620526,6.87386374 46.9392639,4.78617535 32.5,4.78617535 C21.8721459,4.78617535 15.422131,7.3524397 11.8181818,8.7314671 L11.8181818,11.5431288 C11.8181818,13.1389663 8.86363636,20.2004754 8.86363636,17.3146932 C8.86363636,14.428911 2.95454545,14.428911 2.95454545,14.428911 C1.32363636,14.428911 0,13.1389663 0,11.5431288 L0,8.65734659 C0,7.06150904 1.32363636,5.77156439 2.95454545,5.77156439 Z" id="Stuff" fill-rule="nonzero"></path></g></g></g></g></g></g></g></g></g>` },
         success: { vb: '0 0 264 280', corpo: `<desc>Created with getavataaars.com</desc><defs><circle id="react-path-1462204" cx="120" cy="120" r="120"></circle><path d="M12,160 C12,226.27417 65.72583,280 132,280 C198.27417,280 252,226.27417 252,160 L264,160 L264,-1.42108547e-14 L-3.19744231e-14,-1.42108547e-14 L-3.19744231e-14,160 L12,160 Z" id="react-path-1462205"></path><path d="M124,144.610951 L124,163 L128,163 L128,163 C167.764502,163 200,195.235498 200,235 L200,244 L0,244 L0,235 C-4.86974701e-15,195.235498 32.235498,163 72,163 L72,163 L76,163 L76,144.610951 C58.7626345,136.422372 46.3722246,119.687011 44.3051388,99.8812385 C38.4803105,99.0577866 34,94.0521096 34,88 L34,74 C34,68.0540074 38.3245733,63.1180731 44,62.1659169 L44,56 L44,56 C44,25.072054 69.072054,5.68137151e-15 100,0 L100,0 L100,0 C130.927946,-5.68137151e-15 156,25.072054 156,56 L156,62.1659169 C161.675427,63.1180731 166,68.0540074 166,74 L166,88 C166,94.0521096 161.51969,99.0577866 155.694861,99.8812385 C153.627775,119.687011 141.237365,136.422372 124,144.610951 Z" id="react-path-1462206"></path></defs><g id="Avataaar" stroke="none" stroke-width="1" fill="none" fill-rule="evenodd"><g transform="translate(-825.000000, -1100.000000)" id="Avataaar/Circle"><g transform="translate(825.000000, 1100.000000)"><g id="Mask"></g><g id="Avataaar" stroke-width="1" fill-rule="evenodd" mask="url(#react-mask-1462208)"><g id="Body" transform="translate(32.000000, 36.000000)"><mask id="react-mask-1462209" fill="white"><use xlink:href="#react-path-1462206"></use></mask><use fill="#D0C6AC" xlink:href="#react-path-1462206"></use><g id="Skin/👶🏽-03-Brown" mask="url(#react-mask-1462209)" fill="#EDB98A"><g transform="translate(0.000000, 0.000000)" id="Color"><rect x="0" y="0" width="264" height="280"></rect></g></g><path d="M156,79 L156,102 C156,132.927946 130.927946,158 100,158 C69.072054,158 44,132.927946 44,102 L44,79 L44,94 C44,124.927946 69.072054,150 100,150 C130.927946,150 156,124.927946 156,94 L156,79 Z" id="Neck-Shadow" fill-opacity="0.100000001" fill="#000000" mask="url(#react-mask-1462209)"></path></g><g id="Clothing/Hoodie" transform="translate(0.000000, 170.000000)"><defs><path d="M108,13.0708856 C90.0813006,15.075938 76.2798424,20.5518341 76.004203,34.6449676 C50.1464329,45.5680933 32,71.1646257 32,100.999485 L32,100.999485 L32,110 L232,110 L232,100.999485 C232,71.1646257 213.853567,45.5680933 187.995797,34.6449832 C187.720158,20.5518341 173.918699,15.075938 156,13.0708856 L156,32 L156,32 C156,45.254834 145.254834,56 132,56 L132,56 C118.745166,56 108,45.254834 108,32 L108,13.0708856 Z" id="react-path-1462210"></path></defs><mask id="react-mask-1462211" fill="white"><use xlink:href="#react-path-1462210"></use></mask><use id="Hoodie" fill="#B7C1DB" fill-rule="evenodd" xlink:href="#react-path-1462210"></use><g id="Color/Palette/Gray-01" mask="url(#react-mask-1462211)" fill-rule="evenodd" fill="#262E33"><rect id="🖍Color" x="0" y="0" width="264" height="110"></rect></g><path d="M102,61.7390531 L102,110 L95,110 L95,58.1502625 C97.2037542,59.4600576 99.5467694,60.6607878 102,61.7390531 Z M169,58.1502625 L169,98.5 C169,100.432997 167.432997,102 165.5,102 C163.567003,102 162,100.432997 162,98.5 L162,61.7390531 C164.453231,60.6607878 166.796246,59.4600576 169,58.1502625 Z" id="Straps" fill="#F4F4F4" fill-rule="evenodd" mask="url(#react-mask-1462211)"></path><path d="M90.9601329,12.7243537 C75.9093095,15.5711782 65.5,21.2428847 65.5,32.3076923 C65.5,52.0200095 98.5376807,68 132,68 C165.462319,68 198.5,52.0200095 198.5,32.3076923 C198.5,21.2428847 188.09069,15.5711782 173.039867,12.7243537 C182.124921,16.0744598 188,21.7060546 188,31.0769231 C188,51.4689754 160.178795,68 132,68 C103.821205,68 76,51.4689754 76,31.0769231 C76,21.7060546 81.8750795,16.0744598 90.9601329,12.7243537 Z" id="Shadow" fill-opacity="0.16" fill="#000000" fill-rule="evenodd" mask="url(#react-mask-1462211)"></path></g><g id="Face" transform="translate(76.000000, 82.000000)" fill="#000000"><g id="Mouth/Smile" transform="translate(2.000000, 52.000000)"><defs><path d="M35.117844,15.1280772 C36.1757121,24.6198025 44.2259873,32 54,32 C63.8042055,32 71.8740075,24.574136 72.8917593,15.0400546 C72.9736685,14.272746 72.1167429,13 71.042767,13 C56.1487536,13 44.7379213,13 37.0868244,13 C36.0066168,13 35.0120058,14.1784435 35.117844,15.1280772 Z" id="react-path-1462212"></path></defs><mask id="react-mask-1462213" fill="white"><use xlink:href="#react-path-1462212"></use></mask><use id="Mouth" fill-opacity="0.699999988" fill="#000000" fill-rule="evenodd" xlink:href="#react-path-1462212"></use><rect id="Teeth" fill="#FFFFFF" fill-rule="evenodd" mask="url(#react-mask-1462213)" x="39" y="2" width="31" height="16" rx="5"></rect><g id="Tongue" stroke-width="1" fill-rule="evenodd" mask="url(#react-mask-1462213)" fill="#FF4F6D"><g transform="translate(38.000000, 24.000000)"><circle cx="11" cy="11" r="11"></circle><circle cx="21" cy="11" r="11"></circle></g></g></g><g id="Nose/Default" transform="translate(28.000000, 40.000000)" fill-opacity="0.16"><path d="M16,8 C16,12.418278 21.372583,16 28,16 L28,16 C34.627417,16 40,12.418278 40,8" id="Nose"></path></g><g id="Eyes/Happy-😁" transform="translate(0.000000, 8.000000)" fill-opacity="0.599999964"><path d="M16.1601674,22.4473116 C18.006676,18.648508 22.1644225,16 26.9975803,16 C31.8136766,16 35.9591217,18.629842 37.8153518,22.4071242 C38.3667605,23.5291977 37.5821037,24.4474817 36.790607,23.7670228 C34.3395063,21.6597833 30.8587163,20.3437884 26.9975803,20.3437884 C23.2572061,20.3437884 19.8737584,21.5787519 17.4375392,23.5716412 C16.5467928,24.3002944 15.6201012,23.5583844 16.1601674,22.4473116 Z" id="Squint"></path><path d="M74.1601674,22.4473116 C76.006676,18.648508 80.1644225,16 84.9975803,16 C89.8136766,16 93.9591217,18.629842 95.8153518,22.4071242 C96.3667605,23.5291977 95.5821037,24.4474817 94.790607,23.7670228 C92.3395063,21.6597833 88.8587163,20.3437884 84.9975803,20.3437884 C81.2572061,20.3437884 77.8737584,21.5787519 75.4375392,23.5716412 C74.5467928,24.3002944 73.6201012,23.5583844 74.1601674,22.4473116 Z" id="Squint"></path></g><g id="Eyebrow/Natural/Raised-Excited-Natural" fill-opacity="0.599999964"><path d="M22.7663531,1.57844898 L23.6772984,1.17582144 C28.9190996,-0.905265751 36.8645466,-0.0328729562 41.7227321,2.29911638 C42.2897848,2.57148957 41.9021563,3.4519421 41.3211012,3.40711006 C26.4021788,2.25602197 16.3582869,11.5525942 12.9460869,17.8470939 C12.8449215,18.0337142 12.5391523,18.05489 12.4635344,17.8808353 C10.156283,12.5620676 16.9134476,3.89614725 22.7663531,1.57844898 Z" id="Eye-Browse-Reddit"></path><path d="M80.7663531,1.57844898 L81.6772984,1.17582144 C86.9190996,-0.905265751 94.8645466,-0.0328729562 99.7227321,2.29911638 C100.289785,2.57148957 99.9021563,3.4519421 99.3211012,3.40711006 C84.4021788,2.25602197 74.3582869,11.5525942 70.9460869,17.8470939 C70.8449215,18.0337142 70.5391523,18.05489 70.4635344,17.8808353 C68.156283,12.5620676 74.9134476,3.89614725 80.7663531,1.57844898 Z" id="Eye-Browse-Reddit" transform="translate(85.000000, 9.000000) scale(-1, 1) translate(-85.000000, -9.000000) "></path></g></g><g id="Top" stroke-width="1" fill-rule="evenodd"><defs><rect id="react-path-1462218" x="0" y="0" width="264" height="280"></rect><path d="M94.2519269,52.0221149 C94.3749353,51.9677149 94.0696712,51.9468149 93.3361345,51.9595149 C94.2276637,51.9577149 94.5329279,51.9785149 94.2519269,52.0221149 M86.1169775,36.3015924 C86.1148422,36.2819924 86.1337548,36.4526924 86.1169775,36.3015924 M193.765056,70.7656665 C193.500946,67.448734 193.03295,64.1518864 192.246676,60.9110823 C191.622233,58.3353492 190.769007,55.8775343 189.760006,53.4200433 C189.150703,51.9353766 187.727538,49.8961062 187.560324,48.2944933 C187.395466,46.7168527 188.626521,44.969138 188.889285,43.1323368 C189.144311,41.3447761 189.100909,39.4652134 188.734183,37.6938503 C187.901144,33.6710288 185.140271,29.9300447 180.877167,28.8814158 C179.925362,28.6471994 177.913417,28.9358396 177.240862,28.3815597 C176.469729,27.7459682 175.932761,25.5806808 175.234637,24.7121687 C173.244224,22.2362125 170.13984,20.6417265 166.865887,21.1976261 C164.454917,21.606776 165.839391,22.1053363 164.032005,20.6864317 C163.027041,19.8976114 162.276095,18.6931622 161.300066,17.8392279 C159.832826,16.5563826 158.149588,15.4581893 156.408146,14.556958 C151.851325,12.19892 146.654249,10.4848961 141.564162,9.64942693 C132.278934,8.12523827 122.368926,9.45408458 113.368668,11.8688141 C108.890239,13.0703477 104.381531,14.5951842 100.222053,16.6117782 C98.4385542,17.4764029 97.4090304,18.1936301 95.5494951,18.4200717 C92.6207355,18.7767416 90.1404579,18.7589243 87.3661268,20.0009517 C78.8298269,23.8229236 74.9849256,32.6897818 78.3066539,41.1750259 C78.974835,42.8815988 79.8795374,44.3801954 81.1267416,45.7586062 C82.6474761,47.4392631 83.1975648,47.1085093 81.8877817,49.0411999 C79.9289949,51.9311653 78.2777195,55.0129095 76.9332826,58.2128958 C73.4043038,66.6145606 72.8138416,76.0771643 73.043634,85.0373203 C73.1240445,88.1741362 73.2586228,91.3495022 73.753198,94.4561907 C73.966841,95.8009106 74.0267283,98.3293468 75.0353925,99.3271154 C75.5471264,99.8331265 76.2762042,100.115288 77.0035997,99.9137903 C78.7130802,99.4401742 78.1253096,98.1787097 78.1650102,97.0076274 C78.364859,91.1240324 78.0950295,85.9191145 79.4943071,80.1064647 C80.5278683,75.8118486 82.2504702,71.9114806 84.4827873,68.0713675 C87.3213795,63.1871608 90.3857268,58.8977279 94.2895061,54.7155226 C95.2073299,53.7320079 95.4078515,53.3150832 96.6385698,53.243814 C97.5705244,53.1900382 98.9338023,53.8282213 99.8398505,54.0491558 C101.837665,54.5360539 103.83918,55.0174448 105.873331,55.3452831 C109.613261,55.9481556 113.316519,55.9886494 117.090094,55.8704074 C124.516459,55.6381346 131.974787,55.1172217 139.175061,53.2470535 C143.956964,52.00535 148.196516,49.7762443 152.776887,48.1422364 C152.858644,48.1130808 154.006596,47.2951049 154.207791,47.3284719 C154.488723,47.3747968 156.184746,49.1542588 156.471061,49.3784327 C158.696649,51.1238798 161.137899,51.8566566 163.541467,53.2081794 C166.504881,54.8745825 163.634999,52.4899804 165.269452,54.5668292 C165.745859,55.1716454 165.989782,56.2931632 166.371984,56.9783192 C167.587899,59.1610999 169.279548,61.0795367 171.302932,62.6017816 C173.258018,64.0725184 176.196198,64.7829426 177.193087,66.697168 C177.961865,68.1740599 178.220929,70.1812592 178.841334,71.7579279 C180.468722,75.8931602 182.617937,79.7494709 184.767152,83.6443317 C186.498502,86.7830913 188.392354,89.5250111 188.584801,93.1117947 C188.651754,94.3603012 187.463764,101.849397 190.357534,99.5716982 C190.786502,99.2341415 191.711391,95.415733 191.901483,94.7678314 C192.672616,92.135083 192.94682,89.3866841 193.29605,86.6816947 C193.990474,81.3021672 194.218584,76.1837441 193.765056,70.7656665" id="react-path-1462217"></path><filter x="-0.8%" y="-2.0%" width="101.5%" height="108.0%" filterUnits="objectBoundingBox" id="react-filter-1462214"><feOffset dx="0" dy="2" in="SourceAlpha" result="shadowOffsetOuter1"></feOffset><feColorMatrix values="0 0 0 0 0   0 0 0 0 0   0 0 0 0 0  0 0 0 0.16 0" type="matrix" in="shadowOffsetOuter1" result="shadowMatrixOuter1"></feColorMatrix><feMerge><feMergeNode in="shadowMatrixOuter1"></feMergeNode><feMergeNode in="SourceGraphic"></feMergeNode></feMerge></filter></defs><mask id="react-mask-1462216" fill="white"><use xlink:href="#react-path-1462218"></use></mask><g id="Mask"></g><g id="Top/Short-Hair/Short-Curly" mask="url(#react-mask-1462216)"><g transform="translate(-1.000000, 0.000000)"><g id="Facial-Hair/Beard-Medium" transform="translate(49.000000, 72.000000)"><defs><path d="M105.017591,94.1296214 C101.150441,99.7213834 98.257542,95.9467308 94.1374777,92.8762163 C91.6567227,91.0272796 87.9608129,88.7275108 84.5044337,88.8410391 C81.0477114,88.7275108 77.3518016,91.0272796 74.8710466,92.8762163 C70.7509822,95.9467308 67.8580835,99.7213834 63.9909333,94.1296214 C61.0884259,89.9323547 62.3028943,82.8739117 65.014944,78.9027173 C68.8738581,73.2512381 74.1088724,75.9847769 79.9622738,75.3400279 C81.5538829,75.1648137 83.1526985,74.7228407 84.5044337,74 C85.856169,74.7228407 87.4546414,75.1648137 89.0462504,75.3400279 C94.899995,75.9847769 100.134666,73.2512381 103.993923,78.9027173 C106.70563,82.8739117 107.920098,89.9323547 105.017591,94.1296214 M140.39109,26 C136.966521,40.0748212 135.393023,54.4337754 132.909944,68.6711471 C132.392536,71.6390145 131.826063,74.5963095 131.224594,77.5496398 C131.098329,78.1697764 130.973781,80.4725746 130.362704,80.7643064 C128.511632,81.6484223 124.739149,76.9466834 123.730409,75.8851496 C121.196893,73.219256 118.684993,70.5292442 115.599415,68.437233 C109.364783,64.2102603 102.065485,61.7108818 94.4700836,61.117837 C91.2922091,60.8693859 86.9951134,61.3025234 84.000116,63.1104016 C81.0051185,61.3025234 76.7080229,60.8693859 73.5298053,61.117837 C65.9344039,61.7108818 58.6351055,64.2102603 52.4004739,68.437233 C49.3148957,70.5292442 46.8033387,73.219256 44.2694796,75.8851496 C43.2607395,76.9466834 39.4882573,81.6484223 37.6371849,80.7643064 C37.0261079,80.4725746 36.9015594,78.1697764 36.7752954,77.5496398 C36.1738255,74.5963095 35.6073527,71.6390145 35.0899445,68.6711471 C32.6072086,54.4337754 31.0337113,40.0748212 27.6091415,26 C26.6127533,26 25.7385119,44.7478165 25.6273446,46.4945731 C25.174784,53.5889755 24.6463963,60.5254529 25.3216346,67.6261326 C26.485803,79.8749043 27.6993791,95.2339402 37.032627,104.58753 C45.4659003,113.039493 57.7103052,114.806417 68.2713185,120.141327 C69.631059,120.828202 71.4347824,121.676306 73.3798667,122.37111 C75.4289129,123.934171 79.4926946,125 84.1740722,125 C89.0846465,125 93.3155222,123.827456 95.2540874,122.137856 C96.9548781,121.49261 98.5180822,120.752874 99.7285704,120.141327 C110.288776,114.805245 122.533989,113.039493 130.967262,104.58753 C140.30051,95.2339402 141.514086,79.8749043 142.678597,67.6261326 C143.353493,60.5254529 142.825105,53.5889755 142.372887,46.4945731 C142.261377,44.7478165 141.387136,26 140.39109,26 Z" id="react-path-1462220"></path></defs><mask id="react-mask-1462219" fill="white"><use xlink:href="#react-path-1462220"></use></mask><use id="Beardness" fill="#252E32" fill-rule="evenodd" xlink:href="#react-path-1462220"></use><g id="Color/Hair/Brown" mask="url(#react-mask-1462219)" fill="#2C1B18"><g transform="translate(-32.000000, 0.000000)" id="Color"><rect x="0" y="0" width="264" height="244"></rect></g></g></g><mask id="react-mask-1462215" fill="white"><use xlink:href="#react-path-1462217"></use></mask><use id="Short-Hair" stroke="none" fill="#28354B" fill-rule="evenodd" xlink:href="#react-path-1462217"></use><g id="Skin/👶🏽-03-Brown" mask="url(#react-mask-1462215)" fill="#2C1B18"><g transform="translate(0.000000, 0.000000) " id="Color"><rect x="0" y="0" width="264" height="280"></rect></g></g><g id="Top/_Resources/Prescription-02" fill="none" transform="translate(62.000000, 85.000000)" stroke-width="1"><defs><filter x="-0.8%" y="-2.4%" width="101.5%" height="109.8%" filterUnits="objectBoundingBox" id="react-filter-1462221"><feOffset dx="0" dy="2" in="SourceAlpha" result="shadowOffsetOuter1"></feOffset><feColorMatrix values="0 0 0 0 0   0 0 0 0 0   0 0 0 0 0  0 0 0 0.2 0" type="matrix" in="shadowOffsetOuter1" result="shadowMatrixOuter1"></feColorMatrix><feMerge><feMergeNode in="shadowMatrixOuter1"></feMergeNode><feMergeNode in="SourceGraphic"></feMergeNode></feMerge></filter></defs><g id="Wayfarers" filter="url(#react-filter-1462221)" transform="translate(6.000000, 7.000000)" fill="#252C2F"><path d="M34,41 L31.2421498,41 C17.3147125,41 9,33.3359286 9,20.5 C9,10.127 10.8170058,0 32.5299306,0 L35.4700694,0 C57.1829942,0 59,10.127 59,20.5 C59,32.5686429 48.7212748,41 34,41 Z M32.3853606,6 C13,6 13,12.8410159 13,21.5015498 C13,28.5719428 16.116254,37 30.9709365,37 L34,37 C46.3649085,37 55,30.6270373 55,21.5015498 C55,12.8410159 55,6 35.6146394,6 L32.3853606,6 Z" id="Left" fill-rule="nonzero"></path><path d="M96,41 L93.2421498,41 C79.3147125,41 71,33.3359286 71,20.5 C71,10.127 72.8170058,0 94.5299306,0 L97.4700694,0 C119.182994,0 121,10.127 121,20.5 C121,32.5686429 110.721275,41 96,41 Z M94.3853606,6 C75,6 75,12.8410159 75,21.5015498 C75,28.5719428 78.1194833,37 92.9709365,37 L96,37 C108.364909,37 117,30.6270373 117,21.5015498 C117,12.8410159 117,6 97.6146394,6 L94.3853606,6 Z" id="Right" fill-rule="nonzero"></path><path d="M2.95454545,5.77156439 C3.64590909,5.09629136 11.2095455,0 32.5,0 C50.3513636,0 54.1302273,1.85267217 59.8502273,4.6518809 L60.2689233,4.85850899 C60.6666014,4.99901896 62.7002447,5.68982981 65.0790606,5.76579519 C67.2462948,5.67278567 69.1000195,5.08540191 69.641698,4.89719767 C76.1703915,1.7220864 82.5610971,0 97.5,0 C118.790455,0 126.354091,5.09629136 127.045455,5.77156439 C128.679318,5.77156439 130,7.06150904 130,8.65734659 L130,11.5431288 C130,13.1389663 128.679318,14.428911 127.045455,14.428911 C127.045455,14.428911 120.143997,14.428911 120.143997,17.3146932 C120.143997,20.2004754 118.181818,13.1389663 118.181818,11.5431288 L118.181818,8.73240251 C114.578575,7.35340151 108.128411,4.78617535 97.5,4.78617535 C85.6584651,4.78617535 79.7610984,6.88602813 74.7022935,8.97112368 L74.7588636,9.10752861 L74.7563667,11.0937608 L72.5391666,16.4436339 L69.8004908,15.3608351 C69.5558969,15.2641292 69.0281396,15.090392 68.2963505,14.9099044 C66.256272,14.4067419 64.1589087,14.253569 62.3040836,14.6343084 C61.6235903,14.7739931 60.9922286,14.9836085 60.4128127,15.266732 L57.7704824,16.5578701 L55.1266751,11.3962031 L55.2440909,9.10175705 L55.3248203,8.90683855 C50.9620526,6.87386374 46.9392639,4.78617535 32.5,4.78617535 C21.8721459,4.78617535 15.422131,7.3524397 11.8181818,8.7314671 L11.8181818,11.5431288 C11.8181818,13.1389663 8.86363636,20.2004754 8.86363636,17.3146932 C8.86363636,14.428911 2.95454545,14.428911 2.95454545,14.428911 C1.32363636,14.428911 0,13.1389663 0,11.5431288 L0,8.65734659 C0,7.06150904 1.32363636,5.77156439 2.95454545,5.77156439 Z" id="Stuff" fill-rule="nonzero"></path></g></g></g></g></g></g></g></g></g>` },
+        sleeping: { vb: '0 0 264 280', corpo: `<desc>Created with getavataaars.com</desc><defs><circle id="react-path-3783448" cx="120" cy="120" r="120"></circle><path d="M12,160 C12,226.27417 65.72583,280 132,280 C198.27417,280 252,226.27417 252,160 L264,160 L264,-1.42108547e-14 L-3.19744231e-14,-1.42108547e-14 L-3.19744231e-14,160 L12,160 Z" id="react-path-3783449"></path><path d="M124,144.610951 L124,163 L128,163 L128,163 C167.764502,163 200,195.235498 200,235 L200,244 L0,244 L0,235 C-4.86974701e-15,195.235498 32.235498,163 72,163 L72,163 L76,163 L76,144.610951 C58.7626345,136.422372 46.3722246,119.687011 44.3051388,99.8812385 C38.4803105,99.0577866 34,94.0521096 34,88 L34,74 C34,68.0540074 38.3245733,63.1180731 44,62.1659169 L44,56 L44,56 C44,25.072054 69.072054,5.68137151e-15 100,0 L100,0 L100,0 C130.927946,-5.68137151e-15 156,25.072054 156,56 L156,62.1659169 C161.675427,63.1180731 166,68.0540074 166,74 L166,88 C166,94.0521096 161.51969,99.0577866 155.694861,99.8812385 C153.627775,119.687011 141.237365,136.422372 124,144.610951 Z" id="react-path-3783450"></path></defs><g id="Avataaar" stroke="none" stroke-width="1" fill="none" fill-rule="evenodd"><g transform="translate(-825.000000, -1100.000000)" id="Avataaar/Circle"><g transform="translate(825.000000, 1100.000000)"><g id="Mask"></g><g id="Avataaar" stroke-width="1" fill-rule="evenodd" mask="url(#react-mask-3783452)"><g id="Body" transform="translate(32.000000, 36.000000)"><mask id="react-mask-3783453" fill="white"><use xlink:href="#react-path-3783450"></use></mask><use fill="#D0C6AC" xlink:href="#react-path-3783450"></use><g id="Skin/👶🏽-03-Brown" mask="url(#react-mask-3783453)" fill="#EDB98A"><g transform="translate(0.000000, 0.000000)" id="Color"><rect x="0" y="0" width="264" height="280"></rect></g></g><path d="M156,79 L156,102 C156,132.927946 130.927946,158 100,158 C69.072054,158 44,132.927946 44,102 L44,79 L44,94 C44,124.927946 69.072054,150 100,150 C130.927946,150 156,124.927946 156,94 L156,79 Z" id="Neck-Shadow" fill-opacity="0.100000001" fill="#000000" mask="url(#react-mask-3783453)"></path></g><g id="Clothing/Hoodie" transform="translate(0.000000, 170.000000)"><defs><path d="M108,13.0708856 C90.0813006,15.075938 76.2798424,20.5518341 76.004203,34.6449676 C50.1464329,45.5680933 32,71.1646257 32,100.999485 L32,100.999485 L32,110 L232,110 L232,100.999485 C232,71.1646257 213.853567,45.5680933 187.995797,34.6449832 C187.720158,20.5518341 173.918699,15.075938 156,13.0708856 L156,32 L156,32 C156,45.254834 145.254834,56 132,56 L132,56 C118.745166,56 108,45.254834 108,32 L108,13.0708856 Z" id="react-path-3783454"></path></defs><mask id="react-mask-3783455" fill="white"><use xlink:href="#react-path-3783454"></use></mask><use id="Hoodie" fill="#B7C1DB" fill-rule="evenodd" xlink:href="#react-path-3783454"></use><g id="Color/Palette/Gray-01" mask="url(#react-mask-3783455)" fill-rule="evenodd" fill="#262E33"><rect id="🖍Color" x="0" y="0" width="264" height="110"></rect></g><path d="M102,61.7390531 L102,110 L95,110 L95,58.1502625 C97.2037542,59.4600576 99.5467694,60.6607878 102,61.7390531 Z M169,58.1502625 L169,98.5 C169,100.432997 167.432997,102 165.5,102 C163.567003,102 162,100.432997 162,98.5 L162,61.7390531 C164.453231,60.6607878 166.796246,59.4600576 169,58.1502625 Z" id="Straps" fill="#F4F4F4" fill-rule="evenodd" mask="url(#react-mask-3783455)"></path><path d="M90.9601329,12.7243537 C75.9093095,15.5711782 65.5,21.2428847 65.5,32.3076923 C65.5,52.0200095 98.5376807,68 132,68 C165.462319,68 198.5,52.0200095 198.5,32.3076923 C198.5,21.2428847 188.09069,15.5711782 173.039867,12.7243537 C182.124921,16.0744598 188,21.7060546 188,31.0769231 C188,51.4689754 160.178795,68 132,68 C103.821205,68 76,51.4689754 76,31.0769231 C76,21.7060546 81.8750795,16.0744598 90.9601329,12.7243537 Z" id="Shadow" fill-opacity="0.16" fill="#000000" fill-rule="evenodd" mask="url(#react-mask-3783455)"></path></g><g id="Face" transform="translate(76.000000, 82.000000)" fill="#000000"><g id="Mouth/Serious" transform="translate(2.000000, 52.000000)" fill="#000000" fill-opacity="0.699999988"><rect id="Why-so-serious?" x="42" y="18" width="24" height="6" rx="3"></rect></g><g id="Nose/Default" transform="translate(28.000000, 40.000000)" fill-opacity="0.16"><path d="M16,8 C16,12.418278 21.372583,16 28,16 L28,16 C34.627417,16 40,12.418278 40,8" id="Nose"></path></g><g id="Eyes/Closed-😌" transform="translate(0.000000, 8.000000)" fill-opacity="0.599999964"><path d="M16.1601674,32.4473116 C18.006676,28.648508 22.1644225,26 26.9975803,26 C31.8136766,26 35.9591217,28.629842 37.8153518,32.4071242 C38.3667605,33.5291977 37.5821037,34.4474817 36.790607,33.7670228 C34.3395063,31.6597833 30.8587163,30.3437884 26.9975803,30.3437884 C23.2572061,30.3437884 19.8737584,31.5787519 17.4375392,33.5716412 C16.5467928,34.3002944 15.6201012,33.5583844 16.1601674,32.4473116 Z" id="Closed-Eye" transform="translate(27.000000, 30.000000) scale(1, -1) translate(-27.000000, -30.000000) "></path><path d="M74.1601674,32.4473116 C76.006676,28.648508 80.1644225,26 84.9975803,26 C89.8136766,26 93.9591217,28.629842 95.8153518,32.4071242 C96.3667605,33.5291977 95.5821037,34.4474817 94.790607,33.7670228 C92.3395063,31.6597833 88.8587163,30.3437884 84.9975803,30.3437884 C81.2572061,30.3437884 77.8737584,31.5787519 75.4375392,33.5716412 C74.5467928,34.3002944 73.6201012,33.5583844 74.1601674,32.4473116 Z" id="Closed-Eye" transform="translate(85.000000, 30.000000) scale(1, -1) translate(-85.000000, -30.000000) "></path></g><g id="Eyebrow/Natural/Default-Natural" fill-opacity="0.599999964"><path d="M26.0390934,6.21012364 C20.2775554,6.98346216 11.2929313,12.0052479 12.04426,17.8178111 C12.0689481,18.0080543 12.3567302,18.0673468 12.4809077,17.9084937 C14.9674041,14.7203351 34.1927973,10.0365481 41.1942673,11.0147151 C41.8350523,11.1044465 42.2580662,10.4430343 41.8210501,10.0302067 C38.0765663,6.49485426 31.2003792,5.51224825 26.0390934,6.21012364" id="Eyebrow" transform="translate(27.000000, 12.000000) rotate(5.000000) translate(-27.000000, -12.000000) "></path><path d="M85.0390934,6.21012364 C79.2775554,6.98346216 70.2929313,12.0052479 71.04426,17.8178111 C71.0689481,18.0080543 71.3567302,18.0673468 71.4809077,17.9084937 C73.9674041,14.7203351 93.1927973,10.0365481 100.194267,11.0147151 C100.835052,11.1044465 101.258066,10.4430343 100.82105,10.0302067 C97.0765663,6.49485426 90.2003792,5.51224825 85.0390934,6.21012364" id="Eyebrow" transform="translate(86.000000, 12.000000) scale(-1, 1) rotate(5.000000) translate(-86.000000, -12.000000) "></path></g></g><g id="Top" stroke-width="1" fill-rule="evenodd"><defs><rect id="react-path-3783460" x="0" y="0" width="264" height="280"></rect><path d="M94.2519269,52.0221149 C94.3749353,51.9677149 94.0696712,51.9468149 93.3361345,51.9595149 C94.2276637,51.9577149 94.5329279,51.9785149 94.2519269,52.0221149 M86.1169775,36.3015924 C86.1148422,36.2819924 86.1337548,36.4526924 86.1169775,36.3015924 M193.765056,70.7656665 C193.500946,67.448734 193.03295,64.1518864 192.246676,60.9110823 C191.622233,58.3353492 190.769007,55.8775343 189.760006,53.4200433 C189.150703,51.9353766 187.727538,49.8961062 187.560324,48.2944933 C187.395466,46.7168527 188.626521,44.969138 188.889285,43.1323368 C189.144311,41.3447761 189.100909,39.4652134 188.734183,37.6938503 C187.901144,33.6710288 185.140271,29.9300447 180.877167,28.8814158 C179.925362,28.6471994 177.913417,28.9358396 177.240862,28.3815597 C176.469729,27.7459682 175.932761,25.5806808 175.234637,24.7121687 C173.244224,22.2362125 170.13984,20.6417265 166.865887,21.1976261 C164.454917,21.606776 165.839391,22.1053363 164.032005,20.6864317 C163.027041,19.8976114 162.276095,18.6931622 161.300066,17.8392279 C159.832826,16.5563826 158.149588,15.4581893 156.408146,14.556958 C151.851325,12.19892 146.654249,10.4848961 141.564162,9.64942693 C132.278934,8.12523827 122.368926,9.45408458 113.368668,11.8688141 C108.890239,13.0703477 104.381531,14.5951842 100.222053,16.6117782 C98.4385542,17.4764029 97.4090304,18.1936301 95.5494951,18.4200717 C92.6207355,18.7767416 90.1404579,18.7589243 87.3661268,20.0009517 C78.8298269,23.8229236 74.9849256,32.6897818 78.3066539,41.1750259 C78.974835,42.8815988 79.8795374,44.3801954 81.1267416,45.7586062 C82.6474761,47.4392631 83.1975648,47.1085093 81.8877817,49.0411999 C79.9289949,51.9311653 78.2777195,55.0129095 76.9332826,58.2128958 C73.4043038,66.6145606 72.8138416,76.0771643 73.043634,85.0373203 C73.1240445,88.1741362 73.2586228,91.3495022 73.753198,94.4561907 C73.966841,95.8009106 74.0267283,98.3293468 75.0353925,99.3271154 C75.5471264,99.8331265 76.2762042,100.115288 77.0035997,99.9137903 C78.7130802,99.4401742 78.1253096,98.1787097 78.1650102,97.0076274 C78.364859,91.1240324 78.0950295,85.9191145 79.4943071,80.1064647 C80.5278683,75.8118486 82.2504702,71.9114806 84.4827873,68.0713675 C87.3213795,63.1871608 90.3857268,58.8977279 94.2895061,54.7155226 C95.2073299,53.7320079 95.4078515,53.3150832 96.6385698,53.243814 C97.5705244,53.1900382 98.9338023,53.8282213 99.8398505,54.0491558 C101.837665,54.5360539 103.83918,55.0174448 105.873331,55.3452831 C109.613261,55.9481556 113.316519,55.9886494 117.090094,55.8704074 C124.516459,55.6381346 131.974787,55.1172217 139.175061,53.2470535 C143.956964,52.00535 148.196516,49.7762443 152.776887,48.1422364 C152.858644,48.1130808 154.006596,47.2951049 154.207791,47.3284719 C154.488723,47.3747968 156.184746,49.1542588 156.471061,49.3784327 C158.696649,51.1238798 161.137899,51.8566566 163.541467,53.2081794 C166.504881,54.8745825 163.634999,52.4899804 165.269452,54.5668292 C165.745859,55.1716454 165.989782,56.2931632 166.371984,56.9783192 C167.587899,59.1610999 169.279548,61.0795367 171.302932,62.6017816 C173.258018,64.0725184 176.196198,64.7829426 177.193087,66.697168 C177.961865,68.1740599 178.220929,70.1812592 178.841334,71.7579279 C180.468722,75.8931602 182.617937,79.7494709 184.767152,83.6443317 C186.498502,86.7830913 188.392354,89.5250111 188.584801,93.1117947 C188.651754,94.3603012 187.463764,101.849397 190.357534,99.5716982 C190.786502,99.2341415 191.711391,95.415733 191.901483,94.7678314 C192.672616,92.135083 192.94682,89.3866841 193.29605,86.6816947 C193.990474,81.3021672 194.218584,76.1837441 193.765056,70.7656665" id="react-path-3783459"></path><filter x="-0.8%" y="-2.0%" width="101.5%" height="108.0%" filterUnits="objectBoundingBox" id="react-filter-3783456"><feOffset dx="0" dy="2" in="SourceAlpha" result="shadowOffsetOuter1"></feOffset><feColorMatrix values="0 0 0 0 0   0 0 0 0 0   0 0 0 0 0  0 0 0 0.16 0" type="matrix" in="shadowOffsetOuter1" result="shadowMatrixOuter1"></feColorMatrix><feMerge><feMergeNode in="shadowMatrixOuter1"></feMergeNode><feMergeNode in="SourceGraphic"></feMergeNode></feMerge></filter></defs><mask id="react-mask-3783458" fill="white"><use xlink:href="#react-path-3783460"></use></mask><g id="Mask"></g><g id="Top/Short-Hair/Short-Curly" mask="url(#react-mask-3783458)"><g transform="translate(-1.000000, 0.000000)"><g id="Facial-Hair/Beard-Medium" transform="translate(49.000000, 72.000000)"><defs><path d="M105.017591,94.1296214 C101.150441,99.7213834 98.257542,95.9467308 94.1374777,92.8762163 C91.6567227,91.0272796 87.9608129,88.7275108 84.5044337,88.8410391 C81.0477114,88.7275108 77.3518016,91.0272796 74.8710466,92.8762163 C70.7509822,95.9467308 67.8580835,99.7213834 63.9909333,94.1296214 C61.0884259,89.9323547 62.3028943,82.8739117 65.014944,78.9027173 C68.8738581,73.2512381 74.1088724,75.9847769 79.9622738,75.3400279 C81.5538829,75.1648137 83.1526985,74.7228407 84.5044337,74 C85.856169,74.7228407 87.4546414,75.1648137 89.0462504,75.3400279 C94.899995,75.9847769 100.134666,73.2512381 103.993923,78.9027173 C106.70563,82.8739117 107.920098,89.9323547 105.017591,94.1296214 M140.39109,26 C136.966521,40.0748212 135.393023,54.4337754 132.909944,68.6711471 C132.392536,71.6390145 131.826063,74.5963095 131.224594,77.5496398 C131.098329,78.1697764 130.973781,80.4725746 130.362704,80.7643064 C128.511632,81.6484223 124.739149,76.9466834 123.730409,75.8851496 C121.196893,73.219256 118.684993,70.5292442 115.599415,68.437233 C109.364783,64.2102603 102.065485,61.7108818 94.4700836,61.117837 C91.2922091,60.8693859 86.9951134,61.3025234 84.000116,63.1104016 C81.0051185,61.3025234 76.7080229,60.8693859 73.5298053,61.117837 C65.9344039,61.7108818 58.6351055,64.2102603 52.4004739,68.437233 C49.3148957,70.5292442 46.8033387,73.219256 44.2694796,75.8851496 C43.2607395,76.9466834 39.4882573,81.6484223 37.6371849,80.7643064 C37.0261079,80.4725746 36.9015594,78.1697764 36.7752954,77.5496398 C36.1738255,74.5963095 35.6073527,71.6390145 35.0899445,68.6711471 C32.6072086,54.4337754 31.0337113,40.0748212 27.6091415,26 C26.6127533,26 25.7385119,44.7478165 25.6273446,46.4945731 C25.174784,53.5889755 24.6463963,60.5254529 25.3216346,67.6261326 C26.485803,79.8749043 27.6993791,95.2339402 37.032627,104.58753 C45.4659003,113.039493 57.7103052,114.806417 68.2713185,120.141327 C69.631059,120.828202 71.4347824,121.676306 73.3798667,122.37111 C75.4289129,123.934171 79.4926946,125 84.1740722,125 C89.0846465,125 93.3155222,123.827456 95.2540874,122.137856 C96.9548781,121.49261 98.5180822,120.752874 99.7285704,120.141327 C110.288776,114.805245 122.533989,113.039493 130.967262,104.58753 C140.30051,95.2339402 141.514086,79.8749043 142.678597,67.6261326 C143.353493,60.5254529 142.825105,53.5889755 142.372887,46.4945731 C142.261377,44.7478165 141.387136,26 140.39109,26 Z" id="react-path-3783462"></path></defs><mask id="react-mask-3783461" fill="white"><use xlink:href="#react-path-3783462"></use></mask><use id="Beardness" fill="#252E32" fill-rule="evenodd" xlink:href="#react-path-3783462"></use><g id="Color/Hair/Brown" mask="url(#react-mask-3783461)" fill="#2C1B18"><g transform="translate(-32.000000, 0.000000)" id="Color"><rect x="0" y="0" width="264" height="244"></rect></g></g></g><mask id="react-mask-3783457" fill="white"><use xlink:href="#react-path-3783459"></use></mask><use id="Short-Hair" stroke="none" fill="#28354B" fill-rule="evenodd" xlink:href="#react-path-3783459"></use><g id="Skin/👶🏽-03-Brown" mask="url(#react-mask-3783457)" fill="#2C1B18"><g transform="translate(0.000000, 0.000000) " id="Color"><rect x="0" y="0" width="264" height="280"></rect></g></g><g id="Top/_Resources/Prescription-02" fill="none" transform="translate(62.000000, 85.000000)" stroke-width="1"><defs><filter x="-0.8%" y="-2.4%" width="101.5%" height="109.8%" filterUnits="objectBoundingBox" id="react-filter-3783463"><feOffset dx="0" dy="2" in="SourceAlpha" result="shadowOffsetOuter1"></feOffset><feColorMatrix values="0 0 0 0 0   0 0 0 0 0   0 0 0 0 0  0 0 0 0.2 0" type="matrix" in="shadowOffsetOuter1" result="shadowMatrixOuter1"></feColorMatrix><feMerge><feMergeNode in="shadowMatrixOuter1"></feMergeNode><feMergeNode in="SourceGraphic"></feMergeNode></feMerge></filter></defs><g id="Wayfarers" filter="url(#react-filter-3783463)" transform="translate(6.000000, 7.000000)" fill="#252C2F"><path d="M34,41 L31.2421498,41 C17.3147125,41 9,33.3359286 9,20.5 C9,10.127 10.8170058,0 32.5299306,0 L35.4700694,0 C57.1829942,0 59,10.127 59,20.5 C59,32.5686429 48.7212748,41 34,41 Z M32.3853606,6 C13,6 13,12.8410159 13,21.5015498 C13,28.5719428 16.116254,37 30.9709365,37 L34,37 C46.3649085,37 55,30.6270373 55,21.5015498 C55,12.8410159 55,6 35.6146394,6 L32.3853606,6 Z" id="Left" fill-rule="nonzero"></path><path d="M96,41 L93.2421498,41 C79.3147125,41 71,33.3359286 71,20.5 C71,10.127 72.8170058,0 94.5299306,0 L97.4700694,0 C119.182994,0 121,10.127 121,20.5 C121,32.5686429 110.721275,41 96,41 Z M94.3853606,6 C75,6 75,12.8410159 75,21.5015498 C75,28.5719428 78.1194833,37 92.9709365,37 L96,37 C108.364909,37 117,30.6270373 117,21.5015498 C117,12.8410159 117,6 97.6146394,6 L94.3853606,6 Z" id="Right" fill-rule="nonzero"></path><path d="M2.95454545,5.77156439 C3.64590909,5.09629136 11.2095455,0 32.5,0 C50.3513636,0 54.1302273,1.85267217 59.8502273,4.6518809 L60.2689233,4.85850899 C60.6666014,4.99901896 62.7002447,5.68982981 65.0790606,5.76579519 C67.2462948,5.67278567 69.1000195,5.08540191 69.641698,4.89719767 C76.1703915,1.7220864 82.5610971,0 97.5,0 C118.790455,0 126.354091,5.09629136 127.045455,5.77156439 C128.679318,5.77156439 130,7.06150904 130,8.65734659 L130,11.5431288 C130,13.1389663 128.679318,14.428911 127.045455,14.428911 C127.045455,14.428911 120.143997,14.428911 120.143997,17.3146932 C120.143997,20.2004754 118.181818,13.1389663 118.181818,11.5431288 L118.181818,8.73240251 C114.578575,7.35340151 108.128411,4.78617535 97.5,4.78617535 C85.6584651,4.78617535 79.7610984,6.88602813 74.7022935,8.97112368 L74.7588636,9.10752861 L74.7563667,11.0937608 L72.5391666,16.4436339 L69.8004908,15.3608351 C69.5558969,15.2641292 69.0281396,15.090392 68.2963505,14.9099044 C66.256272,14.4067419 64.1589087,14.253569 62.3040836,14.6343084 C61.6235903,14.7739931 60.9922286,14.9836085 60.4128127,15.266732 L57.7704824,16.5578701 L55.1266751,11.3962031 L55.2440909,9.10175705 L55.3248203,8.90683855 C50.9620526,6.87386374 46.9392639,4.78617535 32.5,4.78617535 C21.8721459,4.78617535 15.422131,7.3524397 11.8181818,8.7314671 L11.8181818,11.5431288 C11.8181818,13.1389663 8.86363636,20.2004754 8.86363636,17.3146932 C8.86363636,14.428911 2.95454545,14.428911 2.95454545,14.428911 C1.32363636,14.428911 0,13.1389663 0,11.5431288 L0,8.65734659 C0,7.06150904 1.32363636,5.77156439 2.95454545,5.77156439 Z" id="Stuff" fill-rule="nonzero"></path></g></g></g></g></g></g></g></g></g>` },
       },
       bia: {
         idle: { vb: '0 0 264 280', corpo: `<desc>Created with getavataaars.com</desc><defs><circle id="react-path-1060387" cx="120" cy="120" r="120"></circle><path d="M12,160 C12,226.27417 65.72583,280 132,280 C198.27417,280 252,226.27417 252,160 L264,160 L264,-1.42108547e-14 L-3.19744231e-14,-1.42108547e-14 L-3.19744231e-14,160 L12,160 Z" id="react-path-1060388"></path><path d="M124,144.610951 L124,163 L128,163 L128,163 C167.764502,163 200,195.235498 200,235 L200,244 L0,244 L0,235 C-4.86974701e-15,195.235498 32.235498,163 72,163 L72,163 L76,163 L76,144.610951 C58.7626345,136.422372 46.3722246,119.687011 44.3051388,99.8812385 C38.4803105,99.0577866 34,94.0521096 34,88 L34,74 C34,68.0540074 38.3245733,63.1180731 44,62.1659169 L44,56 L44,56 C44,25.072054 69.072054,5.68137151e-15 100,0 L100,0 L100,0 C130.927946,-5.68137151e-15 156,25.072054 156,56 L156,62.1659169 C161.675427,63.1180731 166,68.0540074 166,74 L166,88 C166,94.0521096 161.51969,99.0577866 155.694861,99.8812385 C153.627775,119.687011 141.237365,136.422372 124,144.610951 Z" id="react-path-1060389"></path></defs><g id="Avataaar" stroke="none" stroke-width="1" fill="none" fill-rule="evenodd"><g transform="translate(-825.000000, -1100.000000)" id="Avataaar/Circle"><g transform="translate(825.000000, 1100.000000)"><g id="Mask"></g><g id="Avataaar" stroke-width="1" fill-rule="evenodd" mask="url(#react-mask-1060391)"><g id="Body" transform="translate(32.000000, 36.000000)"><mask id="react-mask-1060392" fill="white"><use xlink:href="#react-path-1060389"></use></mask><use fill="#D0C6AC" xlink:href="#react-path-1060389"></use><g id="Skin/👶🏽-03-Brown" mask="url(#react-mask-1060392)" fill="#EDB98A"><g transform="translate(0.000000, 0.000000)" id="Color"><rect x="0" y="0" width="264" height="280"></rect></g></g><path d="M156,79 L156,102 C156,132.927946 130.927946,158 100,158 C69.072054,158 44,132.927946 44,102 L44,79 L44,94 C44,124.927946 69.072054,150 100,150 C130.927946,150 156,124.927946 156,94 L156,79 Z" id="Neck-Shadow" fill-opacity="0.100000001" fill="#000000" mask="url(#react-mask-1060392)"></path></g><g id="Clothing/Shirt-Crew-Neck" transform="translate(0.000000, 170.000000)"><defs><path d="M165.960472,29.2949161 C202.936473,32.3249982 232,63.2942856 232,101.051724 L232,110 L32,110 L32,101.051724 C32,62.9525631 61.591985,31.7649812 99.0454063,29.2195264 C99.0152598,29.5931145 99,29.9692272 99,30.3476251 C99,42.2107177 113.998461,51.8276544 132.5,51.8276544 C151.001539,51.8276544 166,42.2107177 166,30.3476251 C166,29.9946691 165.986723,29.6437014 165.960472,29.2949161 Z" id="react-path-1060393"></path></defs><mask id="react-mask-1060394" fill="white"><use xlink:href="#react-path-1060393"></use></mask><use id="Clothes" fill="#E6E6E6" fill-rule="evenodd" xlink:href="#react-path-1060393"></use><g id="Color/Palette/Gray-01" mask="url(#react-mask-1060394)" fill-rule="evenodd" fill="#8357BF"><rect id="🖍Color" x="0" y="0" width="264" height="110"></rect></g><g id="Shadowy" opacity="0.599999964" stroke-width="1" fill-rule="evenodd" mask="url(#react-mask-1060394)" fill-opacity="0.16" fill="#000000"><g transform="translate(92.000000, 4.000000)" id="Hola-👋🏼"><ellipse cx="40.5" cy="27.8476251" rx="39.6351047" ry="26.9138272"></ellipse></g></g></g><g id="Face" transform="translate(76.000000, 82.000000)" fill="#000000"><g id="Mouth/Smile" transform="translate(2.000000, 52.000000)"><defs><path d="M35.117844,15.1280772 C36.1757121,24.6198025 44.2259873,32 54,32 C63.8042055,32 71.8740075,24.574136 72.8917593,15.0400546 C72.9736685,14.272746 72.1167429,13 71.042767,13 C56.1487536,13 44.7379213,13 37.0868244,13 C36.0066168,13 35.0120058,14.1784435 35.117844,15.1280772 Z" id="react-path-1060395"></path></defs><mask id="react-mask-1060396" fill="white"><use xlink:href="#react-path-1060395"></use></mask><use id="Mouth" fill-opacity="0.699999988" fill="#000000" fill-rule="evenodd" xlink:href="#react-path-1060395"></use><rect id="Teeth" fill="#FFFFFF" fill-rule="evenodd" mask="url(#react-mask-1060396)" x="39" y="2" width="31" height="16" rx="5"></rect><g id="Tongue" stroke-width="1" fill-rule="evenodd" mask="url(#react-mask-1060396)" fill="#FF4F6D"><g transform="translate(38.000000, 24.000000)"><circle cx="11" cy="11" r="11"></circle><circle cx="21" cy="11" r="11"></circle></g></g></g><g id="Nose/Default" transform="translate(28.000000, 40.000000)" fill-opacity="0.16"><path d="M16,8 C16,12.418278 21.372583,16 28,16 L28,16 C34.627417,16 40,12.418278 40,8" id="Nose"></path></g><g id="Eyes/Default-😀" transform="translate(0.000000, 8.000000)" fill-opacity="0.599999964"><circle id="Eye" cx="30" cy="22" r="6"></circle><circle id="Eye" cx="82" cy="22" r="6"></circle></g><g id="Eyebrow/Natural/Default-Natural" fill-opacity="0.599999964"><path d="M26.0390934,6.21012364 C20.2775554,6.98346216 11.2929313,12.0052479 12.04426,17.8178111 C12.0689481,18.0080543 12.3567302,18.0673468 12.4809077,17.9084937 C14.9674041,14.7203351 34.1927973,10.0365481 41.1942673,11.0147151 C41.8350523,11.1044465 42.2580662,10.4430343 41.8210501,10.0302067 C38.0765663,6.49485426 31.2003792,5.51224825 26.0390934,6.21012364" id="Eyebrow" transform="translate(27.000000, 12.000000) rotate(5.000000) translate(-27.000000, -12.000000) "></path><path d="M85.0390934,6.21012364 C79.2775554,6.98346216 70.2929313,12.0052479 71.04426,17.8178111 C71.0689481,18.0080543 71.3567302,18.0673468 71.4809077,17.9084937 C73.9674041,14.7203351 93.1927973,10.0365481 100.194267,11.0147151 C100.835052,11.1044465 101.258066,10.4430343 100.82105,10.0302067 C97.0765663,6.49485426 90.2003792,5.51224825 85.0390934,6.21012364" id="Eyebrow" transform="translate(86.000000, 12.000000) scale(-1, 1) rotate(5.000000) translate(-86.000000, -12.000000) "></path></g></g><g id="Top" stroke-width="1" fill-rule="evenodd"><defs><rect id="react-path-1060399" x="0" y="0" width="264" height="280"></rect><path d="M48.7246602,89.2187346 C44.7420117,91.1711421 42,95.2653555 42,100 L42,113 C42,119.018625 46.4308707,124.002364 52.2085808,124.867187 C53.9518066,145.114792 66.4692178,162.282984 84,170.610951 L84,189 L80,189 L80,189 C78.4137385,189 76.8394581,189.051297 75.2787271,189.152323 C70.3620966,186.639548 65.7724391,183.578174 61.590479,180.048925 C57.2814481,181.318646 52.7202934,182 48,182 C21.490332,182 0,160.509668 0,134 C0,119.590902 6.34904132,106.664702 16.4021743,97.866349 C11.1175746,90.6060809 8,81.6671147 8,72 C8,50.160623 23.9112243,32.0375116 44.7738169,28.5905219 C51.0188047,11.8901624 67.1208542,0 86,0 C94.0143172,0 101.528186,2.14267429 108,5.88641659 C114.471814,2.14267429 121.985683,0 130,0 C148.879146,0 164.981195,11.8901624 171.226183,28.5905219 C192.088776,32.0375116 208,50.160623 208,72 C208,81.6671147 204.882425,90.6060809 199.597826,97.866349 C209.650959,106.664702 216,119.590902 216,134 C216,160.509668 194.509668,182 168,182 C163.279707,182 158.718552,181.318646 154.409521,180.048925 C150.227561,183.578174 145.637903,186.639548 140.721273,189.152323 C139.160542,189.051297 137.586262,189 136,189 L136,189 L132,189 L132,170.610951 C149.530782,162.282984 162.048193,145.114792 163.791419,124.867187 C169.569129,124.002364 174,119.018625 174,113 L174,100 C174,95.778427 171.820067,92.0660046 168.524466,89.9269981 C167.450514,89.5343912 166.370126,89.0424011 165.289302,88.4564081 C164.868503,88.3367332 164.43828,88.2394463 164,88.1659169 L164,87.7130302 C155.319369,82.4100235 146.764694,71.1747746 141.449951,56.7992877 C131.312295,58.8351061 119.547256,60 107,60 C95.038684,60 83.7882341,58.9413637 73.9808476,57.0787685 C68.7546917,71.0641476 60.4637821,82.0431875 52,87.4230168 L52,88.1659169 C50.9777341,88.3374206 49.9992949,88.6381729 49.0820602,89.050796 C48.9628927,89.1079465 48.8437566,89.1639284 48.7246602,89.2187346 Z" id="react-path-1060400"></path></defs><mask id="react-mask-1060397" fill="white"><use xlink:href="#react-path-1060399"></use></mask><g id="Mask"></g><g id="Top/Long-Hair/Curly" mask="url(#react-mask-1060397)"><g transform="translate(-1.000000, 0.000000)"><path d="M105.984735,27.7643628 C114.013215,26.6267967 122.796163,26 132,26 C142.358003,26 152.182939,26.7938545 160.999342,28.2161842 C183.451688,38.7497687 199,61.559133 199,88 L199,105.044138 C187.461887,104.672508 173.831239,90.7644306 166.449951,70.7992877 C156.312295,72.8351061 144.547256,74 132,74 C120.038684,74 108.788234,72.9413637 98.9808476,71.0787685 C91.6758772,90.6271291 78.3831001,104.301811 67,105.021902 L67,88 L67,88 C67,61.1745453 83.0039076,38.0870034 105.984735,27.7643628 Z" id="Shadow" fill-opacity="0.16" fill="#000000" fill-rule="evenodd"></path><g id="Hair" stroke-width="1" fill="none" fill-rule="evenodd" transform="translate(25.000000, 10.000000)"><mask id="react-mask-1060398" fill="white"><use xlink:href="#react-path-1060400"></use></mask><use id="Curly!" fill="#314756" xlink:href="#react-path-1060400"></use><g id="Skin/👶🏽-03-Brown" mask="url(#react-mask-1060398)" fill="#724133"><g transform="translate(0.000000, 0.000000) " id="Color"><rect x="0" y="0" width="264" height="280"></rect></g></g></g></g></g></g></g></g></g></g>` },
@@ -1206,6 +1567,7 @@ window.__ModuleLoader__.load({
         waiting: { vb: '0 0 264 280', corpo: `<desc>Created with getavataaars.com</desc><defs><circle id="react-path-1462456" cx="120" cy="120" r="120"></circle><path d="M12,160 C12,226.27417 65.72583,280 132,280 C198.27417,280 252,226.27417 252,160 L264,160 L264,-1.42108547e-14 L-3.19744231e-14,-1.42108547e-14 L-3.19744231e-14,160 L12,160 Z" id="react-path-1462457"></path><path d="M124,144.610951 L124,163 L128,163 L128,163 C167.764502,163 200,195.235498 200,235 L200,244 L0,244 L0,235 C-4.86974701e-15,195.235498 32.235498,163 72,163 L72,163 L76,163 L76,144.610951 C58.7626345,136.422372 46.3722246,119.687011 44.3051388,99.8812385 C38.4803105,99.0577866 34,94.0521096 34,88 L34,74 C34,68.0540074 38.3245733,63.1180731 44,62.1659169 L44,56 L44,56 C44,25.072054 69.072054,5.68137151e-15 100,0 L100,0 L100,0 C130.927946,-5.68137151e-15 156,25.072054 156,56 L156,62.1659169 C161.675427,63.1180731 166,68.0540074 166,74 L166,88 C166,94.0521096 161.51969,99.0577866 155.694861,99.8812385 C153.627775,119.687011 141.237365,136.422372 124,144.610951 Z" id="react-path-1462458"></path></defs><g id="Avataaar" stroke="none" stroke-width="1" fill="none" fill-rule="evenodd"><g transform="translate(-825.000000, -1100.000000)" id="Avataaar/Circle"><g transform="translate(825.000000, 1100.000000)"><g id="Mask"></g><g id="Avataaar" stroke-width="1" fill-rule="evenodd" mask="url(#react-mask-1462460)"><g id="Body" transform="translate(32.000000, 36.000000)"><mask id="react-mask-1462461" fill="white"><use xlink:href="#react-path-1462458"></use></mask><use fill="#D0C6AC" xlink:href="#react-path-1462458"></use><g id="Skin/👶🏽-03-Brown" mask="url(#react-mask-1462461)" fill="#EDB98A"><g transform="translate(0.000000, 0.000000)" id="Color"><rect x="0" y="0" width="264" height="280"></rect></g></g><path d="M156,79 L156,102 C156,132.927946 130.927946,158 100,158 C69.072054,158 44,132.927946 44,102 L44,79 L44,94 C44,124.927946 69.072054,150 100,150 C130.927946,150 156,124.927946 156,94 L156,79 Z" id="Neck-Shadow" fill-opacity="0.100000001" fill="#000000" mask="url(#react-mask-1462461)"></path></g><g id="Clothing/Shirt-Crew-Neck" transform="translate(0.000000, 170.000000)"><defs><path d="M165.960472,29.2949161 C202.936473,32.3249982 232,63.2942856 232,101.051724 L232,110 L32,110 L32,101.051724 C32,62.9525631 61.591985,31.7649812 99.0454063,29.2195264 C99.0152598,29.5931145 99,29.9692272 99,30.3476251 C99,42.2107177 113.998461,51.8276544 132.5,51.8276544 C151.001539,51.8276544 166,42.2107177 166,30.3476251 C166,29.9946691 165.986723,29.6437014 165.960472,29.2949161 Z" id="react-path-1462462"></path></defs><mask id="react-mask-1462463" fill="white"><use xlink:href="#react-path-1462462"></use></mask><use id="Clothes" fill="#E6E6E6" fill-rule="evenodd" xlink:href="#react-path-1462462"></use><g id="Color/Palette/Gray-01" mask="url(#react-mask-1462463)" fill-rule="evenodd" fill="#8357BF"><rect id="🖍Color" x="0" y="0" width="264" height="110"></rect></g><g id="Shadowy" opacity="0.599999964" stroke-width="1" fill-rule="evenodd" mask="url(#react-mask-1462463)" fill-opacity="0.16" fill="#000000"><g transform="translate(92.000000, 4.000000)" id="Hola-👋🏼"><ellipse cx="40.5" cy="27.8476251" rx="39.6351047" ry="26.9138272"></ellipse></g></g></g><g id="Face" transform="translate(76.000000, 82.000000)" fill="#000000"><g id="Mouth/Sad" transform="translate(2.000000, 52.000000)" fill-opacity="0.699999988" fill="#000000"><path d="M40.0582943,16.6539438 C40.7076459,23.6831146 46.7016363,28.3768187 54,28.3768187 C61.3416045,28.3768187 67.3633339,23.627332 67.9526838,16.5287605 C67.9840218,16.1513016 67.0772329,15.8529531 66.6289111,16.077395 C61.0902255,18.8502083 56.8805885,20.2366149 54,20.2366149 C51.1558456,20.2366149 47.0072148,18.8804569 41.5541074,16.168141 C41.0473376,15.9160792 40.0197139,16.2363147 40.0582943,16.6539438 Z" id="Mouth" transform="translate(54.005357, 22.188409) scale(1, -1) translate(-54.005357, -22.188409) "></path></g><g id="Nose/Default" transform="translate(28.000000, 40.000000)" fill-opacity="0.16"><path d="M16,8 C16,12.418278 21.372583,16 28,16 L28,16 C34.627417,16 40,12.418278 40,8" id="Nose"></path></g><g id="Eyes/Default-😀" transform="translate(0.000000, 8.000000)" fill-opacity="0.599999964"><circle id="Eye" cx="30" cy="22" r="6"></circle><circle id="Eye" cx="82" cy="22" r="6"></circle></g><g id="Eyebrow/Outline/Sad-Concerned" fill-opacity="0.599999964" fill-rule="nonzero"><path d="M15.9726042,19.4088529 C17.452356,11.0203704 30.0622688,5.22829657 39.2106453,8.9774793 C40.2254706,9.39337449 41.4016967,8.94600219 41.8378196,7.97824531 C42.2739426,7.01048842 41.8048116,5.88881678 40.7899862,5.47292159 C29.3457328,0.782843812 13.9550264,7.85221132 12.0280273,18.7760684 C11.84479,19.8148122 12.5792704,20.798534 13.6685352,20.9732726 C14.7578,21.1480113 15.7893668,20.4475967 15.9726042,19.4088529 Z" id="Eyebrow" transform="translate(27.000414, 12.500000) scale(-1, -1) translate(-27.000414, -12.500000) "></path><path d="M73.9726042,19.4088529 C75.452356,11.0203704 88.0622688,5.22829657 97.2106453,8.9774793 C98.2254706,9.39337449 99.4016967,8.94600219 99.8378196,7.97824531 C100.273943,7.01048842 99.8048116,5.88881678 98.7899862,5.47292159 C87.3457328,0.782843812 71.9550264,7.85221132 70.0280273,18.7760684 C69.84479,19.8148122 70.5792704,20.798534 71.6685352,20.9732726 C72.7578,21.1480113 73.7893668,20.4475967 73.9726042,19.4088529 Z" id="Eyebrow" transform="translate(85.000414, 12.500000) scale(1, -1) translate(-85.000414, -12.500000) "></path></g></g><g id="Top" stroke-width="1" fill-rule="evenodd"><defs><rect id="react-path-1462466" x="0" y="0" width="264" height="280"></rect><path d="M48.7246602,89.2187346 C44.7420117,91.1711421 42,95.2653555 42,100 L42,113 C42,119.018625 46.4308707,124.002364 52.2085808,124.867187 C53.9518066,145.114792 66.4692178,162.282984 84,170.610951 L84,189 L80,189 L80,189 C78.4137385,189 76.8394581,189.051297 75.2787271,189.152323 C70.3620966,186.639548 65.7724391,183.578174 61.590479,180.048925 C57.2814481,181.318646 52.7202934,182 48,182 C21.490332,182 0,160.509668 0,134 C0,119.590902 6.34904132,106.664702 16.4021743,97.866349 C11.1175746,90.6060809 8,81.6671147 8,72 C8,50.160623 23.9112243,32.0375116 44.7738169,28.5905219 C51.0188047,11.8901624 67.1208542,0 86,0 C94.0143172,0 101.528186,2.14267429 108,5.88641659 C114.471814,2.14267429 121.985683,0 130,0 C148.879146,0 164.981195,11.8901624 171.226183,28.5905219 C192.088776,32.0375116 208,50.160623 208,72 C208,81.6671147 204.882425,90.6060809 199.597826,97.866349 C209.650959,106.664702 216,119.590902 216,134 C216,160.509668 194.509668,182 168,182 C163.279707,182 158.718552,181.318646 154.409521,180.048925 C150.227561,183.578174 145.637903,186.639548 140.721273,189.152323 C139.160542,189.051297 137.586262,189 136,189 L136,189 L132,189 L132,170.610951 C149.530782,162.282984 162.048193,145.114792 163.791419,124.867187 C169.569129,124.002364 174,119.018625 174,113 L174,100 C174,95.778427 171.820067,92.0660046 168.524466,89.9269981 C167.450514,89.5343912 166.370126,89.0424011 165.289302,88.4564081 C164.868503,88.3367332 164.43828,88.2394463 164,88.1659169 L164,87.7130302 C155.319369,82.4100235 146.764694,71.1747746 141.449951,56.7992877 C131.312295,58.8351061 119.547256,60 107,60 C95.038684,60 83.7882341,58.9413637 73.9808476,57.0787685 C68.7546917,71.0641476 60.4637821,82.0431875 52,87.4230168 L52,88.1659169 C50.9777341,88.3374206 49.9992949,88.6381729 49.0820602,89.050796 C48.9628927,89.1079465 48.8437566,89.1639284 48.7246602,89.2187346 Z" id="react-path-1462467"></path></defs><mask id="react-mask-1462464" fill="white"><use xlink:href="#react-path-1462466"></use></mask><g id="Mask"></g><g id="Top/Long-Hair/Curly" mask="url(#react-mask-1462464)"><g transform="translate(-1.000000, 0.000000)"><path d="M105.984735,27.7643628 C114.013215,26.6267967 122.796163,26 132,26 C142.358003,26 152.182939,26.7938545 160.999342,28.2161842 C183.451688,38.7497687 199,61.559133 199,88 L199,105.044138 C187.461887,104.672508 173.831239,90.7644306 166.449951,70.7992877 C156.312295,72.8351061 144.547256,74 132,74 C120.038684,74 108.788234,72.9413637 98.9808476,71.0787685 C91.6758772,90.6271291 78.3831001,104.301811 67,105.021902 L67,88 L67,88 C67,61.1745453 83.0039076,38.0870034 105.984735,27.7643628 Z" id="Shadow" fill-opacity="0.16" fill="#000000" fill-rule="evenodd"></path><g id="Hair" stroke-width="1" fill="none" fill-rule="evenodd" transform="translate(25.000000, 10.000000)"><mask id="react-mask-1462465" fill="white"><use xlink:href="#react-path-1462467"></use></mask><use id="Curly!" fill="#314756" xlink:href="#react-path-1462467"></use><g id="Skin/👶🏽-03-Brown" mask="url(#react-mask-1462465)" fill="#724133"><g transform="translate(0.000000, 0.000000) " id="Color"><rect x="0" y="0" width="264" height="280"></rect></g></g></g></g></g></g></g></g></g></g>` },
         error: { vb: '0 0 264 280', corpo: `<desc>Created with getavataaars.com</desc><defs><circle id="react-path-1462675" cx="120" cy="120" r="120"></circle><path d="M12,160 C12,226.27417 65.72583,280 132,280 C198.27417,280 252,226.27417 252,160 L264,160 L264,-1.42108547e-14 L-3.19744231e-14,-1.42108547e-14 L-3.19744231e-14,160 L12,160 Z" id="react-path-1462676"></path><path d="M124,144.610951 L124,163 L128,163 L128,163 C167.764502,163 200,195.235498 200,235 L200,244 L0,244 L0,235 C-4.86974701e-15,195.235498 32.235498,163 72,163 L72,163 L76,163 L76,144.610951 C58.7626345,136.422372 46.3722246,119.687011 44.3051388,99.8812385 C38.4803105,99.0577866 34,94.0521096 34,88 L34,74 C34,68.0540074 38.3245733,63.1180731 44,62.1659169 L44,56 L44,56 C44,25.072054 69.072054,5.68137151e-15 100,0 L100,0 L100,0 C130.927946,-5.68137151e-15 156,25.072054 156,56 L156,62.1659169 C161.675427,63.1180731 166,68.0540074 166,74 L166,88 C166,94.0521096 161.51969,99.0577866 155.694861,99.8812385 C153.627775,119.687011 141.237365,136.422372 124,144.610951 Z" id="react-path-1462677"></path></defs><g id="Avataaar" stroke="none" stroke-width="1" fill="none" fill-rule="evenodd"><g transform="translate(-825.000000, -1100.000000)" id="Avataaar/Circle"><g transform="translate(825.000000, 1100.000000)"><g id="Mask"></g><g id="Avataaar" stroke-width="1" fill-rule="evenodd" mask="url(#react-mask-1462679)"><g id="Body" transform="translate(32.000000, 36.000000)"><mask id="react-mask-1462680" fill="white"><use xlink:href="#react-path-1462677"></use></mask><use fill="#D0C6AC" xlink:href="#react-path-1462677"></use><g id="Skin/👶🏽-03-Brown" mask="url(#react-mask-1462680)" fill="#EDB98A"><g transform="translate(0.000000, 0.000000)" id="Color"><rect x="0" y="0" width="264" height="280"></rect></g></g><path d="M156,79 L156,102 C156,132.927946 130.927946,158 100,158 C69.072054,158 44,132.927946 44,102 L44,79 L44,94 C44,124.927946 69.072054,150 100,150 C130.927946,150 156,124.927946 156,94 L156,79 Z" id="Neck-Shadow" fill-opacity="0.100000001" fill="#000000" mask="url(#react-mask-1462680)"></path></g><g id="Clothing/Shirt-Crew-Neck" transform="translate(0.000000, 170.000000)"><defs><path d="M165.960472,29.2949161 C202.936473,32.3249982 232,63.2942856 232,101.051724 L232,110 L32,110 L32,101.051724 C32,62.9525631 61.591985,31.7649812 99.0454063,29.2195264 C99.0152598,29.5931145 99,29.9692272 99,30.3476251 C99,42.2107177 113.998461,51.8276544 132.5,51.8276544 C151.001539,51.8276544 166,42.2107177 166,30.3476251 C166,29.9946691 165.986723,29.6437014 165.960472,29.2949161 Z" id="react-path-1462681"></path></defs><mask id="react-mask-1462682" fill="white"><use xlink:href="#react-path-1462681"></use></mask><use id="Clothes" fill="#E6E6E6" fill-rule="evenodd" xlink:href="#react-path-1462681"></use><g id="Color/Palette/Gray-01" mask="url(#react-mask-1462682)" fill-rule="evenodd" fill="#8357BF"><rect id="🖍Color" x="0" y="0" width="264" height="110"></rect></g><g id="Shadowy" opacity="0.599999964" stroke-width="1" fill-rule="evenodd" mask="url(#react-mask-1462682)" fill-opacity="0.16" fill="#000000"><g transform="translate(92.000000, 4.000000)" id="Hola-👋🏼"><ellipse cx="40.5" cy="27.8476251" rx="39.6351047" ry="26.9138272"></ellipse></g></g></g><g id="Face" transform="translate(76.000000, 82.000000)" fill="#000000"><g id="Mouth/Grimace" transform="translate(2.000000, 52.000000)"><defs><rect id="react-path-1462683" x="24" y="9" width="60" height="22" rx="11"></rect></defs><rect id="Mouth" fill-opacity="0.599999964" fill="#000000" fill-rule="evenodd" x="22" y="7" width="64" height="26" rx="13"></rect><mask id="react-mask-1462684" fill="white"><use xlink:href="#react-path-1462683"></use></mask><use id="Mouth" fill="#FFFFFF" fill-rule="evenodd" xlink:href="#react-path-1462683"></use><path d="M71,22 L62,22 L62,34 L58,34 L58,22 L49,22 L49,34 L45,34 L45,22 L36,22 L36,34 L32,34 L32,22 L24,22 L24,18 L32,18 L32,6 L36,6 L36,18 L45,18 L45,6 L49,6 L49,18 L58,18 L58,6 L62,6 L62,18 L71,18 L71,6 L75,6 L75,18 L83.8666667,18 L83.8666667,22 L75,22 L75,34 L71,34 L71,22 Z" id="Grimace-Teeth" fill="#E6E6E6" fill-rule="evenodd" mask="url(#react-mask-1462684)"></path></g><g id="Nose/Default" transform="translate(28.000000, 40.000000)" fill-opacity="0.16"><path d="M16,8 C16,12.418278 21.372583,16 28,16 L28,16 C34.627417,16 40,12.418278 40,8" id="Nose"></path></g><g id="Eyes/Cry-😢" transform="translate(0.000000, 8.000000)"><circle id="Eye" fill-opacity="0.599999964" fill="#000000" fill-rule="evenodd" cx="30" cy="22" r="6"></circle><path d="M25,27 C25,27 19,34.2706667 19,38.2706667 C19,41.5846667 21.686,44.2706667 25,44.2706667 C28.314,44.2706667 31,41.5846667 31,38.2706667 C31,34.2706667 25,27 25,27 Z" id="Drop" fill="#92D9FF" fill-rule="nonzero"></path><circle id="Eye" fill-opacity="0.599999964" fill="#000000" fill-rule="evenodd" cx="82" cy="22" r="6"></circle></g><g id="Eyebrow/Natural/Angry-Natural" fill-opacity="0.599999964"><path d="M44.8565785,12.2282877 C44.8578785,12.2192877 44.8578785,12.2192877 44.8565785,12.2282877 M17.5862288,7.89238094 C15.2441598,8.3302947 13.0866155,9.78806858 12.1523766,12.0987479 C11.8009169,12.967391 11.3917103,14.9243181 11.7083227,15.8073302 C11.8284629,16.14295 12.0332321,16.1008692 12.9555234,16.0430509 C14.643791,15.9369937 16.9330912,13.6622369 18.7484684,13.2557982 C21.2753939,12.6899315 23.9825295,13.1148447 26.4961798,13.6882381 C30.8109365,14.6725177 36.4854008,17.7875215 40.9461842,16.1699775 C41.2783949,16.0495512 45.6210294,12.9225732 44.3685187,12.2769925 C43.9238011,11.9068186 41.1370145,12.0854053 40.6216067,11.9988489 C38.2277647,11.5971998 35.7297127,10.9345131 33.373373,10.3265657 C28.2329017,9.00016592 22.9666484,6.88073171 17.5862288,7.89238094" id="Eyebrows-The-Web" transform="translate(28.094701, 12.127505) rotate(17.000000) translate(-28.094701, -12.127505) "></path><path d="M100.918293,12.2094196 C100.919593,12.2004196 100.919593,12.2004196 100.918293,12.2094196 M73.5862288,7.89238094 C71.2441598,8.3302947 69.0866155,9.78806858 68.1523766,12.0987479 C67.8009169,12.967391 67.3917103,14.9243181 67.7083227,15.8073302 C67.8284629,16.14295 68.0332321,16.1008692 68.9555234,16.0430509 C70.643791,15.9369937 72.9330912,13.6622369 74.7484684,13.2557982 C77.2753939,12.6899315 79.9825295,13.1148447 82.4961798,13.6882381 C86.8109365,14.6725177 92.4854008,17.7875215 96.9461842,16.1699775 C97.2783949,16.0495512 101.621029,12.9225732 100.368519,12.2769925 C99.9238011,11.9068186 97.1370145,12.0854053 96.6216067,11.9988489 C94.2277647,11.5971998 91.7297127,10.9345131 89.373373,10.3265657 C84.2329017,9.00016592 78.9666484,6.88073171 73.5862288,7.89238094" id="Eyebrows-The-Web" transform="translate(84.094701, 12.127505) scale(-1, 1) rotate(17.000000) translate(-84.094701, -12.127505) "></path></g></g><g id="Top" stroke-width="1" fill-rule="evenodd"><defs><rect id="react-path-1462687" x="0" y="0" width="264" height="280"></rect><path d="M48.7246602,89.2187346 C44.7420117,91.1711421 42,95.2653555 42,100 L42,113 C42,119.018625 46.4308707,124.002364 52.2085808,124.867187 C53.9518066,145.114792 66.4692178,162.282984 84,170.610951 L84,189 L80,189 L80,189 C78.4137385,189 76.8394581,189.051297 75.2787271,189.152323 C70.3620966,186.639548 65.7724391,183.578174 61.590479,180.048925 C57.2814481,181.318646 52.7202934,182 48,182 C21.490332,182 0,160.509668 0,134 C0,119.590902 6.34904132,106.664702 16.4021743,97.866349 C11.1175746,90.6060809 8,81.6671147 8,72 C8,50.160623 23.9112243,32.0375116 44.7738169,28.5905219 C51.0188047,11.8901624 67.1208542,0 86,0 C94.0143172,0 101.528186,2.14267429 108,5.88641659 C114.471814,2.14267429 121.985683,0 130,0 C148.879146,0 164.981195,11.8901624 171.226183,28.5905219 C192.088776,32.0375116 208,50.160623 208,72 C208,81.6671147 204.882425,90.6060809 199.597826,97.866349 C209.650959,106.664702 216,119.590902 216,134 C216,160.509668 194.509668,182 168,182 C163.279707,182 158.718552,181.318646 154.409521,180.048925 C150.227561,183.578174 145.637903,186.639548 140.721273,189.152323 C139.160542,189.051297 137.586262,189 136,189 L136,189 L132,189 L132,170.610951 C149.530782,162.282984 162.048193,145.114792 163.791419,124.867187 C169.569129,124.002364 174,119.018625 174,113 L174,100 C174,95.778427 171.820067,92.0660046 168.524466,89.9269981 C167.450514,89.5343912 166.370126,89.0424011 165.289302,88.4564081 C164.868503,88.3367332 164.43828,88.2394463 164,88.1659169 L164,87.7130302 C155.319369,82.4100235 146.764694,71.1747746 141.449951,56.7992877 C131.312295,58.8351061 119.547256,60 107,60 C95.038684,60 83.7882341,58.9413637 73.9808476,57.0787685 C68.7546917,71.0641476 60.4637821,82.0431875 52,87.4230168 L52,88.1659169 C50.9777341,88.3374206 49.9992949,88.6381729 49.0820602,89.050796 C48.9628927,89.1079465 48.8437566,89.1639284 48.7246602,89.2187346 Z" id="react-path-1462688"></path></defs><mask id="react-mask-1462685" fill="white"><use xlink:href="#react-path-1462687"></use></mask><g id="Mask"></g><g id="Top/Long-Hair/Curly" mask="url(#react-mask-1462685)"><g transform="translate(-1.000000, 0.000000)"><path d="M105.984735,27.7643628 C114.013215,26.6267967 122.796163,26 132,26 C142.358003,26 152.182939,26.7938545 160.999342,28.2161842 C183.451688,38.7497687 199,61.559133 199,88 L199,105.044138 C187.461887,104.672508 173.831239,90.7644306 166.449951,70.7992877 C156.312295,72.8351061 144.547256,74 132,74 C120.038684,74 108.788234,72.9413637 98.9808476,71.0787685 C91.6758772,90.6271291 78.3831001,104.301811 67,105.021902 L67,88 L67,88 C67,61.1745453 83.0039076,38.0870034 105.984735,27.7643628 Z" id="Shadow" fill-opacity="0.16" fill="#000000" fill-rule="evenodd"></path><g id="Hair" stroke-width="1" fill="none" fill-rule="evenodd" transform="translate(25.000000, 10.000000)"><mask id="react-mask-1462686" fill="white"><use xlink:href="#react-path-1462688"></use></mask><use id="Curly!" fill="#314756" xlink:href="#react-path-1462688"></use><g id="Skin/👶🏽-03-Brown" mask="url(#react-mask-1462686)" fill="#724133"><g transform="translate(0.000000, 0.000000) " id="Color"><rect x="0" y="0" width="264" height="280"></rect></g></g></g></g></g></g></g></g></g></g>` },
         success: { vb: '0 0 264 280', corpo: `<desc>Created with getavataaars.com</desc><defs><circle id="react-path-1462519" cx="120" cy="120" r="120"></circle><path d="M12,160 C12,226.27417 65.72583,280 132,280 C198.27417,280 252,226.27417 252,160 L264,160 L264,-1.42108547e-14 L-3.19744231e-14,-1.42108547e-14 L-3.19744231e-14,160 L12,160 Z" id="react-path-1462520"></path><path d="M124,144.610951 L124,163 L128,163 L128,163 C167.764502,163 200,195.235498 200,235 L200,244 L0,244 L0,235 C-4.86974701e-15,195.235498 32.235498,163 72,163 L72,163 L76,163 L76,144.610951 C58.7626345,136.422372 46.3722246,119.687011 44.3051388,99.8812385 C38.4803105,99.0577866 34,94.0521096 34,88 L34,74 C34,68.0540074 38.3245733,63.1180731 44,62.1659169 L44,56 L44,56 C44,25.072054 69.072054,5.68137151e-15 100,0 L100,0 L100,0 C130.927946,-5.68137151e-15 156,25.072054 156,56 L156,62.1659169 C161.675427,63.1180731 166,68.0540074 166,74 L166,88 C166,94.0521096 161.51969,99.0577866 155.694861,99.8812385 C153.627775,119.687011 141.237365,136.422372 124,144.610951 Z" id="react-path-1462521"></path></defs><g id="Avataaar" stroke="none" stroke-width="1" fill="none" fill-rule="evenodd"><g transform="translate(-825.000000, -1100.000000)" id="Avataaar/Circle"><g transform="translate(825.000000, 1100.000000)"><g id="Mask"></g><g id="Avataaar" stroke-width="1" fill-rule="evenodd" mask="url(#react-mask-1462523)"><g id="Body" transform="translate(32.000000, 36.000000)"><mask id="react-mask-1462524" fill="white"><use xlink:href="#react-path-1462521"></use></mask><use fill="#D0C6AC" xlink:href="#react-path-1462521"></use><g id="Skin/👶🏽-03-Brown" mask="url(#react-mask-1462524)" fill="#EDB98A"><g transform="translate(0.000000, 0.000000)" id="Color"><rect x="0" y="0" width="264" height="280"></rect></g></g><path d="M156,79 L156,102 C156,132.927946 130.927946,158 100,158 C69.072054,158 44,132.927946 44,102 L44,79 L44,94 C44,124.927946 69.072054,150 100,150 C130.927946,150 156,124.927946 156,94 L156,79 Z" id="Neck-Shadow" fill-opacity="0.100000001" fill="#000000" mask="url(#react-mask-1462524)"></path></g><g id="Clothing/Shirt-Crew-Neck" transform="translate(0.000000, 170.000000)"><defs><path d="M165.960472,29.2949161 C202.936473,32.3249982 232,63.2942856 232,101.051724 L232,110 L32,110 L32,101.051724 C32,62.9525631 61.591985,31.7649812 99.0454063,29.2195264 C99.0152598,29.5931145 99,29.9692272 99,30.3476251 C99,42.2107177 113.998461,51.8276544 132.5,51.8276544 C151.001539,51.8276544 166,42.2107177 166,30.3476251 C166,29.9946691 165.986723,29.6437014 165.960472,29.2949161 Z" id="react-path-1462525"></path></defs><mask id="react-mask-1462526" fill="white"><use xlink:href="#react-path-1462525"></use></mask><use id="Clothes" fill="#E6E6E6" fill-rule="evenodd" xlink:href="#react-path-1462525"></use><g id="Color/Palette/Gray-01" mask="url(#react-mask-1462526)" fill-rule="evenodd" fill="#8357BF"><rect id="🖍Color" x="0" y="0" width="264" height="110"></rect></g><g id="Shadowy" opacity="0.599999964" stroke-width="1" fill-rule="evenodd" mask="url(#react-mask-1462526)" fill-opacity="0.16" fill="#000000"><g transform="translate(92.000000, 4.000000)" id="Hola-👋🏼"><ellipse cx="40.5" cy="27.8476251" rx="39.6351047" ry="26.9138272"></ellipse></g></g></g><g id="Face" transform="translate(76.000000, 82.000000)" fill="#000000"><g id="Mouth/Smile" transform="translate(2.000000, 52.000000)"><defs><path d="M35.117844,15.1280772 C36.1757121,24.6198025 44.2259873,32 54,32 C63.8042055,32 71.8740075,24.574136 72.8917593,15.0400546 C72.9736685,14.272746 72.1167429,13 71.042767,13 C56.1487536,13 44.7379213,13 37.0868244,13 C36.0066168,13 35.0120058,14.1784435 35.117844,15.1280772 Z" id="react-path-1462527"></path></defs><mask id="react-mask-1462528" fill="white"><use xlink:href="#react-path-1462527"></use></mask><use id="Mouth" fill-opacity="0.699999988" fill="#000000" fill-rule="evenodd" xlink:href="#react-path-1462527"></use><rect id="Teeth" fill="#FFFFFF" fill-rule="evenodd" mask="url(#react-mask-1462528)" x="39" y="2" width="31" height="16" rx="5"></rect><g id="Tongue" stroke-width="1" fill-rule="evenodd" mask="url(#react-mask-1462528)" fill="#FF4F6D"><g transform="translate(38.000000, 24.000000)"><circle cx="11" cy="11" r="11"></circle><circle cx="21" cy="11" r="11"></circle></g></g></g><g id="Nose/Default" transform="translate(28.000000, 40.000000)" fill-opacity="0.16"><path d="M16,8 C16,12.418278 21.372583,16 28,16 L28,16 C34.627417,16 40,12.418278 40,8" id="Nose"></path></g><g id="Eyes/Happy-😁" transform="translate(0.000000, 8.000000)" fill-opacity="0.599999964"><path d="M16.1601674,22.4473116 C18.006676,18.648508 22.1644225,16 26.9975803,16 C31.8136766,16 35.9591217,18.629842 37.8153518,22.4071242 C38.3667605,23.5291977 37.5821037,24.4474817 36.790607,23.7670228 C34.3395063,21.6597833 30.8587163,20.3437884 26.9975803,20.3437884 C23.2572061,20.3437884 19.8737584,21.5787519 17.4375392,23.5716412 C16.5467928,24.3002944 15.6201012,23.5583844 16.1601674,22.4473116 Z" id="Squint"></path><path d="M74.1601674,22.4473116 C76.006676,18.648508 80.1644225,16 84.9975803,16 C89.8136766,16 93.9591217,18.629842 95.8153518,22.4071242 C96.3667605,23.5291977 95.5821037,24.4474817 94.790607,23.7670228 C92.3395063,21.6597833 88.8587163,20.3437884 84.9975803,20.3437884 C81.2572061,20.3437884 77.8737584,21.5787519 75.4375392,23.5716412 C74.5467928,24.3002944 73.6201012,23.5583844 74.1601674,22.4473116 Z" id="Squint"></path></g><g id="Eyebrow/Natural/Raised-Excited-Natural" fill-opacity="0.599999964"><path d="M22.7663531,1.57844898 L23.6772984,1.17582144 C28.9190996,-0.905265751 36.8645466,-0.0328729562 41.7227321,2.29911638 C42.2897848,2.57148957 41.9021563,3.4519421 41.3211012,3.40711006 C26.4021788,2.25602197 16.3582869,11.5525942 12.9460869,17.8470939 C12.8449215,18.0337142 12.5391523,18.05489 12.4635344,17.8808353 C10.156283,12.5620676 16.9134476,3.89614725 22.7663531,1.57844898 Z" id="Eye-Browse-Reddit"></path><path d="M80.7663531,1.57844898 L81.6772984,1.17582144 C86.9190996,-0.905265751 94.8645466,-0.0328729562 99.7227321,2.29911638 C100.289785,2.57148957 99.9021563,3.4519421 99.3211012,3.40711006 C84.4021788,2.25602197 74.3582869,11.5525942 70.9460869,17.8470939 C70.8449215,18.0337142 70.5391523,18.05489 70.4635344,17.8808353 C68.156283,12.5620676 74.9134476,3.89614725 80.7663531,1.57844898 Z" id="Eye-Browse-Reddit" transform="translate(85.000000, 9.000000) scale(-1, 1) translate(-85.000000, -9.000000) "></path></g></g><g id="Top" stroke-width="1" fill-rule="evenodd"><defs><rect id="react-path-1462531" x="0" y="0" width="264" height="280"></rect><path d="M48.7246602,89.2187346 C44.7420117,91.1711421 42,95.2653555 42,100 L42,113 C42,119.018625 46.4308707,124.002364 52.2085808,124.867187 C53.9518066,145.114792 66.4692178,162.282984 84,170.610951 L84,189 L80,189 L80,189 C78.4137385,189 76.8394581,189.051297 75.2787271,189.152323 C70.3620966,186.639548 65.7724391,183.578174 61.590479,180.048925 C57.2814481,181.318646 52.7202934,182 48,182 C21.490332,182 0,160.509668 0,134 C0,119.590902 6.34904132,106.664702 16.4021743,97.866349 C11.1175746,90.6060809 8,81.6671147 8,72 C8,50.160623 23.9112243,32.0375116 44.7738169,28.5905219 C51.0188047,11.8901624 67.1208542,0 86,0 C94.0143172,0 101.528186,2.14267429 108,5.88641659 C114.471814,2.14267429 121.985683,0 130,0 C148.879146,0 164.981195,11.8901624 171.226183,28.5905219 C192.088776,32.0375116 208,50.160623 208,72 C208,81.6671147 204.882425,90.6060809 199.597826,97.866349 C209.650959,106.664702 216,119.590902 216,134 C216,160.509668 194.509668,182 168,182 C163.279707,182 158.718552,181.318646 154.409521,180.048925 C150.227561,183.578174 145.637903,186.639548 140.721273,189.152323 C139.160542,189.051297 137.586262,189 136,189 L136,189 L132,189 L132,170.610951 C149.530782,162.282984 162.048193,145.114792 163.791419,124.867187 C169.569129,124.002364 174,119.018625 174,113 L174,100 C174,95.778427 171.820067,92.0660046 168.524466,89.9269981 C167.450514,89.5343912 166.370126,89.0424011 165.289302,88.4564081 C164.868503,88.3367332 164.43828,88.2394463 164,88.1659169 L164,87.7130302 C155.319369,82.4100235 146.764694,71.1747746 141.449951,56.7992877 C131.312295,58.8351061 119.547256,60 107,60 C95.038684,60 83.7882341,58.9413637 73.9808476,57.0787685 C68.7546917,71.0641476 60.4637821,82.0431875 52,87.4230168 L52,88.1659169 C50.9777341,88.3374206 49.9992949,88.6381729 49.0820602,89.050796 C48.9628927,89.1079465 48.8437566,89.1639284 48.7246602,89.2187346 Z" id="react-path-1462532"></path></defs><mask id="react-mask-1462529" fill="white"><use xlink:href="#react-path-1462531"></use></mask><g id="Mask"></g><g id="Top/Long-Hair/Curly" mask="url(#react-mask-1462529)"><g transform="translate(-1.000000, 0.000000)"><path d="M105.984735,27.7643628 C114.013215,26.6267967 122.796163,26 132,26 C142.358003,26 152.182939,26.7938545 160.999342,28.2161842 C183.451688,38.7497687 199,61.559133 199,88 L199,105.044138 C187.461887,104.672508 173.831239,90.7644306 166.449951,70.7992877 C156.312295,72.8351061 144.547256,74 132,74 C120.038684,74 108.788234,72.9413637 98.9808476,71.0787685 C91.6758772,90.6271291 78.3831001,104.301811 67,105.021902 L67,88 L67,88 C67,61.1745453 83.0039076,38.0870034 105.984735,27.7643628 Z" id="Shadow" fill-opacity="0.16" fill="#000000" fill-rule="evenodd"></path><g id="Hair" stroke-width="1" fill="none" fill-rule="evenodd" transform="translate(25.000000, 10.000000)"><mask id="react-mask-1462530" fill="white"><use xlink:href="#react-path-1462532"></use></mask><use id="Curly!" fill="#314756" xlink:href="#react-path-1462532"></use><g id="Skin/👶🏽-03-Brown" mask="url(#react-mask-1462530)" fill="#724133"><g transform="translate(0.000000, 0.000000) " id="Color"><rect x="0" y="0" width="264" height="280"></rect></g></g></g></g></g></g></g></g></g></g>` },
+        sleeping: { vb: '0 0 264 280', corpo: `<desc>Created with getavataaars.com</desc><defs><circle id="react-path-3783580" cx="120" cy="120" r="120"></circle><path d="M12,160 C12,226.27417 65.72583,280 132,280 C198.27417,280 252,226.27417 252,160 L264,160 L264,-1.42108547e-14 L-3.19744231e-14,-1.42108547e-14 L-3.19744231e-14,160 L12,160 Z" id="react-path-3783581"></path><path d="M124,144.610951 L124,163 L128,163 L128,163 C167.764502,163 200,195.235498 200,235 L200,244 L0,244 L0,235 C-4.86974701e-15,195.235498 32.235498,163 72,163 L72,163 L76,163 L76,144.610951 C58.7626345,136.422372 46.3722246,119.687011 44.3051388,99.8812385 C38.4803105,99.0577866 34,94.0521096 34,88 L34,74 C34,68.0540074 38.3245733,63.1180731 44,62.1659169 L44,56 L44,56 C44,25.072054 69.072054,5.68137151e-15 100,0 L100,0 L100,0 C130.927946,-5.68137151e-15 156,25.072054 156,56 L156,62.1659169 C161.675427,63.1180731 166,68.0540074 166,74 L166,88 C166,94.0521096 161.51969,99.0577866 155.694861,99.8812385 C153.627775,119.687011 141.237365,136.422372 124,144.610951 Z" id="react-path-3783582"></path></defs><g id="Avataaar" stroke="none" stroke-width="1" fill="none" fill-rule="evenodd"><g transform="translate(-825.000000, -1100.000000)" id="Avataaar/Circle"><g transform="translate(825.000000, 1100.000000)"><g id="Mask"></g><g id="Avataaar" stroke-width="1" fill-rule="evenodd" mask="url(#react-mask-3783584)"><g id="Body" transform="translate(32.000000, 36.000000)"><mask id="react-mask-3783585" fill="white"><use xlink:href="#react-path-3783582"></use></mask><use fill="#D0C6AC" xlink:href="#react-path-3783582"></use><g id="Skin/👶🏽-03-Brown" mask="url(#react-mask-3783585)" fill="#EDB98A"><g transform="translate(0.000000, 0.000000)" id="Color"><rect x="0" y="0" width="264" height="280"></rect></g></g><path d="M156,79 L156,102 C156,132.927946 130.927946,158 100,158 C69.072054,158 44,132.927946 44,102 L44,79 L44,94 C44,124.927946 69.072054,150 100,150 C130.927946,150 156,124.927946 156,94 L156,79 Z" id="Neck-Shadow" fill-opacity="0.100000001" fill="#000000" mask="url(#react-mask-3783585)"></path></g><g id="Clothing/Shirt-Crew-Neck" transform="translate(0.000000, 170.000000)"><defs><path d="M165.960472,29.2949161 C202.936473,32.3249982 232,63.2942856 232,101.051724 L232,110 L32,110 L32,101.051724 C32,62.9525631 61.591985,31.7649812 99.0454063,29.2195264 C99.0152598,29.5931145 99,29.9692272 99,30.3476251 C99,42.2107177 113.998461,51.8276544 132.5,51.8276544 C151.001539,51.8276544 166,42.2107177 166,30.3476251 C166,29.9946691 165.986723,29.6437014 165.960472,29.2949161 Z" id="react-path-3783586"></path></defs><mask id="react-mask-3783587" fill="white"><use xlink:href="#react-path-3783586"></use></mask><use id="Clothes" fill="#E6E6E6" fill-rule="evenodd" xlink:href="#react-path-3783586"></use><g id="Color/Palette/Gray-01" mask="url(#react-mask-3783587)" fill-rule="evenodd" fill="#8357BF"><rect id="🖍Color" x="0" y="0" width="264" height="110"></rect></g><g id="Shadowy" opacity="0.599999964" stroke-width="1" fill-rule="evenodd" mask="url(#react-mask-3783587)" fill-opacity="0.16" fill="#000000"><g transform="translate(92.000000, 4.000000)" id="Hola-👋🏼"><ellipse cx="40.5" cy="27.8476251" rx="39.6351047" ry="26.9138272"></ellipse></g></g></g><g id="Face" transform="translate(76.000000, 82.000000)" fill="#000000"><g id="Mouth/Serious" transform="translate(2.000000, 52.000000)" fill="#000000" fill-opacity="0.699999988"><rect id="Why-so-serious?" x="42" y="18" width="24" height="6" rx="3"></rect></g><g id="Nose/Default" transform="translate(28.000000, 40.000000)" fill-opacity="0.16"><path d="M16,8 C16,12.418278 21.372583,16 28,16 L28,16 C34.627417,16 40,12.418278 40,8" id="Nose"></path></g><g id="Eyes/Closed-😌" transform="translate(0.000000, 8.000000)" fill-opacity="0.599999964"><path d="M16.1601674,32.4473116 C18.006676,28.648508 22.1644225,26 26.9975803,26 C31.8136766,26 35.9591217,28.629842 37.8153518,32.4071242 C38.3667605,33.5291977 37.5821037,34.4474817 36.790607,33.7670228 C34.3395063,31.6597833 30.8587163,30.3437884 26.9975803,30.3437884 C23.2572061,30.3437884 19.8737584,31.5787519 17.4375392,33.5716412 C16.5467928,34.3002944 15.6201012,33.5583844 16.1601674,32.4473116 Z" id="Closed-Eye" transform="translate(27.000000, 30.000000) scale(1, -1) translate(-27.000000, -30.000000) "></path><path d="M74.1601674,32.4473116 C76.006676,28.648508 80.1644225,26 84.9975803,26 C89.8136766,26 93.9591217,28.629842 95.8153518,32.4071242 C96.3667605,33.5291977 95.5821037,34.4474817 94.790607,33.7670228 C92.3395063,31.6597833 88.8587163,30.3437884 84.9975803,30.3437884 C81.2572061,30.3437884 77.8737584,31.5787519 75.4375392,33.5716412 C74.5467928,34.3002944 73.6201012,33.5583844 74.1601674,32.4473116 Z" id="Closed-Eye" transform="translate(85.000000, 30.000000) scale(1, -1) translate(-85.000000, -30.000000) "></path></g><g id="Eyebrow/Natural/Default-Natural" fill-opacity="0.599999964"><path d="M26.0390934,6.21012364 C20.2775554,6.98346216 11.2929313,12.0052479 12.04426,17.8178111 C12.0689481,18.0080543 12.3567302,18.0673468 12.4809077,17.9084937 C14.9674041,14.7203351 34.1927973,10.0365481 41.1942673,11.0147151 C41.8350523,11.1044465 42.2580662,10.4430343 41.8210501,10.0302067 C38.0765663,6.49485426 31.2003792,5.51224825 26.0390934,6.21012364" id="Eyebrow" transform="translate(27.000000, 12.000000) rotate(5.000000) translate(-27.000000, -12.000000) "></path><path d="M85.0390934,6.21012364 C79.2775554,6.98346216 70.2929313,12.0052479 71.04426,17.8178111 C71.0689481,18.0080543 71.3567302,18.0673468 71.4809077,17.9084937 C73.9674041,14.7203351 93.1927973,10.0365481 100.194267,11.0147151 C100.835052,11.1044465 101.258066,10.4430343 100.82105,10.0302067 C97.0765663,6.49485426 90.2003792,5.51224825 85.0390934,6.21012364" id="Eyebrow" transform="translate(86.000000, 12.000000) scale(-1, 1) rotate(5.000000) translate(-86.000000, -12.000000) "></path></g></g><g id="Top" stroke-width="1" fill-rule="evenodd"><defs><rect id="react-path-3783590" x="0" y="0" width="264" height="280"></rect><path d="M48.7246602,89.2187346 C44.7420117,91.1711421 42,95.2653555 42,100 L42,113 C42,119.018625 46.4308707,124.002364 52.2085808,124.867187 C53.9518066,145.114792 66.4692178,162.282984 84,170.610951 L84,189 L80,189 L80,189 C78.4137385,189 76.8394581,189.051297 75.2787271,189.152323 C70.3620966,186.639548 65.7724391,183.578174 61.590479,180.048925 C57.2814481,181.318646 52.7202934,182 48,182 C21.490332,182 0,160.509668 0,134 C0,119.590902 6.34904132,106.664702 16.4021743,97.866349 C11.1175746,90.6060809 8,81.6671147 8,72 C8,50.160623 23.9112243,32.0375116 44.7738169,28.5905219 C51.0188047,11.8901624 67.1208542,0 86,0 C94.0143172,0 101.528186,2.14267429 108,5.88641659 C114.471814,2.14267429 121.985683,0 130,0 C148.879146,0 164.981195,11.8901624 171.226183,28.5905219 C192.088776,32.0375116 208,50.160623 208,72 C208,81.6671147 204.882425,90.6060809 199.597826,97.866349 C209.650959,106.664702 216,119.590902 216,134 C216,160.509668 194.509668,182 168,182 C163.279707,182 158.718552,181.318646 154.409521,180.048925 C150.227561,183.578174 145.637903,186.639548 140.721273,189.152323 C139.160542,189.051297 137.586262,189 136,189 L136,189 L132,189 L132,170.610951 C149.530782,162.282984 162.048193,145.114792 163.791419,124.867187 C169.569129,124.002364 174,119.018625 174,113 L174,100 C174,95.778427 171.820067,92.0660046 168.524466,89.9269981 C167.450514,89.5343912 166.370126,89.0424011 165.289302,88.4564081 C164.868503,88.3367332 164.43828,88.2394463 164,88.1659169 L164,87.7130302 C155.319369,82.4100235 146.764694,71.1747746 141.449951,56.7992877 C131.312295,58.8351061 119.547256,60 107,60 C95.038684,60 83.7882341,58.9413637 73.9808476,57.0787685 C68.7546917,71.0641476 60.4637821,82.0431875 52,87.4230168 L52,88.1659169 C50.9777341,88.3374206 49.9992949,88.6381729 49.0820602,89.050796 C48.9628927,89.1079465 48.8437566,89.1639284 48.7246602,89.2187346 Z" id="react-path-3783591"></path></defs><mask id="react-mask-3783588" fill="white"><use xlink:href="#react-path-3783590"></use></mask><g id="Mask"></g><g id="Top/Long-Hair/Curly" mask="url(#react-mask-3783588)"><g transform="translate(-1.000000, 0.000000)"><path d="M105.984735,27.7643628 C114.013215,26.6267967 122.796163,26 132,26 C142.358003,26 152.182939,26.7938545 160.999342,28.2161842 C183.451688,38.7497687 199,61.559133 199,88 L199,105.044138 C187.461887,104.672508 173.831239,90.7644306 166.449951,70.7992877 C156.312295,72.8351061 144.547256,74 132,74 C120.038684,74 108.788234,72.9413637 98.9808476,71.0787685 C91.6758772,90.6271291 78.3831001,104.301811 67,105.021902 L67,88 L67,88 C67,61.1745453 83.0039076,38.0870034 105.984735,27.7643628 Z" id="Shadow" fill-opacity="0.16" fill="#000000" fill-rule="evenodd"></path><g id="Hair" stroke-width="1" fill="none" fill-rule="evenodd" transform="translate(25.000000, 10.000000)"><mask id="react-mask-3783589" fill="white"><use xlink:href="#react-path-3783591"></use></mask><use id="Curly!" fill="#314756" xlink:href="#react-path-3783591"></use><g id="Skin/👶🏽-03-Brown" mask="url(#react-mask-3783589)" fill="#724133"><g transform="translate(0.000000, 0.000000) " id="Color"><rect x="0" y="0" width="264" height="280"></rect></g></g></g></g></g></g></g></g></g></g>` },
       },
       lia: {
         idle: { vb: '0 0 264 280', corpo: `<desc>Created with getavataaars.com</desc><defs><circle id="react-path-1462730" cx="120" cy="120" r="120"></circle><path d="M12,160 C12,226.27417 65.72583,280 132,280 C198.27417,280 252,226.27417 252,160 L264,160 L264,-1.42108547e-14 L-3.19744231e-14,-1.42108547e-14 L-3.19744231e-14,160 L12,160 Z" id="react-path-1462731"></path><path d="M124,144.610951 L124,163 L128,163 L128,163 C167.764502,163 200,195.235498 200,235 L200,244 L0,244 L0,235 C-4.86974701e-15,195.235498 32.235498,163 72,163 L72,163 L76,163 L76,144.610951 C58.7626345,136.422372 46.3722246,119.687011 44.3051388,99.8812385 C38.4803105,99.0577866 34,94.0521096 34,88 L34,74 C34,68.0540074 38.3245733,63.1180731 44,62.1659169 L44,56 L44,56 C44,25.072054 69.072054,5.68137151e-15 100,0 L100,0 L100,0 C130.927946,-5.68137151e-15 156,25.072054 156,56 L156,62.1659169 C161.675427,63.1180731 166,68.0540074 166,74 L166,88 C166,94.0521096 161.51969,99.0577866 155.694861,99.8812385 C153.627775,119.687011 141.237365,136.422372 124,144.610951 Z" id="react-path-1462732"></path></defs><g id="Avataaar" stroke="none" stroke-width="1" fill="none" fill-rule="evenodd"><g transform="translate(-825.000000, -1100.000000)" id="Avataaar/Circle"><g transform="translate(825.000000, 1100.000000)"><g id="Mask"></g><g id="Avataaar" stroke-width="1" fill-rule="evenodd" mask="url(#react-mask-1462734)"><g id="Body" transform="translate(32.000000, 36.000000)"><mask id="react-mask-1462735" fill="white"><use xlink:href="#react-path-1462732"></use></mask><use fill="#D0C6AC" xlink:href="#react-path-1462732"></use><g id="Skin/👶🏽-03-Brown" mask="url(#react-mask-1462735)" fill="#EDB98A"><g transform="translate(0.000000, 0.000000)" id="Color"><rect x="0" y="0" width="264" height="280"></rect></g></g><path d="M156,79 L156,102 C156,132.927946 130.927946,158 100,158 C69.072054,158 44,132.927946 44,102 L44,79 L44,94 C44,124.927946 69.072054,150 100,150 C130.927946,150 156,124.927946 156,94 L156,79 Z" id="Neck-Shadow" fill-opacity="0.100000001" fill="#000000" mask="url(#react-mask-1462735)"></path></g><g id="Clothing/Shirt-Crew-Neck" transform="translate(0.000000, 170.000000)"><defs><path d="M165.960472,29.2949161 C202.936473,32.3249982 232,63.2942856 232,101.051724 L232,110 L32,110 L32,101.051724 C32,62.9525631 61.591985,31.7649812 99.0454063,29.2195264 C99.0152598,29.5931145 99,29.9692272 99,30.3476251 C99,42.2107177 113.998461,51.8276544 132.5,51.8276544 C151.001539,51.8276544 166,42.2107177 166,30.3476251 C166,29.9946691 165.986723,29.6437014 165.960472,29.2949161 Z" id="react-path-1462736"></path></defs><mask id="react-mask-1462737" fill="white"><use xlink:href="#react-path-1462736"></use></mask><use id="Clothes" fill="#E6E6E6" fill-rule="evenodd" xlink:href="#react-path-1462736"></use><g id="Color/Palette/Gray-01" mask="url(#react-mask-1462737)" fill-rule="evenodd" fill="#262E33"><rect id="🖍Color" x="0" y="0" width="264" height="110"></rect></g><g id="Shadowy" opacity="0.599999964" stroke-width="1" fill-rule="evenodd" mask="url(#react-mask-1462737)" fill-opacity="0.16" fill="#000000"><g transform="translate(92.000000, 4.000000)" id="Hola-👋🏼"><ellipse cx="40.5" cy="27.8476251" rx="39.6351047" ry="26.9138272"></ellipse></g></g></g><g id="Face" transform="translate(76.000000, 82.000000)" fill="#000000"><g id="Mouth/Smile" transform="translate(2.000000, 52.000000)"><defs><path d="M35.117844,15.1280772 C36.1757121,24.6198025 44.2259873,32 54,32 C63.8042055,32 71.8740075,24.574136 72.8917593,15.0400546 C72.9736685,14.272746 72.1167429,13 71.042767,13 C56.1487536,13 44.7379213,13 37.0868244,13 C36.0066168,13 35.0120058,14.1784435 35.117844,15.1280772 Z" id="react-path-1462738"></path></defs><mask id="react-mask-1462739" fill="white"><use xlink:href="#react-path-1462738"></use></mask><use id="Mouth" fill-opacity="0.699999988" fill="#000000" fill-rule="evenodd" xlink:href="#react-path-1462738"></use><rect id="Teeth" fill="#FFFFFF" fill-rule="evenodd" mask="url(#react-mask-1462739)" x="39" y="2" width="31" height="16" rx="5"></rect><g id="Tongue" stroke-width="1" fill-rule="evenodd" mask="url(#react-mask-1462739)" fill="#FF4F6D"><g transform="translate(38.000000, 24.000000)"><circle cx="11" cy="11" r="11"></circle><circle cx="21" cy="11" r="11"></circle></g></g></g><g id="Nose/Default" transform="translate(28.000000, 40.000000)" fill-opacity="0.16"><path d="M16,8 C16,12.418278 21.372583,16 28,16 L28,16 C34.627417,16 40,12.418278 40,8" id="Nose"></path></g><g id="Eyes/Default-😀" transform="translate(0.000000, 8.000000)" fill-opacity="0.599999964"><circle id="Eye" cx="30" cy="22" r="6"></circle><circle id="Eye" cx="82" cy="22" r="6"></circle></g><g id="Eyebrow/Natural/Default-Natural" fill-opacity="0.599999964"><path d="M26.0390934,6.21012364 C20.2775554,6.98346216 11.2929313,12.0052479 12.04426,17.8178111 C12.0689481,18.0080543 12.3567302,18.0673468 12.4809077,17.9084937 C14.9674041,14.7203351 34.1927973,10.0365481 41.1942673,11.0147151 C41.8350523,11.1044465 42.2580662,10.4430343 41.8210501,10.0302067 C38.0765663,6.49485426 31.2003792,5.51224825 26.0390934,6.21012364" id="Eyebrow" transform="translate(27.000000, 12.000000) rotate(5.000000) translate(-27.000000, -12.000000) "></path><path d="M85.0390934,6.21012364 C79.2775554,6.98346216 70.2929313,12.0052479 71.04426,17.8178111 C71.0689481,18.0080543 71.3567302,18.0673468 71.4809077,17.9084937 C73.9674041,14.7203351 93.1927973,10.0365481 100.194267,11.0147151 C100.835052,11.1044465 101.258066,10.4430343 100.82105,10.0302067 C97.0765663,6.49485426 90.2003792,5.51224825 85.0390934,6.21012364" id="Eyebrow" transform="translate(86.000000, 12.000000) scale(-1, 1) rotate(5.000000) translate(-86.000000, -12.000000) "></path></g></g><g id="Top" stroke-width="1" fill-rule="evenodd"><defs><rect id="react-path-1462742" x="0" y="0" width="264" height="280"></rect><path d="M162.831093,71.6181521 C162.943003,73.0640672 163,74.5253775 163,76 L163,114 C163,136.339168 149.919579,155.623239 131,164.610951 L131,183 L135,183 C136.524404,183 137.037743,183.047374 138.538625,183.140731 C123.625568,210.496321 119.823733,233.574048 137.47212,247.543277 C139.169858,248.745686 140.396085,249.328761 140.607243,249.428275 C142.980035,250.546232 145.444343,251.76781 148.074296,252.382591 C152.696796,253.463231 158.007057,252.010459 162.630756,251.429524 C164.742591,251.164137 166.847633,251.000636 168.977452,250.993519 C171.542066,250.985014 174.188404,251.078221 176.119408,252.691023 C178.003455,254.264772 177.763079,259.889444 172.244213,262.523872 C176.3432,264.37915 181.25603,260.071171 182.931671,257.34666 C184.398107,254.962171 185.526058,252.378599 186.146081,249.741914 C186.917963,246.458686 186.967717,243.016815 186.363678,239.728032 C185.106048,232.88022 182.187563,226.295538 180.201011,219.605673 C179.468692,217.139607 178.51478,214.440611 178.099366,211.916746 C177.986471,211.23167 177.851996,208.701383 177.957698,208.171998 C178.036425,207.778517 178.016643,207.37549 179.372782,206.996069 C183.288539,205.899634 187.379733,204.063449 190.225486,201.476579 C193.590156,198.418295 195.343925,194.445304 196.758409,190.497133 C198.998525,184.244662 200.281132,177.550111 200.870584,171.057073 C200.99307,169.708269 201.062205,168.361722 201.086383,167.009968 C201.10077,166.193153 201.000862,165.263344 201.094375,164.445141 C201.247433,163.105189 201.039826,163.457881 202.341615,162.571291 C206.599454,159.671476 209.921164,155.448546 212.051783,151.200622 C215.39827,144.528634 215.834064,137.49302 213.117591,130.733555 C210.864687,125.12728 207.291411,119.498616 201.725588,115.887863 C199.588776,114.501568 197.334273,113.244582 195.115337,111.95809 C193.906862,111.257566 191.067703,110.342511 190.209501,109.441341 C189.609259,108.810939 190.56477,105.649382 190.685858,104.583322 C191.213967,99.9353218 190.606132,95.4261763 189.520542,90.8868298 C187.127368,80.8793698 177.487944,64.7382958 173.617944,55.2249863 C170.293437,47.0528435 165.481911,-0.0750473139 108.58669,0.198941193 C51.691468,0.4729297 41.4185991,50.4377258 33.7159879,59.7736698 C25.3512665,69.9121239 16.9074766,89.1763214 22.602684,107.035643 C17.099033,113.95809 4.54481227,124.04369 1.3853513,134.125611 C-0.596804833,140.450807 -0.511883829,147.495621 2.0289526,153.633016 C3.46621561,157.104393 5.52490056,160.250502 7.94045353,163.272162 C10.0566849,165.919435 12.4084972,168.423513 14.4577909,171.110359 C15.6946403,172.732013 16.0263318,173.129312 15.5599656,175.128304 C14.6406208,179.068318 12.7411877,182.853334 11.0939201,186.603116 C8.54189405,192.412639 6.39748885,197.82226 6.0799842,204.016065 C5.77766543,209.912373 7.40435223,226.688671 24.3409972,236.576369 C26.3249517,237.73442 28.2831301,238.743202 30.3833764,239.685161 C29.2931905,236.290327 30.5294405,224.161856 32.7263968,219.653578 C33.2860762,221.204589 34.2369916,222.697108 35.2618383,224.05216 C36.8611506,226.167444 40.636039,231.460774 45.4085994,231.706547 C43.4722007,228.722725 41.3891385,226.708805 40.7853002,223.10864 C44.7616013,225.068753 50.4191385,226.855644 55.0466338,226.691448 C58.4512667,226.570818 63.4709972,224.871405 66.0000446,222.74779 C57.6284322,224.074724 49.679027,221.3155 46.4820009,215.419366 C45.8146217,214.188415 45.3084926,212.898625 45.0141664,211.558847 C44.5967546,209.659309 43.9381673,206.615432 44.8227444,204.862039 C45.0375932,204.436124 45.3893685,204.001198 45.806628,203.572743 C45.7407358,203.49425 45.6753213,203.415537 45.6103845,203.336606 C51.303506,198.550494 58.4494475,190.932516 62.2752482,185.367908 C62.3459243,185.245492 62.416066,185.122857 62.4856702,185 L62.5253504,185 C62.5536953,184.957813 62.5818364,184.915755 62.6097716,184.873828 C67.874859,183.648086 73.3617452,183 79,183 L83,183 L83,164.610951 C64.0804213,155.623239 51,136.339168 51,114 L51,76 L51,76 C51,73.537425 51.1589523,71.1119753 51.4671565,68.733351 C55.4088487,67.4702772 59.365485,66.2776957 63.3986046,65.2045441 C67.8552588,64.0189378 77.7980098,62.0907786 81.6887904,61.1941723 L84.4252449,58.215348 L85.4876566,60.1702128 C87.6456492,60.0042337 99.5663601,58.212708 99.5663601,58.212708 L100.896323,54.9898699 C102.612526,56.7530625 103.834989,57.668872 103.834989,57.668872 C106.391211,57.460454 117.488488,57.2113208 120.119841,57.2427023 C120.119841,57.2427023 127.460212,57.5012269 129.240756,57.5714137 L130.907605,56.9328981 L131.456495,58.0098503 C132.910143,58.601117 141.699367,61.6008734 143.434153,62.138079 L145.980784,61.2323702 C147.100342,63.9256202 149.920119,63.586016 152.257345,65.7132858 C154.760315,67.9915694 159.482831,69.7372554 162.831093,71.6181521 Z" id="react-path-1462743"></path></defs><mask id="react-mask-1462740" fill="white"><use xlink:href="#react-path-1462742"></use></mask><g id="Mask"></g><g id="Top/Long-Hair/Curvy" mask="url(#react-mask-1462740)"><g transform="translate(-1.000000, 0.000000)"><path d="M100.899906,42.4648024 C91.1016204,48.4721303 82.3855283,56.3273858 76.5871222,65.36024 C73.8252914,69.662826 71.5532049,74.1995784 69.4361743,78.7575668 C68.3739624,81.0447336 67.4048638,83.3600237 66.475928,85.6893613 C65.8894735,87.1594817 64.9889112,88.7449062 65.8359233,90.2878445 C66.3526427,89.9857996 66.5492598,90.0943892 66.224362,90.6353417 C68.9162579,91.3693254 72.6583769,89.3003017 74.9906073,88.5362205 C79.7539763,86.9753339 84.5203425,85.5025753 89.3986046,84.2045441 C93.8552588,83.0189378 103.79801,81.0907786 107.68879,80.1941723 L110.425245,77.215348 L111.487657,79.1702128 C113.645649,79.0042337 125.56636,77.212708 125.56636,77.212708 L126.896323,73.9898699 C128.612526,75.7530625 129.834989,76.668872 129.834989,76.668872 C132.391211,76.460454 143.488488,76.2113208 146.119841,76.2427023 C146.119841,76.2427023 153.460212,76.5012269 155.240756,76.5714137 L156.907605,75.9328981 L157.456495,77.0098503 C158.910143,77.601117 167.699367,80.6008734 169.434153,81.138079 L171.980784,80.2323702 C173.100342,82.9256202 175.920119,82.586016 178.257345,84.7132858 C181.34867,87.5271086 187.825645,89.5285179 190.917768,91.9756241 C192.024938,92.8519441 193.059576,93.7675012 194.100208,94.7015404 C195.255933,95.7385867 195.085291,95.890424 195.460742,97.0802141 C195.573237,97.4361731 196.715775,99.2788807 197.202722,99.4296139 C198.935909,99.9660566 187.048767,68.9435732 183.785603,64.9771662 C180.417736,60.8830307 158.574915,33.3231248 129.612057,34.2254634" id="Top-Shadow" fill-opacity="0.16" fill="#000000" fill-rule="evenodd"></path><g id="Hair" stroke-width="1" fill="none" fill-rule="evenodd" transform="translate(26.000000, 16.000000)"><mask id="react-mask-1462741" fill="white"><use xlink:href="#react-path-1462743"></use></mask><use id="Hair-Mask" fill="#361A0A" xlink:href="#react-path-1462743"></use><g id="Skin/👶🏽-03-Brown" mask="url(#react-mask-1462741)" fill="#4A312C"><g transform="translate(0.000000, 0.000000) " id="Color"><rect x="0" y="0" width="264" height="280"></rect></g></g><path d="M62.6794556,184.462132 C69.755442,174.755405 62.148959,147.786913 56.1278159,137.800593 C72.9649824,130.137708 106.213574,131.553467 155.87359,142.047871 C151.079203,150.900348 149.123448,158.803527 150.006324,165.757409 C145.469118,171.332534 141.720304,177.127222 138.759883,183.141474 L103.888915,191.746789 C81.8528509,194.400378 68.1163643,191.97216 62.6794556,184.462132 Z" id="Shadow" fill-opacity="0.24" fill="#000000" mask="url(#react-mask-1462741)"></path></g><path d="M79.0404573,170.094305 C78.9812573,169.892618 78.8354573,169.667152 78.6348573,169.428842 C78.7708573,169.650142 78.9074573,169.871269 79.0404573,170.094305 Z M56.409572,120.375261 C57.2661752,126.5406 58.7356083,132.465374 60.8662263,138.377476 C62.9277086,144.09848 65.285915,149.836145 68.678559,155.067858 C71.8402179,159.943234 75.6031176,164.4923 78.6348973,169.428772 C77.8378388,168.48126 76.1633964,167.329804 75.5207941,166.65115 C74.4643769,165.535276 73.4750971,164.385382 72.5369698,163.193485 C70.6143583,160.749982 68.9003527,158.193833 67.243494,155.609567 C63.9913192,150.536843 61.5529875,145.034363 59.4397533,139.530668 C55.2902133,128.722708 51.1268862,115.61687 54.7738936,104.200899 C54.4921557,104.935095 55.2326668,106.688314 55.3491585,107.497319 C55.5525692,108.91069 55.7349995,110.333608 55.8267142,111.757219 C56.0123415,114.639678 56.0109428,117.505994 56.409572,120.375261 Z M68.8553146,165.041212 C67.4967783,163.309515 64.9739252,161.944396 63.4129772,160.279177 C61.9976938,158.769648 60.9019131,157.07822 59.9070386,155.339754 C57.6517365,151.39922 56.1697151,147.374505 55.6897616,142.969154 C55.7992598,143.49177 56.6083072,144.395543 56.8630702,144.824778 C57.4766993,145.858902 58.0839345,146.89424 58.6508072,147.948671 C59.7481863,149.989667 60.6639345,152.099744 61.7731027,154.135533 C63.8106073,157.875421 66.402796,161.495374 68.8553146,165.041212 Z M73.5320242,183.498629 C74.6465874,185.460651 75.5723262,187.464851 76.1569823,189.60079 C76.4654954,190.727599 76.7138643,191.869508 76.9272658,193.013501 C76.9962017,193.382508 77.0093894,194.709963 77.1846264,195.283955 C74.9700864,190.992812 73.2798587,186.448779 70.6421125,182.34214 C68.0381348,178.288092 64.6948448,174.560527 61.1958996,171.061031 C57.5013364,167.36575 53.7855929,163.879099 51.8038364,159.214262 C50.0788411,155.153619 49.4126608,150.996124 49.8138875,146.658464 C49.8160855,148.56911 51.5706533,151.280256 52.1766896,153.126681 C53.0063178,155.654018 53.6655046,158.231689 54.9143429,160.634229 C57.039566,164.722991 60.873,167.876911 64.0792175,171.321558 C67.631513,175.137643 71.0245567,179.084252 73.5320242,183.498629 Z M59.2286696,174.179456 C60.2874847,175.196917 61.2164205,176.28259 62.0352588,177.454354 C62.9328239,178.738937 63.5914112,180.09017 64.1800637,181.504062 C64.6869921,182.721301 64.9105841,184.986375 65.7074428,186.0021 C63.1288415,182.856337 60.4739112,179.884838 58.6955655,176.312444 C58.0893295,175.089825 57.1480051,173.289222 56.4530516,171.817184 C56.6844363,172.409922 58.7059559,173.677148 59.2286696,174.179456 Z M48.9033745,180.528033 C51.7405353,184.777866 55.450684,188.609052 57.877027,193.056233 C60.7067946,198.242644 61.9518364,203.862978 62.202803,209.595957 C62.3216924,212.307277 62.3152983,215.0606 61.9498383,217.764455 C61.7540204,219.211673 61.4399126,220.650211 61.0810465,222.075732 C60.944973,222.616747 60.2406283,224.002173 60.1037556,224.846586 C59.8140251,214.305575 61.5584024,203.763696 56.0767017,193.942823 C53.4811162,189.292219 49.4912277,185.327212 46.398105,180.924811 C43.6164926,176.966226 40.8998197,173.083838 38.6846803,168.851361 C40.0408188,170.567263 42.485145,171.915893 44.0009349,173.619818 C45.8995688,175.753674 47.3488206,178.199606 48.9033745,180.528033 Z M60.1036574,224.846603 C60.0710574,225.050581 60.0700574,225.224111 60.1172574,225.346603 C60.1116574,225.180112 60.1082574,225.01327 60.1036574,224.846603 Z M50.5604331,202.493815 C50.5610325,202.989874 51.376474,204.011501 51.5992667,204.528562 C52.1207816,205.73799 52.5455864,207.007473 52.7573894,208.289626 C53.1752007,210.818004 52.6269108,213.429521 51.6899823,215.850286 C49.7909489,220.757251 46.8161162,225.102895 43.0767946,229.15 C44.4121524,227.402335 44.9438578,224.56136 45.8833838,222.612182 C46.8478866,220.611106 47.8829238,218.6411 48.7335325,216.600624 C50.652947,211.995842 50.4835046,207.289696 50.5604331,202.493815 Z M41.9174331,221.200893 C42.3180604,220.652936 42.1102537,218.018161 42.3222565,217.328919 C42.714092,216.055618 43.3920613,214.827097 44.170737,213.693866 C43.7551236,214.392828 44.3691524,216.160106 44.1663411,217.067177 C43.8338504,218.55553 42.9962296,219.998582 41.9174331,221.200893 Z M99.6077106,42.748374 C99.5269106,42.804974 99.4471106,42.908174 99.3681106,43.044574 C99.4481106,42.945974 99.5267106,42.846574 99.6077106,42.748374 Z M84.8469387,64.3317143 C86.2672175,63.085837 87.0237138,60.1410677 88.0032026,58.5522183 C89.1283559,56.7269681 90.4213532,54.9730547 91.6476125,53.1960567 C94.0795502,49.6719145 96.3744154,46.2123399 99.3680307,43.0054816 C98.7464089,43.9398028 98.1949219,46.7736616 97.8536394,47.5189663 C96.9620688,49.4667561 95.8988578,51.3334892 94.6328355,53.1235049 C91.7722965,57.1680066 88.7029517,60.9266404 84.8469387,64.3317143 Z M84.3117165,54.1218036 C85.0620186,52.7952168 86.2055548,51.6739619 87.4917584,50.7082248 C86.9188913,51.2107066 86.6607314,53.2831189 86.2670976,53.9831221 C85.472237,55.3952784 84.3143141,56.6130375 83.0714703,57.7545999 C83.7352528,57.1726235 83.842553,54.9516363 84.3117165,54.1218036 Z M203.505599,152.127968 C203.498805,152.179518 203.485417,152.282271 203.464637,152.438483 C203.462638,150.913159 202.784469,149.237352 202.704144,147.668984 C202.592048,145.478545 202.906556,143.353715 203.787137,141.277137 C205.526519,137.175704 208.790083,134.069516 212.950612,131.638511 C211.805877,132.313173 210.683921,134.851617 209.949604,135.906916 C208.84663,137.493162 207.668126,139.094161 206.735993,140.757819 C204.793001,144.225725 204.229725,148.375062 203.505599,152.127968 Z M201.998401,130.481881 C201.761221,131.706583 201.448912,132.921738 201.009121,134.107908 C200.534762,135.386937 199.915938,136.630558 199.22578,137.835993 C198.79578,138.586852 197.246621,140.162684 197.24762,140.993211 C197.165296,136.095098 198.975812,131.657983 202.419809,127.7355 C202.04236,128.392806 202.137271,129.766083 201.998401,130.481881 Z M201.196906,165.719988 C204.852905,165.202752 208.302496,166.981313 210.618342,169.271033 C211.855791,170.494694 212.955568,171.900428 213.683091,173.404055 C214.229783,174.534509 214.228783,176.387356 214.9631,177.323587 C213.165772,174.905078 210.886892,172.951214 208.638584,170.859535 C207.075238,169.404855 203.950944,165.678852 201.196906,165.719988 Z M200.41897,176.096698 C200.227148,176.031957 198.485169,175.539368 198.081944,175.776984 C198.679388,175.510035 199.412106,175.184941 200.068895,175.097983 C204.35311,174.529024 209.561066,178.239232 210.13633,181.81909 C209.657576,180.592826 207.111145,179.578489 205.959616,178.968568 C204.136711,178.002484 202.395531,176.832456 200.41897,176.096698 Z M202.227687,183.908269 C202.969797,184.089822 204.54713,185.083504 205.275252,185.072742 C202.345977,185.143906 199.703236,184.81829 196.883858,184.158729 C197.036117,184.200212 198.643022,183.702937 198.694974,183.695647 C199.910043,183.523987 201.052381,183.620492 202.227687,183.908269 Z M190.882541,197.765243 C195.171151,197.522941 200.218656,198.149351 204.314046,199.181739 C206.346955,199.694288 208.253382,200.468058 210.006351,201.476666 C211.420436,202.290531 213.935896,203.408661 214.881616,204.614097 C211.142494,198.162369 203.032039,194.811448 194.722769,196.473197 C193.615199,196.695886 191.914181,197.749796 190.882541,197.765243 Z M189.923153,210.197773 C192.611453,209.233424 195.584487,208.30431 198.505969,208.169273 C201.277391,208.042395 204.351332,208.458613 206.915546,209.342078 C206.033367,209.102206 203.92333,209.674289 202.995793,209.779298 C201.699199,209.926138 200.399608,210.077837 199.099817,210.196558 C197.506299,210.342009 195.898395,210.422718 194.298883,210.41942 C193.159543,210.41699 190.979371,209.87858 189.923153,210.197773 Z M179.458947,227.410508 C179.711912,231.383499 182.010574,234.84533 185.39043,237.491388 C188.973097,240.296087 193.769036,241.572686 196.369816,245.319691 C197.637437,247.145462 198.312809,249.270812 198.20431,251.417686 C198.148362,252.524014 197.870221,253.636069 197.5695,254.712196 C197.371684,255.420184 196.66734,256.580144 196.667939,257.270775 C196.69911,253.384221 196.751661,248.859281 194.031592,245.598095 C191.300932,242.324066 186.539161,241.170701 183.203065,238.482813 C179.924714,235.841442 177.437828,232.389157 176.877749,228.498264 C176.425569,225.354411 176.648562,219.871892 179.90773,217.738557 C179.246345,218.128392 179.377224,220.111764 179.361438,220.669267 C179.298097,222.900321 179.317079,225.185182 179.458947,227.410508 Z M177.005789,242.672904 C177.402221,243.19257 179.575399,243.82436 180.213805,244.182606 C181.67045,245.000116 183.07914,245.92923 184.234665,247.059684 C186.55111,249.326146 188.044121,252.504886 188.151821,255.553623 C188.151821,254.833139 186.505553,253.096583 186.043183,252.481107 C185.275297,251.458613 184.407904,250.511969 183.524526,249.564283 C181.371329,247.253734 179.135209,244.999942 177.005789,242.672904 Z M229.167807,153.791051 C230.371887,154.841663 231.178936,156.147595 231.842519,157.49987 C233.373295,160.619424 233.65823,164.217333 232.431571,167.500388 C232.634582,166.795698 232.030544,165.31585 231.860502,164.601614 C231.488248,163.038626 230.906389,161.56225 230.298355,160.059664 C229.118053,157.144401 228.163741,154.41208 226.113648,151.858014 C226.644354,152.52556 228.442481,153.157872 229.167807,153.791051 Z M171.509602,41.9832998 C171.510002,42.3148163 172.426549,43.2758671 172.633357,43.6374111 C173.149677,44.5392749 173.557297,45.4857459 173.696967,46.4924453 C173.85542,47.6336606 173.6616,48.7505762 173.315522,49.8605491 C173.109914,50.5202844 172.131624,51.7949741 172.132423,52.3894475 C171.972572,48.891167 171.198691,45.5298324 171.509602,41.9832998 Z M179.146978,48.8048339 C179.312224,50.0477605 178.906202,51.4491555 178.183074,52.546805 C178.314952,52.2364639 177.729296,50.1642252 177.710314,49.7849773 C177.650969,48.6118253 177.77925,47.4056953 177.856378,46.2332376 C177.857178,46.8738803 179.039478,47.9958294 179.146978,48.8048339 Z M118.377388,50.3732542 C117.142336,51.8857333 115.738043,53.3032702 114.227248,54.6164922 C113.2036,55.5060327 111.243024,56.5057893 110.46315,57.5267214 C113.964293,51.8147436 118.00913,46.8878178 122.764906,41.8951095 C122.049172,42.8155452 121.862346,44.8121078 121.337434,45.8885819 C120.563354,47.4758692 119.527518,48.9645693 118.377388,50.3732542 Z M124.275361,52.8515919 C124.845431,52.5155626 125.378934,50.859195 125.81333,50.3013446 C126.54465,49.3623371 127.437619,48.4554398 128.390733,47.6728177 C128.186123,47.8927295 127.788693,49.7158968 127.5657,50.0739694 C126.843372,51.2344508 125.56616,52.1809219 124.275361,52.8515919 Z" id="Lights" fill-opacity="0.6" fill="#FFFFFF" fill-rule="evenodd"></path></g></g></g></g></g></g></g>` },
@@ -1214,6 +1576,7 @@ window.__ModuleLoader__.load({
         waiting: { vb: '0 0 264 280', corpo: `<desc>Created with getavataaars.com</desc><defs><circle id="react-path-1462962" cx="120" cy="120" r="120"></circle><path d="M12,160 C12,226.27417 65.72583,280 132,280 C198.27417,280 252,226.27417 252,160 L264,160 L264,-1.42108547e-14 L-3.19744231e-14,-1.42108547e-14 L-3.19744231e-14,160 L12,160 Z" id="react-path-1462963"></path><path d="M124,144.610951 L124,163 L128,163 L128,163 C167.764502,163 200,195.235498 200,235 L200,244 L0,244 L0,235 C-4.86974701e-15,195.235498 32.235498,163 72,163 L72,163 L76,163 L76,144.610951 C58.7626345,136.422372 46.3722246,119.687011 44.3051388,99.8812385 C38.4803105,99.0577866 34,94.0521096 34,88 L34,74 C34,68.0540074 38.3245733,63.1180731 44,62.1659169 L44,56 L44,56 C44,25.072054 69.072054,5.68137151e-15 100,0 L100,0 L100,0 C130.927946,-5.68137151e-15 156,25.072054 156,56 L156,62.1659169 C161.675427,63.1180731 166,68.0540074 166,74 L166,88 C166,94.0521096 161.51969,99.0577866 155.694861,99.8812385 C153.627775,119.687011 141.237365,136.422372 124,144.610951 Z" id="react-path-1462964"></path></defs><g id="Avataaar" stroke="none" stroke-width="1" fill="none" fill-rule="evenodd"><g transform="translate(-825.000000, -1100.000000)" id="Avataaar/Circle"><g transform="translate(825.000000, 1100.000000)"><g id="Mask"></g><g id="Avataaar" stroke-width="1" fill-rule="evenodd" mask="url(#react-mask-1462966)"><g id="Body" transform="translate(32.000000, 36.000000)"><mask id="react-mask-1462967" fill="white"><use xlink:href="#react-path-1462964"></use></mask><use fill="#D0C6AC" xlink:href="#react-path-1462964"></use><g id="Skin/👶🏽-03-Brown" mask="url(#react-mask-1462967)" fill="#EDB98A"><g transform="translate(0.000000, 0.000000)" id="Color"><rect x="0" y="0" width="264" height="280"></rect></g></g><path d="M156,79 L156,102 C156,132.927946 130.927946,158 100,158 C69.072054,158 44,132.927946 44,102 L44,79 L44,94 C44,124.927946 69.072054,150 100,150 C130.927946,150 156,124.927946 156,94 L156,79 Z" id="Neck-Shadow" fill-opacity="0.100000001" fill="#000000" mask="url(#react-mask-1462967)"></path></g><g id="Clothing/Shirt-Crew-Neck" transform="translate(0.000000, 170.000000)"><defs><path d="M165.960472,29.2949161 C202.936473,32.3249982 232,63.2942856 232,101.051724 L232,110 L32,110 L32,101.051724 C32,62.9525631 61.591985,31.7649812 99.0454063,29.2195264 C99.0152598,29.5931145 99,29.9692272 99,30.3476251 C99,42.2107177 113.998461,51.8276544 132.5,51.8276544 C151.001539,51.8276544 166,42.2107177 166,30.3476251 C166,29.9946691 165.986723,29.6437014 165.960472,29.2949161 Z" id="react-path-1462968"></path></defs><mask id="react-mask-1462969" fill="white"><use xlink:href="#react-path-1462968"></use></mask><use id="Clothes" fill="#E6E6E6" fill-rule="evenodd" xlink:href="#react-path-1462968"></use><g id="Color/Palette/Gray-01" mask="url(#react-mask-1462969)" fill-rule="evenodd" fill="#262E33"><rect id="🖍Color" x="0" y="0" width="264" height="110"></rect></g><g id="Shadowy" opacity="0.599999964" stroke-width="1" fill-rule="evenodd" mask="url(#react-mask-1462969)" fill-opacity="0.16" fill="#000000"><g transform="translate(92.000000, 4.000000)" id="Hola-👋🏼"><ellipse cx="40.5" cy="27.8476251" rx="39.6351047" ry="26.9138272"></ellipse></g></g></g><g id="Face" transform="translate(76.000000, 82.000000)" fill="#000000"><g id="Mouth/Sad" transform="translate(2.000000, 52.000000)" fill-opacity="0.699999988" fill="#000000"><path d="M40.0582943,16.6539438 C40.7076459,23.6831146 46.7016363,28.3768187 54,28.3768187 C61.3416045,28.3768187 67.3633339,23.627332 67.9526838,16.5287605 C67.9840218,16.1513016 67.0772329,15.8529531 66.6289111,16.077395 C61.0902255,18.8502083 56.8805885,20.2366149 54,20.2366149 C51.1558456,20.2366149 47.0072148,18.8804569 41.5541074,16.168141 C41.0473376,15.9160792 40.0197139,16.2363147 40.0582943,16.6539438 Z" id="Mouth" transform="translate(54.005357, 22.188409) scale(1, -1) translate(-54.005357, -22.188409) "></path></g><g id="Nose/Default" transform="translate(28.000000, 40.000000)" fill-opacity="0.16"><path d="M16,8 C16,12.418278 21.372583,16 28,16 L28,16 C34.627417,16 40,12.418278 40,8" id="Nose"></path></g><g id="Eyes/Default-😀" transform="translate(0.000000, 8.000000)" fill-opacity="0.599999964"><circle id="Eye" cx="30" cy="22" r="6"></circle><circle id="Eye" cx="82" cy="22" r="6"></circle></g><g id="Eyebrow/Outline/Sad-Concerned" fill-opacity="0.599999964" fill-rule="nonzero"><path d="M15.9726042,19.4088529 C17.452356,11.0203704 30.0622688,5.22829657 39.2106453,8.9774793 C40.2254706,9.39337449 41.4016967,8.94600219 41.8378196,7.97824531 C42.2739426,7.01048842 41.8048116,5.88881678 40.7899862,5.47292159 C29.3457328,0.782843812 13.9550264,7.85221132 12.0280273,18.7760684 C11.84479,19.8148122 12.5792704,20.798534 13.6685352,20.9732726 C14.7578,21.1480113 15.7893668,20.4475967 15.9726042,19.4088529 Z" id="Eyebrow" transform="translate(27.000414, 12.500000) scale(-1, -1) translate(-27.000414, -12.500000) "></path><path d="M73.9726042,19.4088529 C75.452356,11.0203704 88.0622688,5.22829657 97.2106453,8.9774793 C98.2254706,9.39337449 99.4016967,8.94600219 99.8378196,7.97824531 C100.273943,7.01048842 99.8048116,5.88881678 98.7899862,5.47292159 C87.3457328,0.782843812 71.9550264,7.85221132 70.0280273,18.7760684 C69.84479,19.8148122 70.5792704,20.798534 71.6685352,20.9732726 C72.7578,21.1480113 73.7893668,20.4475967 73.9726042,19.4088529 Z" id="Eyebrow" transform="translate(85.000414, 12.500000) scale(1, -1) translate(-85.000414, -12.500000) "></path></g></g><g id="Top" stroke-width="1" fill-rule="evenodd"><defs><rect id="react-path-1462972" x="0" y="0" width="264" height="280"></rect><path d="M162.831093,71.6181521 C162.943003,73.0640672 163,74.5253775 163,76 L163,114 C163,136.339168 149.919579,155.623239 131,164.610951 L131,183 L135,183 C136.524404,183 137.037743,183.047374 138.538625,183.140731 C123.625568,210.496321 119.823733,233.574048 137.47212,247.543277 C139.169858,248.745686 140.396085,249.328761 140.607243,249.428275 C142.980035,250.546232 145.444343,251.76781 148.074296,252.382591 C152.696796,253.463231 158.007057,252.010459 162.630756,251.429524 C164.742591,251.164137 166.847633,251.000636 168.977452,250.993519 C171.542066,250.985014 174.188404,251.078221 176.119408,252.691023 C178.003455,254.264772 177.763079,259.889444 172.244213,262.523872 C176.3432,264.37915 181.25603,260.071171 182.931671,257.34666 C184.398107,254.962171 185.526058,252.378599 186.146081,249.741914 C186.917963,246.458686 186.967717,243.016815 186.363678,239.728032 C185.106048,232.88022 182.187563,226.295538 180.201011,219.605673 C179.468692,217.139607 178.51478,214.440611 178.099366,211.916746 C177.986471,211.23167 177.851996,208.701383 177.957698,208.171998 C178.036425,207.778517 178.016643,207.37549 179.372782,206.996069 C183.288539,205.899634 187.379733,204.063449 190.225486,201.476579 C193.590156,198.418295 195.343925,194.445304 196.758409,190.497133 C198.998525,184.244662 200.281132,177.550111 200.870584,171.057073 C200.99307,169.708269 201.062205,168.361722 201.086383,167.009968 C201.10077,166.193153 201.000862,165.263344 201.094375,164.445141 C201.247433,163.105189 201.039826,163.457881 202.341615,162.571291 C206.599454,159.671476 209.921164,155.448546 212.051783,151.200622 C215.39827,144.528634 215.834064,137.49302 213.117591,130.733555 C210.864687,125.12728 207.291411,119.498616 201.725588,115.887863 C199.588776,114.501568 197.334273,113.244582 195.115337,111.95809 C193.906862,111.257566 191.067703,110.342511 190.209501,109.441341 C189.609259,108.810939 190.56477,105.649382 190.685858,104.583322 C191.213967,99.9353218 190.606132,95.4261763 189.520542,90.8868298 C187.127368,80.8793698 177.487944,64.7382958 173.617944,55.2249863 C170.293437,47.0528435 165.481911,-0.0750473139 108.58669,0.198941193 C51.691468,0.4729297 41.4185991,50.4377258 33.7159879,59.7736698 C25.3512665,69.9121239 16.9074766,89.1763214 22.602684,107.035643 C17.099033,113.95809 4.54481227,124.04369 1.3853513,134.125611 C-0.596804833,140.450807 -0.511883829,147.495621 2.0289526,153.633016 C3.46621561,157.104393 5.52490056,160.250502 7.94045353,163.272162 C10.0566849,165.919435 12.4084972,168.423513 14.4577909,171.110359 C15.6946403,172.732013 16.0263318,173.129312 15.5599656,175.128304 C14.6406208,179.068318 12.7411877,182.853334 11.0939201,186.603116 C8.54189405,192.412639 6.39748885,197.82226 6.0799842,204.016065 C5.77766543,209.912373 7.40435223,226.688671 24.3409972,236.576369 C26.3249517,237.73442 28.2831301,238.743202 30.3833764,239.685161 C29.2931905,236.290327 30.5294405,224.161856 32.7263968,219.653578 C33.2860762,221.204589 34.2369916,222.697108 35.2618383,224.05216 C36.8611506,226.167444 40.636039,231.460774 45.4085994,231.706547 C43.4722007,228.722725 41.3891385,226.708805 40.7853002,223.10864 C44.7616013,225.068753 50.4191385,226.855644 55.0466338,226.691448 C58.4512667,226.570818 63.4709972,224.871405 66.0000446,222.74779 C57.6284322,224.074724 49.679027,221.3155 46.4820009,215.419366 C45.8146217,214.188415 45.3084926,212.898625 45.0141664,211.558847 C44.5967546,209.659309 43.9381673,206.615432 44.8227444,204.862039 C45.0375932,204.436124 45.3893685,204.001198 45.806628,203.572743 C45.7407358,203.49425 45.6753213,203.415537 45.6103845,203.336606 C51.303506,198.550494 58.4494475,190.932516 62.2752482,185.367908 C62.3459243,185.245492 62.416066,185.122857 62.4856702,185 L62.5253504,185 C62.5536953,184.957813 62.5818364,184.915755 62.6097716,184.873828 C67.874859,183.648086 73.3617452,183 79,183 L83,183 L83,164.610951 C64.0804213,155.623239 51,136.339168 51,114 L51,76 L51,76 C51,73.537425 51.1589523,71.1119753 51.4671565,68.733351 C55.4088487,67.4702772 59.365485,66.2776957 63.3986046,65.2045441 C67.8552588,64.0189378 77.7980098,62.0907786 81.6887904,61.1941723 L84.4252449,58.215348 L85.4876566,60.1702128 C87.6456492,60.0042337 99.5663601,58.212708 99.5663601,58.212708 L100.896323,54.9898699 C102.612526,56.7530625 103.834989,57.668872 103.834989,57.668872 C106.391211,57.460454 117.488488,57.2113208 120.119841,57.2427023 C120.119841,57.2427023 127.460212,57.5012269 129.240756,57.5714137 L130.907605,56.9328981 L131.456495,58.0098503 C132.910143,58.601117 141.699367,61.6008734 143.434153,62.138079 L145.980784,61.2323702 C147.100342,63.9256202 149.920119,63.586016 152.257345,65.7132858 C154.760315,67.9915694 159.482831,69.7372554 162.831093,71.6181521 Z" id="react-path-1462973"></path></defs><mask id="react-mask-1462970" fill="white"><use xlink:href="#react-path-1462972"></use></mask><g id="Mask"></g><g id="Top/Long-Hair/Curvy" mask="url(#react-mask-1462970)"><g transform="translate(-1.000000, 0.000000)"><path d="M100.899906,42.4648024 C91.1016204,48.4721303 82.3855283,56.3273858 76.5871222,65.36024 C73.8252914,69.662826 71.5532049,74.1995784 69.4361743,78.7575668 C68.3739624,81.0447336 67.4048638,83.3600237 66.475928,85.6893613 C65.8894735,87.1594817 64.9889112,88.7449062 65.8359233,90.2878445 C66.3526427,89.9857996 66.5492598,90.0943892 66.224362,90.6353417 C68.9162579,91.3693254 72.6583769,89.3003017 74.9906073,88.5362205 C79.7539763,86.9753339 84.5203425,85.5025753 89.3986046,84.2045441 C93.8552588,83.0189378 103.79801,81.0907786 107.68879,80.1941723 L110.425245,77.215348 L111.487657,79.1702128 C113.645649,79.0042337 125.56636,77.212708 125.56636,77.212708 L126.896323,73.9898699 C128.612526,75.7530625 129.834989,76.668872 129.834989,76.668872 C132.391211,76.460454 143.488488,76.2113208 146.119841,76.2427023 C146.119841,76.2427023 153.460212,76.5012269 155.240756,76.5714137 L156.907605,75.9328981 L157.456495,77.0098503 C158.910143,77.601117 167.699367,80.6008734 169.434153,81.138079 L171.980784,80.2323702 C173.100342,82.9256202 175.920119,82.586016 178.257345,84.7132858 C181.34867,87.5271086 187.825645,89.5285179 190.917768,91.9756241 C192.024938,92.8519441 193.059576,93.7675012 194.100208,94.7015404 C195.255933,95.7385867 195.085291,95.890424 195.460742,97.0802141 C195.573237,97.4361731 196.715775,99.2788807 197.202722,99.4296139 C198.935909,99.9660566 187.048767,68.9435732 183.785603,64.9771662 C180.417736,60.8830307 158.574915,33.3231248 129.612057,34.2254634" id="Top-Shadow" fill-opacity="0.16" fill="#000000" fill-rule="evenodd"></path><g id="Hair" stroke-width="1" fill="none" fill-rule="evenodd" transform="translate(26.000000, 16.000000)"><mask id="react-mask-1462971" fill="white"><use xlink:href="#react-path-1462973"></use></mask><use id="Hair-Mask" fill="#361A0A" xlink:href="#react-path-1462973"></use><g id="Skin/👶🏽-03-Brown" mask="url(#react-mask-1462971)" fill="#4A312C"><g transform="translate(0.000000, 0.000000) " id="Color"><rect x="0" y="0" width="264" height="280"></rect></g></g><path d="M62.6794556,184.462132 C69.755442,174.755405 62.148959,147.786913 56.1278159,137.800593 C72.9649824,130.137708 106.213574,131.553467 155.87359,142.047871 C151.079203,150.900348 149.123448,158.803527 150.006324,165.757409 C145.469118,171.332534 141.720304,177.127222 138.759883,183.141474 L103.888915,191.746789 C81.8528509,194.400378 68.1163643,191.97216 62.6794556,184.462132 Z" id="Shadow" fill-opacity="0.24" fill="#000000" mask="url(#react-mask-1462971)"></path></g><path d="M79.0404573,170.094305 C78.9812573,169.892618 78.8354573,169.667152 78.6348573,169.428842 C78.7708573,169.650142 78.9074573,169.871269 79.0404573,170.094305 Z M56.409572,120.375261 C57.2661752,126.5406 58.7356083,132.465374 60.8662263,138.377476 C62.9277086,144.09848 65.285915,149.836145 68.678559,155.067858 C71.8402179,159.943234 75.6031176,164.4923 78.6348973,169.428772 C77.8378388,168.48126 76.1633964,167.329804 75.5207941,166.65115 C74.4643769,165.535276 73.4750971,164.385382 72.5369698,163.193485 C70.6143583,160.749982 68.9003527,158.193833 67.243494,155.609567 C63.9913192,150.536843 61.5529875,145.034363 59.4397533,139.530668 C55.2902133,128.722708 51.1268862,115.61687 54.7738936,104.200899 C54.4921557,104.935095 55.2326668,106.688314 55.3491585,107.497319 C55.5525692,108.91069 55.7349995,110.333608 55.8267142,111.757219 C56.0123415,114.639678 56.0109428,117.505994 56.409572,120.375261 Z M68.8553146,165.041212 C67.4967783,163.309515 64.9739252,161.944396 63.4129772,160.279177 C61.9976938,158.769648 60.9019131,157.07822 59.9070386,155.339754 C57.6517365,151.39922 56.1697151,147.374505 55.6897616,142.969154 C55.7992598,143.49177 56.6083072,144.395543 56.8630702,144.824778 C57.4766993,145.858902 58.0839345,146.89424 58.6508072,147.948671 C59.7481863,149.989667 60.6639345,152.099744 61.7731027,154.135533 C63.8106073,157.875421 66.402796,161.495374 68.8553146,165.041212 Z M73.5320242,183.498629 C74.6465874,185.460651 75.5723262,187.464851 76.1569823,189.60079 C76.4654954,190.727599 76.7138643,191.869508 76.9272658,193.013501 C76.9962017,193.382508 77.0093894,194.709963 77.1846264,195.283955 C74.9700864,190.992812 73.2798587,186.448779 70.6421125,182.34214 C68.0381348,178.288092 64.6948448,174.560527 61.1958996,171.061031 C57.5013364,167.36575 53.7855929,163.879099 51.8038364,159.214262 C50.0788411,155.153619 49.4126608,150.996124 49.8138875,146.658464 C49.8160855,148.56911 51.5706533,151.280256 52.1766896,153.126681 C53.0063178,155.654018 53.6655046,158.231689 54.9143429,160.634229 C57.039566,164.722991 60.873,167.876911 64.0792175,171.321558 C67.631513,175.137643 71.0245567,179.084252 73.5320242,183.498629 Z M59.2286696,174.179456 C60.2874847,175.196917 61.2164205,176.28259 62.0352588,177.454354 C62.9328239,178.738937 63.5914112,180.09017 64.1800637,181.504062 C64.6869921,182.721301 64.9105841,184.986375 65.7074428,186.0021 C63.1288415,182.856337 60.4739112,179.884838 58.6955655,176.312444 C58.0893295,175.089825 57.1480051,173.289222 56.4530516,171.817184 C56.6844363,172.409922 58.7059559,173.677148 59.2286696,174.179456 Z M48.9033745,180.528033 C51.7405353,184.777866 55.450684,188.609052 57.877027,193.056233 C60.7067946,198.242644 61.9518364,203.862978 62.202803,209.595957 C62.3216924,212.307277 62.3152983,215.0606 61.9498383,217.764455 C61.7540204,219.211673 61.4399126,220.650211 61.0810465,222.075732 C60.944973,222.616747 60.2406283,224.002173 60.1037556,224.846586 C59.8140251,214.305575 61.5584024,203.763696 56.0767017,193.942823 C53.4811162,189.292219 49.4912277,185.327212 46.398105,180.924811 C43.6164926,176.966226 40.8998197,173.083838 38.6846803,168.851361 C40.0408188,170.567263 42.485145,171.915893 44.0009349,173.619818 C45.8995688,175.753674 47.3488206,178.199606 48.9033745,180.528033 Z M60.1036574,224.846603 C60.0710574,225.050581 60.0700574,225.224111 60.1172574,225.346603 C60.1116574,225.180112 60.1082574,225.01327 60.1036574,224.846603 Z M50.5604331,202.493815 C50.5610325,202.989874 51.376474,204.011501 51.5992667,204.528562 C52.1207816,205.73799 52.5455864,207.007473 52.7573894,208.289626 C53.1752007,210.818004 52.6269108,213.429521 51.6899823,215.850286 C49.7909489,220.757251 46.8161162,225.102895 43.0767946,229.15 C44.4121524,227.402335 44.9438578,224.56136 45.8833838,222.612182 C46.8478866,220.611106 47.8829238,218.6411 48.7335325,216.600624 C50.652947,211.995842 50.4835046,207.289696 50.5604331,202.493815 Z M41.9174331,221.200893 C42.3180604,220.652936 42.1102537,218.018161 42.3222565,217.328919 C42.714092,216.055618 43.3920613,214.827097 44.170737,213.693866 C43.7551236,214.392828 44.3691524,216.160106 44.1663411,217.067177 C43.8338504,218.55553 42.9962296,219.998582 41.9174331,221.200893 Z M99.6077106,42.748374 C99.5269106,42.804974 99.4471106,42.908174 99.3681106,43.044574 C99.4481106,42.945974 99.5267106,42.846574 99.6077106,42.748374 Z M84.8469387,64.3317143 C86.2672175,63.085837 87.0237138,60.1410677 88.0032026,58.5522183 C89.1283559,56.7269681 90.4213532,54.9730547 91.6476125,53.1960567 C94.0795502,49.6719145 96.3744154,46.2123399 99.3680307,43.0054816 C98.7464089,43.9398028 98.1949219,46.7736616 97.8536394,47.5189663 C96.9620688,49.4667561 95.8988578,51.3334892 94.6328355,53.1235049 C91.7722965,57.1680066 88.7029517,60.9266404 84.8469387,64.3317143 Z M84.3117165,54.1218036 C85.0620186,52.7952168 86.2055548,51.6739619 87.4917584,50.7082248 C86.9188913,51.2107066 86.6607314,53.2831189 86.2670976,53.9831221 C85.472237,55.3952784 84.3143141,56.6130375 83.0714703,57.7545999 C83.7352528,57.1726235 83.842553,54.9516363 84.3117165,54.1218036 Z M203.505599,152.127968 C203.498805,152.179518 203.485417,152.282271 203.464637,152.438483 C203.462638,150.913159 202.784469,149.237352 202.704144,147.668984 C202.592048,145.478545 202.906556,143.353715 203.787137,141.277137 C205.526519,137.175704 208.790083,134.069516 212.950612,131.638511 C211.805877,132.313173 210.683921,134.851617 209.949604,135.906916 C208.84663,137.493162 207.668126,139.094161 206.735993,140.757819 C204.793001,144.225725 204.229725,148.375062 203.505599,152.127968 Z M201.998401,130.481881 C201.761221,131.706583 201.448912,132.921738 201.009121,134.107908 C200.534762,135.386937 199.915938,136.630558 199.22578,137.835993 C198.79578,138.586852 197.246621,140.162684 197.24762,140.993211 C197.165296,136.095098 198.975812,131.657983 202.419809,127.7355 C202.04236,128.392806 202.137271,129.766083 201.998401,130.481881 Z M201.196906,165.719988 C204.852905,165.202752 208.302496,166.981313 210.618342,169.271033 C211.855791,170.494694 212.955568,171.900428 213.683091,173.404055 C214.229783,174.534509 214.228783,176.387356 214.9631,177.323587 C213.165772,174.905078 210.886892,172.951214 208.638584,170.859535 C207.075238,169.404855 203.950944,165.678852 201.196906,165.719988 Z M200.41897,176.096698 C200.227148,176.031957 198.485169,175.539368 198.081944,175.776984 C198.679388,175.510035 199.412106,175.184941 200.068895,175.097983 C204.35311,174.529024 209.561066,178.239232 210.13633,181.81909 C209.657576,180.592826 207.111145,179.578489 205.959616,178.968568 C204.136711,178.002484 202.395531,176.832456 200.41897,176.096698 Z M202.227687,183.908269 C202.969797,184.089822 204.54713,185.083504 205.275252,185.072742 C202.345977,185.143906 199.703236,184.81829 196.883858,184.158729 C197.036117,184.200212 198.643022,183.702937 198.694974,183.695647 C199.910043,183.523987 201.052381,183.620492 202.227687,183.908269 Z M190.882541,197.765243 C195.171151,197.522941 200.218656,198.149351 204.314046,199.181739 C206.346955,199.694288 208.253382,200.468058 210.006351,201.476666 C211.420436,202.290531 213.935896,203.408661 214.881616,204.614097 C211.142494,198.162369 203.032039,194.811448 194.722769,196.473197 C193.615199,196.695886 191.914181,197.749796 190.882541,197.765243 Z M189.923153,210.197773 C192.611453,209.233424 195.584487,208.30431 198.505969,208.169273 C201.277391,208.042395 204.351332,208.458613 206.915546,209.342078 C206.033367,209.102206 203.92333,209.674289 202.995793,209.779298 C201.699199,209.926138 200.399608,210.077837 199.099817,210.196558 C197.506299,210.342009 195.898395,210.422718 194.298883,210.41942 C193.159543,210.41699 190.979371,209.87858 189.923153,210.197773 Z M179.458947,227.410508 C179.711912,231.383499 182.010574,234.84533 185.39043,237.491388 C188.973097,240.296087 193.769036,241.572686 196.369816,245.319691 C197.637437,247.145462 198.312809,249.270812 198.20431,251.417686 C198.148362,252.524014 197.870221,253.636069 197.5695,254.712196 C197.371684,255.420184 196.66734,256.580144 196.667939,257.270775 C196.69911,253.384221 196.751661,248.859281 194.031592,245.598095 C191.300932,242.324066 186.539161,241.170701 183.203065,238.482813 C179.924714,235.841442 177.437828,232.389157 176.877749,228.498264 C176.425569,225.354411 176.648562,219.871892 179.90773,217.738557 C179.246345,218.128392 179.377224,220.111764 179.361438,220.669267 C179.298097,222.900321 179.317079,225.185182 179.458947,227.410508 Z M177.005789,242.672904 C177.402221,243.19257 179.575399,243.82436 180.213805,244.182606 C181.67045,245.000116 183.07914,245.92923 184.234665,247.059684 C186.55111,249.326146 188.044121,252.504886 188.151821,255.553623 C188.151821,254.833139 186.505553,253.096583 186.043183,252.481107 C185.275297,251.458613 184.407904,250.511969 183.524526,249.564283 C181.371329,247.253734 179.135209,244.999942 177.005789,242.672904 Z M229.167807,153.791051 C230.371887,154.841663 231.178936,156.147595 231.842519,157.49987 C233.373295,160.619424 233.65823,164.217333 232.431571,167.500388 C232.634582,166.795698 232.030544,165.31585 231.860502,164.601614 C231.488248,163.038626 230.906389,161.56225 230.298355,160.059664 C229.118053,157.144401 228.163741,154.41208 226.113648,151.858014 C226.644354,152.52556 228.442481,153.157872 229.167807,153.791051 Z M171.509602,41.9832998 C171.510002,42.3148163 172.426549,43.2758671 172.633357,43.6374111 C173.149677,44.5392749 173.557297,45.4857459 173.696967,46.4924453 C173.85542,47.6336606 173.6616,48.7505762 173.315522,49.8605491 C173.109914,50.5202844 172.131624,51.7949741 172.132423,52.3894475 C171.972572,48.891167 171.198691,45.5298324 171.509602,41.9832998 Z M179.146978,48.8048339 C179.312224,50.0477605 178.906202,51.4491555 178.183074,52.546805 C178.314952,52.2364639 177.729296,50.1642252 177.710314,49.7849773 C177.650969,48.6118253 177.77925,47.4056953 177.856378,46.2332376 C177.857178,46.8738803 179.039478,47.9958294 179.146978,48.8048339 Z M118.377388,50.3732542 C117.142336,51.8857333 115.738043,53.3032702 114.227248,54.6164922 C113.2036,55.5060327 111.243024,56.5057893 110.46315,57.5267214 C113.964293,51.8147436 118.00913,46.8878178 122.764906,41.8951095 C122.049172,42.8155452 121.862346,44.8121078 121.337434,45.8885819 C120.563354,47.4758692 119.527518,48.9645693 118.377388,50.3732542 Z M124.275361,52.8515919 C124.845431,52.5155626 125.378934,50.859195 125.81333,50.3013446 C126.54465,49.3623371 127.437619,48.4554398 128.390733,47.6728177 C128.186123,47.8927295 127.788693,49.7158968 127.5657,50.0739694 C126.843372,51.2344508 125.56616,52.1809219 124.275361,52.8515919 Z" id="Lights" fill-opacity="0.6" fill="#FFFFFF" fill-rule="evenodd"></path></g></g></g></g></g></g></g>` },
         error: { vb: '0 0 264 280', corpo: `<desc>Created with getavataaars.com</desc><defs><circle id="react-path-1463351" cx="120" cy="120" r="120"></circle><path d="M12,160 C12,226.27417 65.72583,280 132,280 C198.27417,280 252,226.27417 252,160 L264,160 L264,-1.42108547e-14 L-3.19744231e-14,-1.42108547e-14 L-3.19744231e-14,160 L12,160 Z" id="react-path-1463352"></path><path d="M124,144.610951 L124,163 L128,163 L128,163 C167.764502,163 200,195.235498 200,235 L200,244 L0,244 L0,235 C-4.86974701e-15,195.235498 32.235498,163 72,163 L72,163 L76,163 L76,144.610951 C58.7626345,136.422372 46.3722246,119.687011 44.3051388,99.8812385 C38.4803105,99.0577866 34,94.0521096 34,88 L34,74 C34,68.0540074 38.3245733,63.1180731 44,62.1659169 L44,56 L44,56 C44,25.072054 69.072054,5.68137151e-15 100,0 L100,0 L100,0 C130.927946,-5.68137151e-15 156,25.072054 156,56 L156,62.1659169 C161.675427,63.1180731 166,68.0540074 166,74 L166,88 C166,94.0521096 161.51969,99.0577866 155.694861,99.8812385 C153.627775,119.687011 141.237365,136.422372 124,144.610951 Z" id="react-path-1463353"></path></defs><g id="Avataaar" stroke="none" stroke-width="1" fill="none" fill-rule="evenodd"><g transform="translate(-825.000000, -1100.000000)" id="Avataaar/Circle"><g transform="translate(825.000000, 1100.000000)"><g id="Mask"></g><g id="Avataaar" stroke-width="1" fill-rule="evenodd" mask="url(#react-mask-1463355)"><g id="Body" transform="translate(32.000000, 36.000000)"><mask id="react-mask-1463356" fill="white"><use xlink:href="#react-path-1463353"></use></mask><use fill="#D0C6AC" xlink:href="#react-path-1463353"></use><g id="Skin/👶🏽-03-Brown" mask="url(#react-mask-1463356)" fill="#EDB98A"><g transform="translate(0.000000, 0.000000)" id="Color"><rect x="0" y="0" width="264" height="280"></rect></g></g><path d="M156,79 L156,102 C156,132.927946 130.927946,158 100,158 C69.072054,158 44,132.927946 44,102 L44,79 L44,94 C44,124.927946 69.072054,150 100,150 C130.927946,150 156,124.927946 156,94 L156,79 Z" id="Neck-Shadow" fill-opacity="0.100000001" fill="#000000" mask="url(#react-mask-1463356)"></path></g><g id="Clothing/Shirt-Crew-Neck" transform="translate(0.000000, 170.000000)"><defs><path d="M165.960472,29.2949161 C202.936473,32.3249982 232,63.2942856 232,101.051724 L232,110 L32,110 L32,101.051724 C32,62.9525631 61.591985,31.7649812 99.0454063,29.2195264 C99.0152598,29.5931145 99,29.9692272 99,30.3476251 C99,42.2107177 113.998461,51.8276544 132.5,51.8276544 C151.001539,51.8276544 166,42.2107177 166,30.3476251 C166,29.9946691 165.986723,29.6437014 165.960472,29.2949161 Z" id="react-path-1463357"></path></defs><mask id="react-mask-1463358" fill="white"><use xlink:href="#react-path-1463357"></use></mask><use id="Clothes" fill="#E6E6E6" fill-rule="evenodd" xlink:href="#react-path-1463357"></use><g id="Color/Palette/Gray-01" mask="url(#react-mask-1463358)" fill-rule="evenodd" fill="#262E33"><rect id="🖍Color" x="0" y="0" width="264" height="110"></rect></g><g id="Shadowy" opacity="0.599999964" stroke-width="1" fill-rule="evenodd" mask="url(#react-mask-1463358)" fill-opacity="0.16" fill="#000000"><g transform="translate(92.000000, 4.000000)" id="Hola-👋🏼"><ellipse cx="40.5" cy="27.8476251" rx="39.6351047" ry="26.9138272"></ellipse></g></g></g><g id="Face" transform="translate(76.000000, 82.000000)" fill="#000000"><g id="Mouth/Grimace" transform="translate(2.000000, 52.000000)"><defs><rect id="react-path-1463359" x="24" y="9" width="60" height="22" rx="11"></rect></defs><rect id="Mouth" fill-opacity="0.599999964" fill="#000000" fill-rule="evenodd" x="22" y="7" width="64" height="26" rx="13"></rect><mask id="react-mask-1463360" fill="white"><use xlink:href="#react-path-1463359"></use></mask><use id="Mouth" fill="#FFFFFF" fill-rule="evenodd" xlink:href="#react-path-1463359"></use><path d="M71,22 L62,22 L62,34 L58,34 L58,22 L49,22 L49,34 L45,34 L45,22 L36,22 L36,34 L32,34 L32,22 L24,22 L24,18 L32,18 L32,6 L36,6 L36,18 L45,18 L45,6 L49,6 L49,18 L58,18 L58,6 L62,6 L62,18 L71,18 L71,6 L75,6 L75,18 L83.8666667,18 L83.8666667,22 L75,22 L75,34 L71,34 L71,22 Z" id="Grimace-Teeth" fill="#E6E6E6" fill-rule="evenodd" mask="url(#react-mask-1463360)"></path></g><g id="Nose/Default" transform="translate(28.000000, 40.000000)" fill-opacity="0.16"><path d="M16,8 C16,12.418278 21.372583,16 28,16 L28,16 C34.627417,16 40,12.418278 40,8" id="Nose"></path></g><g id="Eyes/Cry-😢" transform="translate(0.000000, 8.000000)"><circle id="Eye" fill-opacity="0.599999964" fill="#000000" fill-rule="evenodd" cx="30" cy="22" r="6"></circle><path d="M25,27 C25,27 19,34.2706667 19,38.2706667 C19,41.5846667 21.686,44.2706667 25,44.2706667 C28.314,44.2706667 31,41.5846667 31,38.2706667 C31,34.2706667 25,27 25,27 Z" id="Drop" fill="#92D9FF" fill-rule="nonzero"></path><circle id="Eye" fill-opacity="0.599999964" fill="#000000" fill-rule="evenodd" cx="82" cy="22" r="6"></circle></g><g id="Eyebrow/Natural/Angry-Natural" fill-opacity="0.599999964"><path d="M44.8565785,12.2282877 C44.8578785,12.2192877 44.8578785,12.2192877 44.8565785,12.2282877 M17.5862288,7.89238094 C15.2441598,8.3302947 13.0866155,9.78806858 12.1523766,12.0987479 C11.8009169,12.967391 11.3917103,14.9243181 11.7083227,15.8073302 C11.8284629,16.14295 12.0332321,16.1008692 12.9555234,16.0430509 C14.643791,15.9369937 16.9330912,13.6622369 18.7484684,13.2557982 C21.2753939,12.6899315 23.9825295,13.1148447 26.4961798,13.6882381 C30.8109365,14.6725177 36.4854008,17.7875215 40.9461842,16.1699775 C41.2783949,16.0495512 45.6210294,12.9225732 44.3685187,12.2769925 C43.9238011,11.9068186 41.1370145,12.0854053 40.6216067,11.9988489 C38.2277647,11.5971998 35.7297127,10.9345131 33.373373,10.3265657 C28.2329017,9.00016592 22.9666484,6.88073171 17.5862288,7.89238094" id="Eyebrows-The-Web" transform="translate(28.094701, 12.127505) rotate(17.000000) translate(-28.094701, -12.127505) "></path><path d="M100.918293,12.2094196 C100.919593,12.2004196 100.919593,12.2004196 100.918293,12.2094196 M73.5862288,7.89238094 C71.2441598,8.3302947 69.0866155,9.78806858 68.1523766,12.0987479 C67.8009169,12.967391 67.3917103,14.9243181 67.7083227,15.8073302 C67.8284629,16.14295 68.0332321,16.1008692 68.9555234,16.0430509 C70.643791,15.9369937 72.9330912,13.6622369 74.7484684,13.2557982 C77.2753939,12.6899315 79.9825295,13.1148447 82.4961798,13.6882381 C86.8109365,14.6725177 92.4854008,17.7875215 96.9461842,16.1699775 C97.2783949,16.0495512 101.621029,12.9225732 100.368519,12.2769925 C99.9238011,11.9068186 97.1370145,12.0854053 96.6216067,11.9988489 C94.2277647,11.5971998 91.7297127,10.9345131 89.373373,10.3265657 C84.2329017,9.00016592 78.9666484,6.88073171 73.5862288,7.89238094" id="Eyebrows-The-Web" transform="translate(84.094701, 12.127505) scale(-1, 1) rotate(17.000000) translate(-84.094701, -12.127505) "></path></g></g><g id="Top" stroke-width="1" fill-rule="evenodd"><defs><rect id="react-path-1463363" x="0" y="0" width="264" height="280"></rect><path d="M162.831093,71.6181521 C162.943003,73.0640672 163,74.5253775 163,76 L163,114 C163,136.339168 149.919579,155.623239 131,164.610951 L131,183 L135,183 C136.524404,183 137.037743,183.047374 138.538625,183.140731 C123.625568,210.496321 119.823733,233.574048 137.47212,247.543277 C139.169858,248.745686 140.396085,249.328761 140.607243,249.428275 C142.980035,250.546232 145.444343,251.76781 148.074296,252.382591 C152.696796,253.463231 158.007057,252.010459 162.630756,251.429524 C164.742591,251.164137 166.847633,251.000636 168.977452,250.993519 C171.542066,250.985014 174.188404,251.078221 176.119408,252.691023 C178.003455,254.264772 177.763079,259.889444 172.244213,262.523872 C176.3432,264.37915 181.25603,260.071171 182.931671,257.34666 C184.398107,254.962171 185.526058,252.378599 186.146081,249.741914 C186.917963,246.458686 186.967717,243.016815 186.363678,239.728032 C185.106048,232.88022 182.187563,226.295538 180.201011,219.605673 C179.468692,217.139607 178.51478,214.440611 178.099366,211.916746 C177.986471,211.23167 177.851996,208.701383 177.957698,208.171998 C178.036425,207.778517 178.016643,207.37549 179.372782,206.996069 C183.288539,205.899634 187.379733,204.063449 190.225486,201.476579 C193.590156,198.418295 195.343925,194.445304 196.758409,190.497133 C198.998525,184.244662 200.281132,177.550111 200.870584,171.057073 C200.99307,169.708269 201.062205,168.361722 201.086383,167.009968 C201.10077,166.193153 201.000862,165.263344 201.094375,164.445141 C201.247433,163.105189 201.039826,163.457881 202.341615,162.571291 C206.599454,159.671476 209.921164,155.448546 212.051783,151.200622 C215.39827,144.528634 215.834064,137.49302 213.117591,130.733555 C210.864687,125.12728 207.291411,119.498616 201.725588,115.887863 C199.588776,114.501568 197.334273,113.244582 195.115337,111.95809 C193.906862,111.257566 191.067703,110.342511 190.209501,109.441341 C189.609259,108.810939 190.56477,105.649382 190.685858,104.583322 C191.213967,99.9353218 190.606132,95.4261763 189.520542,90.8868298 C187.127368,80.8793698 177.487944,64.7382958 173.617944,55.2249863 C170.293437,47.0528435 165.481911,-0.0750473139 108.58669,0.198941193 C51.691468,0.4729297 41.4185991,50.4377258 33.7159879,59.7736698 C25.3512665,69.9121239 16.9074766,89.1763214 22.602684,107.035643 C17.099033,113.95809 4.54481227,124.04369 1.3853513,134.125611 C-0.596804833,140.450807 -0.511883829,147.495621 2.0289526,153.633016 C3.46621561,157.104393 5.52490056,160.250502 7.94045353,163.272162 C10.0566849,165.919435 12.4084972,168.423513 14.4577909,171.110359 C15.6946403,172.732013 16.0263318,173.129312 15.5599656,175.128304 C14.6406208,179.068318 12.7411877,182.853334 11.0939201,186.603116 C8.54189405,192.412639 6.39748885,197.82226 6.0799842,204.016065 C5.77766543,209.912373 7.40435223,226.688671 24.3409972,236.576369 C26.3249517,237.73442 28.2831301,238.743202 30.3833764,239.685161 C29.2931905,236.290327 30.5294405,224.161856 32.7263968,219.653578 C33.2860762,221.204589 34.2369916,222.697108 35.2618383,224.05216 C36.8611506,226.167444 40.636039,231.460774 45.4085994,231.706547 C43.4722007,228.722725 41.3891385,226.708805 40.7853002,223.10864 C44.7616013,225.068753 50.4191385,226.855644 55.0466338,226.691448 C58.4512667,226.570818 63.4709972,224.871405 66.0000446,222.74779 C57.6284322,224.074724 49.679027,221.3155 46.4820009,215.419366 C45.8146217,214.188415 45.3084926,212.898625 45.0141664,211.558847 C44.5967546,209.659309 43.9381673,206.615432 44.8227444,204.862039 C45.0375932,204.436124 45.3893685,204.001198 45.806628,203.572743 C45.7407358,203.49425 45.6753213,203.415537 45.6103845,203.336606 C51.303506,198.550494 58.4494475,190.932516 62.2752482,185.367908 C62.3459243,185.245492 62.416066,185.122857 62.4856702,185 L62.5253504,185 C62.5536953,184.957813 62.5818364,184.915755 62.6097716,184.873828 C67.874859,183.648086 73.3617452,183 79,183 L83,183 L83,164.610951 C64.0804213,155.623239 51,136.339168 51,114 L51,76 L51,76 C51,73.537425 51.1589523,71.1119753 51.4671565,68.733351 C55.4088487,67.4702772 59.365485,66.2776957 63.3986046,65.2045441 C67.8552588,64.0189378 77.7980098,62.0907786 81.6887904,61.1941723 L84.4252449,58.215348 L85.4876566,60.1702128 C87.6456492,60.0042337 99.5663601,58.212708 99.5663601,58.212708 L100.896323,54.9898699 C102.612526,56.7530625 103.834989,57.668872 103.834989,57.668872 C106.391211,57.460454 117.488488,57.2113208 120.119841,57.2427023 C120.119841,57.2427023 127.460212,57.5012269 129.240756,57.5714137 L130.907605,56.9328981 L131.456495,58.0098503 C132.910143,58.601117 141.699367,61.6008734 143.434153,62.138079 L145.980784,61.2323702 C147.100342,63.9256202 149.920119,63.586016 152.257345,65.7132858 C154.760315,67.9915694 159.482831,69.7372554 162.831093,71.6181521 Z" id="react-path-1463364"></path></defs><mask id="react-mask-1463361" fill="white"><use xlink:href="#react-path-1463363"></use></mask><g id="Mask"></g><g id="Top/Long-Hair/Curvy" mask="url(#react-mask-1463361)"><g transform="translate(-1.000000, 0.000000)"><path d="M100.899906,42.4648024 C91.1016204,48.4721303 82.3855283,56.3273858 76.5871222,65.36024 C73.8252914,69.662826 71.5532049,74.1995784 69.4361743,78.7575668 C68.3739624,81.0447336 67.4048638,83.3600237 66.475928,85.6893613 C65.8894735,87.1594817 64.9889112,88.7449062 65.8359233,90.2878445 C66.3526427,89.9857996 66.5492598,90.0943892 66.224362,90.6353417 C68.9162579,91.3693254 72.6583769,89.3003017 74.9906073,88.5362205 C79.7539763,86.9753339 84.5203425,85.5025753 89.3986046,84.2045441 C93.8552588,83.0189378 103.79801,81.0907786 107.68879,80.1941723 L110.425245,77.215348 L111.487657,79.1702128 C113.645649,79.0042337 125.56636,77.212708 125.56636,77.212708 L126.896323,73.9898699 C128.612526,75.7530625 129.834989,76.668872 129.834989,76.668872 C132.391211,76.460454 143.488488,76.2113208 146.119841,76.2427023 C146.119841,76.2427023 153.460212,76.5012269 155.240756,76.5714137 L156.907605,75.9328981 L157.456495,77.0098503 C158.910143,77.601117 167.699367,80.6008734 169.434153,81.138079 L171.980784,80.2323702 C173.100342,82.9256202 175.920119,82.586016 178.257345,84.7132858 C181.34867,87.5271086 187.825645,89.5285179 190.917768,91.9756241 C192.024938,92.8519441 193.059576,93.7675012 194.100208,94.7015404 C195.255933,95.7385867 195.085291,95.890424 195.460742,97.0802141 C195.573237,97.4361731 196.715775,99.2788807 197.202722,99.4296139 C198.935909,99.9660566 187.048767,68.9435732 183.785603,64.9771662 C180.417736,60.8830307 158.574915,33.3231248 129.612057,34.2254634" id="Top-Shadow" fill-opacity="0.16" fill="#000000" fill-rule="evenodd"></path><g id="Hair" stroke-width="1" fill="none" fill-rule="evenodd" transform="translate(26.000000, 16.000000)"><mask id="react-mask-1463362" fill="white"><use xlink:href="#react-path-1463364"></use></mask><use id="Hair-Mask" fill="#361A0A" xlink:href="#react-path-1463364"></use><g id="Skin/👶🏽-03-Brown" mask="url(#react-mask-1463362)" fill="#4A312C"><g transform="translate(0.000000, 0.000000) " id="Color"><rect x="0" y="0" width="264" height="280"></rect></g></g><path d="M62.6794556,184.462132 C69.755442,174.755405 62.148959,147.786913 56.1278159,137.800593 C72.9649824,130.137708 106.213574,131.553467 155.87359,142.047871 C151.079203,150.900348 149.123448,158.803527 150.006324,165.757409 C145.469118,171.332534 141.720304,177.127222 138.759883,183.141474 L103.888915,191.746789 C81.8528509,194.400378 68.1163643,191.97216 62.6794556,184.462132 Z" id="Shadow" fill-opacity="0.24" fill="#000000" mask="url(#react-mask-1463362)"></path></g><path d="M79.0404573,170.094305 C78.9812573,169.892618 78.8354573,169.667152 78.6348573,169.428842 C78.7708573,169.650142 78.9074573,169.871269 79.0404573,170.094305 Z M56.409572,120.375261 C57.2661752,126.5406 58.7356083,132.465374 60.8662263,138.377476 C62.9277086,144.09848 65.285915,149.836145 68.678559,155.067858 C71.8402179,159.943234 75.6031176,164.4923 78.6348973,169.428772 C77.8378388,168.48126 76.1633964,167.329804 75.5207941,166.65115 C74.4643769,165.535276 73.4750971,164.385382 72.5369698,163.193485 C70.6143583,160.749982 68.9003527,158.193833 67.243494,155.609567 C63.9913192,150.536843 61.5529875,145.034363 59.4397533,139.530668 C55.2902133,128.722708 51.1268862,115.61687 54.7738936,104.200899 C54.4921557,104.935095 55.2326668,106.688314 55.3491585,107.497319 C55.5525692,108.91069 55.7349995,110.333608 55.8267142,111.757219 C56.0123415,114.639678 56.0109428,117.505994 56.409572,120.375261 Z M68.8553146,165.041212 C67.4967783,163.309515 64.9739252,161.944396 63.4129772,160.279177 C61.9976938,158.769648 60.9019131,157.07822 59.9070386,155.339754 C57.6517365,151.39922 56.1697151,147.374505 55.6897616,142.969154 C55.7992598,143.49177 56.6083072,144.395543 56.8630702,144.824778 C57.4766993,145.858902 58.0839345,146.89424 58.6508072,147.948671 C59.7481863,149.989667 60.6639345,152.099744 61.7731027,154.135533 C63.8106073,157.875421 66.402796,161.495374 68.8553146,165.041212 Z M73.5320242,183.498629 C74.6465874,185.460651 75.5723262,187.464851 76.1569823,189.60079 C76.4654954,190.727599 76.7138643,191.869508 76.9272658,193.013501 C76.9962017,193.382508 77.0093894,194.709963 77.1846264,195.283955 C74.9700864,190.992812 73.2798587,186.448779 70.6421125,182.34214 C68.0381348,178.288092 64.6948448,174.560527 61.1958996,171.061031 C57.5013364,167.36575 53.7855929,163.879099 51.8038364,159.214262 C50.0788411,155.153619 49.4126608,150.996124 49.8138875,146.658464 C49.8160855,148.56911 51.5706533,151.280256 52.1766896,153.126681 C53.0063178,155.654018 53.6655046,158.231689 54.9143429,160.634229 C57.039566,164.722991 60.873,167.876911 64.0792175,171.321558 C67.631513,175.137643 71.0245567,179.084252 73.5320242,183.498629 Z M59.2286696,174.179456 C60.2874847,175.196917 61.2164205,176.28259 62.0352588,177.454354 C62.9328239,178.738937 63.5914112,180.09017 64.1800637,181.504062 C64.6869921,182.721301 64.9105841,184.986375 65.7074428,186.0021 C63.1288415,182.856337 60.4739112,179.884838 58.6955655,176.312444 C58.0893295,175.089825 57.1480051,173.289222 56.4530516,171.817184 C56.6844363,172.409922 58.7059559,173.677148 59.2286696,174.179456 Z M48.9033745,180.528033 C51.7405353,184.777866 55.450684,188.609052 57.877027,193.056233 C60.7067946,198.242644 61.9518364,203.862978 62.202803,209.595957 C62.3216924,212.307277 62.3152983,215.0606 61.9498383,217.764455 C61.7540204,219.211673 61.4399126,220.650211 61.0810465,222.075732 C60.944973,222.616747 60.2406283,224.002173 60.1037556,224.846586 C59.8140251,214.305575 61.5584024,203.763696 56.0767017,193.942823 C53.4811162,189.292219 49.4912277,185.327212 46.398105,180.924811 C43.6164926,176.966226 40.8998197,173.083838 38.6846803,168.851361 C40.0408188,170.567263 42.485145,171.915893 44.0009349,173.619818 C45.8995688,175.753674 47.3488206,178.199606 48.9033745,180.528033 Z M60.1036574,224.846603 C60.0710574,225.050581 60.0700574,225.224111 60.1172574,225.346603 C60.1116574,225.180112 60.1082574,225.01327 60.1036574,224.846603 Z M50.5604331,202.493815 C50.5610325,202.989874 51.376474,204.011501 51.5992667,204.528562 C52.1207816,205.73799 52.5455864,207.007473 52.7573894,208.289626 C53.1752007,210.818004 52.6269108,213.429521 51.6899823,215.850286 C49.7909489,220.757251 46.8161162,225.102895 43.0767946,229.15 C44.4121524,227.402335 44.9438578,224.56136 45.8833838,222.612182 C46.8478866,220.611106 47.8829238,218.6411 48.7335325,216.600624 C50.652947,211.995842 50.4835046,207.289696 50.5604331,202.493815 Z M41.9174331,221.200893 C42.3180604,220.652936 42.1102537,218.018161 42.3222565,217.328919 C42.714092,216.055618 43.3920613,214.827097 44.170737,213.693866 C43.7551236,214.392828 44.3691524,216.160106 44.1663411,217.067177 C43.8338504,218.55553 42.9962296,219.998582 41.9174331,221.200893 Z M99.6077106,42.748374 C99.5269106,42.804974 99.4471106,42.908174 99.3681106,43.044574 C99.4481106,42.945974 99.5267106,42.846574 99.6077106,42.748374 Z M84.8469387,64.3317143 C86.2672175,63.085837 87.0237138,60.1410677 88.0032026,58.5522183 C89.1283559,56.7269681 90.4213532,54.9730547 91.6476125,53.1960567 C94.0795502,49.6719145 96.3744154,46.2123399 99.3680307,43.0054816 C98.7464089,43.9398028 98.1949219,46.7736616 97.8536394,47.5189663 C96.9620688,49.4667561 95.8988578,51.3334892 94.6328355,53.1235049 C91.7722965,57.1680066 88.7029517,60.9266404 84.8469387,64.3317143 Z M84.3117165,54.1218036 C85.0620186,52.7952168 86.2055548,51.6739619 87.4917584,50.7082248 C86.9188913,51.2107066 86.6607314,53.2831189 86.2670976,53.9831221 C85.472237,55.3952784 84.3143141,56.6130375 83.0714703,57.7545999 C83.7352528,57.1726235 83.842553,54.9516363 84.3117165,54.1218036 Z M203.505599,152.127968 C203.498805,152.179518 203.485417,152.282271 203.464637,152.438483 C203.462638,150.913159 202.784469,149.237352 202.704144,147.668984 C202.592048,145.478545 202.906556,143.353715 203.787137,141.277137 C205.526519,137.175704 208.790083,134.069516 212.950612,131.638511 C211.805877,132.313173 210.683921,134.851617 209.949604,135.906916 C208.84663,137.493162 207.668126,139.094161 206.735993,140.757819 C204.793001,144.225725 204.229725,148.375062 203.505599,152.127968 Z M201.998401,130.481881 C201.761221,131.706583 201.448912,132.921738 201.009121,134.107908 C200.534762,135.386937 199.915938,136.630558 199.22578,137.835993 C198.79578,138.586852 197.246621,140.162684 197.24762,140.993211 C197.165296,136.095098 198.975812,131.657983 202.419809,127.7355 C202.04236,128.392806 202.137271,129.766083 201.998401,130.481881 Z M201.196906,165.719988 C204.852905,165.202752 208.302496,166.981313 210.618342,169.271033 C211.855791,170.494694 212.955568,171.900428 213.683091,173.404055 C214.229783,174.534509 214.228783,176.387356 214.9631,177.323587 C213.165772,174.905078 210.886892,172.951214 208.638584,170.859535 C207.075238,169.404855 203.950944,165.678852 201.196906,165.719988 Z M200.41897,176.096698 C200.227148,176.031957 198.485169,175.539368 198.081944,175.776984 C198.679388,175.510035 199.412106,175.184941 200.068895,175.097983 C204.35311,174.529024 209.561066,178.239232 210.13633,181.81909 C209.657576,180.592826 207.111145,179.578489 205.959616,178.968568 C204.136711,178.002484 202.395531,176.832456 200.41897,176.096698 Z M202.227687,183.908269 C202.969797,184.089822 204.54713,185.083504 205.275252,185.072742 C202.345977,185.143906 199.703236,184.81829 196.883858,184.158729 C197.036117,184.200212 198.643022,183.702937 198.694974,183.695647 C199.910043,183.523987 201.052381,183.620492 202.227687,183.908269 Z M190.882541,197.765243 C195.171151,197.522941 200.218656,198.149351 204.314046,199.181739 C206.346955,199.694288 208.253382,200.468058 210.006351,201.476666 C211.420436,202.290531 213.935896,203.408661 214.881616,204.614097 C211.142494,198.162369 203.032039,194.811448 194.722769,196.473197 C193.615199,196.695886 191.914181,197.749796 190.882541,197.765243 Z M189.923153,210.197773 C192.611453,209.233424 195.584487,208.30431 198.505969,208.169273 C201.277391,208.042395 204.351332,208.458613 206.915546,209.342078 C206.033367,209.102206 203.92333,209.674289 202.995793,209.779298 C201.699199,209.926138 200.399608,210.077837 199.099817,210.196558 C197.506299,210.342009 195.898395,210.422718 194.298883,210.41942 C193.159543,210.41699 190.979371,209.87858 189.923153,210.197773 Z M179.458947,227.410508 C179.711912,231.383499 182.010574,234.84533 185.39043,237.491388 C188.973097,240.296087 193.769036,241.572686 196.369816,245.319691 C197.637437,247.145462 198.312809,249.270812 198.20431,251.417686 C198.148362,252.524014 197.870221,253.636069 197.5695,254.712196 C197.371684,255.420184 196.66734,256.580144 196.667939,257.270775 C196.69911,253.384221 196.751661,248.859281 194.031592,245.598095 C191.300932,242.324066 186.539161,241.170701 183.203065,238.482813 C179.924714,235.841442 177.437828,232.389157 176.877749,228.498264 C176.425569,225.354411 176.648562,219.871892 179.90773,217.738557 C179.246345,218.128392 179.377224,220.111764 179.361438,220.669267 C179.298097,222.900321 179.317079,225.185182 179.458947,227.410508 Z M177.005789,242.672904 C177.402221,243.19257 179.575399,243.82436 180.213805,244.182606 C181.67045,245.000116 183.07914,245.92923 184.234665,247.059684 C186.55111,249.326146 188.044121,252.504886 188.151821,255.553623 C188.151821,254.833139 186.505553,253.096583 186.043183,252.481107 C185.275297,251.458613 184.407904,250.511969 183.524526,249.564283 C181.371329,247.253734 179.135209,244.999942 177.005789,242.672904 Z M229.167807,153.791051 C230.371887,154.841663 231.178936,156.147595 231.842519,157.49987 C233.373295,160.619424 233.65823,164.217333 232.431571,167.500388 C232.634582,166.795698 232.030544,165.31585 231.860502,164.601614 C231.488248,163.038626 230.906389,161.56225 230.298355,160.059664 C229.118053,157.144401 228.163741,154.41208 226.113648,151.858014 C226.644354,152.52556 228.442481,153.157872 229.167807,153.791051 Z M171.509602,41.9832998 C171.510002,42.3148163 172.426549,43.2758671 172.633357,43.6374111 C173.149677,44.5392749 173.557297,45.4857459 173.696967,46.4924453 C173.85542,47.6336606 173.6616,48.7505762 173.315522,49.8605491 C173.109914,50.5202844 172.131624,51.7949741 172.132423,52.3894475 C171.972572,48.891167 171.198691,45.5298324 171.509602,41.9832998 Z M179.146978,48.8048339 C179.312224,50.0477605 178.906202,51.4491555 178.183074,52.546805 C178.314952,52.2364639 177.729296,50.1642252 177.710314,49.7849773 C177.650969,48.6118253 177.77925,47.4056953 177.856378,46.2332376 C177.857178,46.8738803 179.039478,47.9958294 179.146978,48.8048339 Z M118.377388,50.3732542 C117.142336,51.8857333 115.738043,53.3032702 114.227248,54.6164922 C113.2036,55.5060327 111.243024,56.5057893 110.46315,57.5267214 C113.964293,51.8147436 118.00913,46.8878178 122.764906,41.8951095 C122.049172,42.8155452 121.862346,44.8121078 121.337434,45.8885819 C120.563354,47.4758692 119.527518,48.9645693 118.377388,50.3732542 Z M124.275361,52.8515919 C124.845431,52.5155626 125.378934,50.859195 125.81333,50.3013446 C126.54465,49.3623371 127.437619,48.4554398 128.390733,47.6728177 C128.186123,47.8927295 127.788693,49.7158968 127.5657,50.0739694 C126.843372,51.2344508 125.56616,52.1809219 124.275361,52.8515919 Z" id="Lights" fill-opacity="0.6" fill="#FFFFFF" fill-rule="evenodd"></path></g></g></g></g></g></g></g>` },
         success: { vb: '0 0 264 280', corpo: `<desc>Created with getavataaars.com</desc><defs><circle id="react-path-1463237" cx="120" cy="120" r="120"></circle><path d="M12,160 C12,226.27417 65.72583,280 132,280 C198.27417,280 252,226.27417 252,160 L264,160 L264,-1.42108547e-14 L-3.19744231e-14,-1.42108547e-14 L-3.19744231e-14,160 L12,160 Z" id="react-path-1463238"></path><path d="M124,144.610951 L124,163 L128,163 L128,163 C167.764502,163 200,195.235498 200,235 L200,244 L0,244 L0,235 C-4.86974701e-15,195.235498 32.235498,163 72,163 L72,163 L76,163 L76,144.610951 C58.7626345,136.422372 46.3722246,119.687011 44.3051388,99.8812385 C38.4803105,99.0577866 34,94.0521096 34,88 L34,74 C34,68.0540074 38.3245733,63.1180731 44,62.1659169 L44,56 L44,56 C44,25.072054 69.072054,5.68137151e-15 100,0 L100,0 L100,0 C130.927946,-5.68137151e-15 156,25.072054 156,56 L156,62.1659169 C161.675427,63.1180731 166,68.0540074 166,74 L166,88 C166,94.0521096 161.51969,99.0577866 155.694861,99.8812385 C153.627775,119.687011 141.237365,136.422372 124,144.610951 Z" id="react-path-1463239"></path></defs><g id="Avataaar" stroke="none" stroke-width="1" fill="none" fill-rule="evenodd"><g transform="translate(-825.000000, -1100.000000)" id="Avataaar/Circle"><g transform="translate(825.000000, 1100.000000)"><g id="Mask"></g><g id="Avataaar" stroke-width="1" fill-rule="evenodd" mask="url(#react-mask-1463241)"><g id="Body" transform="translate(32.000000, 36.000000)"><mask id="react-mask-1463242" fill="white"><use xlink:href="#react-path-1463239"></use></mask><use fill="#D0C6AC" xlink:href="#react-path-1463239"></use><g id="Skin/👶🏽-03-Brown" mask="url(#react-mask-1463242)" fill="#EDB98A"><g transform="translate(0.000000, 0.000000)" id="Color"><rect x="0" y="0" width="264" height="280"></rect></g></g><path d="M156,79 L156,102 C156,132.927946 130.927946,158 100,158 C69.072054,158 44,132.927946 44,102 L44,79 L44,94 C44,124.927946 69.072054,150 100,150 C130.927946,150 156,124.927946 156,94 L156,79 Z" id="Neck-Shadow" fill-opacity="0.100000001" fill="#000000" mask="url(#react-mask-1463242)"></path></g><g id="Clothing/Shirt-Crew-Neck" transform="translate(0.000000, 170.000000)"><defs><path d="M165.960472,29.2949161 C202.936473,32.3249982 232,63.2942856 232,101.051724 L232,110 L32,110 L32,101.051724 C32,62.9525631 61.591985,31.7649812 99.0454063,29.2195264 C99.0152598,29.5931145 99,29.9692272 99,30.3476251 C99,42.2107177 113.998461,51.8276544 132.5,51.8276544 C151.001539,51.8276544 166,42.2107177 166,30.3476251 C166,29.9946691 165.986723,29.6437014 165.960472,29.2949161 Z" id="react-path-1463243"></path></defs><mask id="react-mask-1463244" fill="white"><use xlink:href="#react-path-1463243"></use></mask><use id="Clothes" fill="#E6E6E6" fill-rule="evenodd" xlink:href="#react-path-1463243"></use><g id="Color/Palette/Gray-01" mask="url(#react-mask-1463244)" fill-rule="evenodd" fill="#262E33"><rect id="🖍Color" x="0" y="0" width="264" height="110"></rect></g><g id="Shadowy" opacity="0.599999964" stroke-width="1" fill-rule="evenodd" mask="url(#react-mask-1463244)" fill-opacity="0.16" fill="#000000"><g transform="translate(92.000000, 4.000000)" id="Hola-👋🏼"><ellipse cx="40.5" cy="27.8476251" rx="39.6351047" ry="26.9138272"></ellipse></g></g></g><g id="Face" transform="translate(76.000000, 82.000000)" fill="#000000"><g id="Mouth/Smile" transform="translate(2.000000, 52.000000)"><defs><path d="M35.117844,15.1280772 C36.1757121,24.6198025 44.2259873,32 54,32 C63.8042055,32 71.8740075,24.574136 72.8917593,15.0400546 C72.9736685,14.272746 72.1167429,13 71.042767,13 C56.1487536,13 44.7379213,13 37.0868244,13 C36.0066168,13 35.0120058,14.1784435 35.117844,15.1280772 Z" id="react-path-1463245"></path></defs><mask id="react-mask-1463246" fill="white"><use xlink:href="#react-path-1463245"></use></mask><use id="Mouth" fill-opacity="0.699999988" fill="#000000" fill-rule="evenodd" xlink:href="#react-path-1463245"></use><rect id="Teeth" fill="#FFFFFF" fill-rule="evenodd" mask="url(#react-mask-1463246)" x="39" y="2" width="31" height="16" rx="5"></rect><g id="Tongue" stroke-width="1" fill-rule="evenodd" mask="url(#react-mask-1463246)" fill="#FF4F6D"><g transform="translate(38.000000, 24.000000)"><circle cx="11" cy="11" r="11"></circle><circle cx="21" cy="11" r="11"></circle></g></g></g><g id="Nose/Default" transform="translate(28.000000, 40.000000)" fill-opacity="0.16"><path d="M16,8 C16,12.418278 21.372583,16 28,16 L28,16 C34.627417,16 40,12.418278 40,8" id="Nose"></path></g><g id="Eyes/Happy-😁" transform="translate(0.000000, 8.000000)" fill-opacity="0.599999964"><path d="M16.1601674,22.4473116 C18.006676,18.648508 22.1644225,16 26.9975803,16 C31.8136766,16 35.9591217,18.629842 37.8153518,22.4071242 C38.3667605,23.5291977 37.5821037,24.4474817 36.790607,23.7670228 C34.3395063,21.6597833 30.8587163,20.3437884 26.9975803,20.3437884 C23.2572061,20.3437884 19.8737584,21.5787519 17.4375392,23.5716412 C16.5467928,24.3002944 15.6201012,23.5583844 16.1601674,22.4473116 Z" id="Squint"></path><path d="M74.1601674,22.4473116 C76.006676,18.648508 80.1644225,16 84.9975803,16 C89.8136766,16 93.9591217,18.629842 95.8153518,22.4071242 C96.3667605,23.5291977 95.5821037,24.4474817 94.790607,23.7670228 C92.3395063,21.6597833 88.8587163,20.3437884 84.9975803,20.3437884 C81.2572061,20.3437884 77.8737584,21.5787519 75.4375392,23.5716412 C74.5467928,24.3002944 73.6201012,23.5583844 74.1601674,22.4473116 Z" id="Squint"></path></g><g id="Eyebrow/Natural/Raised-Excited-Natural" fill-opacity="0.599999964"><path d="M22.7663531,1.57844898 L23.6772984,1.17582144 C28.9190996,-0.905265751 36.8645466,-0.0328729562 41.7227321,2.29911638 C42.2897848,2.57148957 41.9021563,3.4519421 41.3211012,3.40711006 C26.4021788,2.25602197 16.3582869,11.5525942 12.9460869,17.8470939 C12.8449215,18.0337142 12.5391523,18.05489 12.4635344,17.8808353 C10.156283,12.5620676 16.9134476,3.89614725 22.7663531,1.57844898 Z" id="Eye-Browse-Reddit"></path><path d="M80.7663531,1.57844898 L81.6772984,1.17582144 C86.9190996,-0.905265751 94.8645466,-0.0328729562 99.7227321,2.29911638 C100.289785,2.57148957 99.9021563,3.4519421 99.3211012,3.40711006 C84.4021788,2.25602197 74.3582869,11.5525942 70.9460869,17.8470939 C70.8449215,18.0337142 70.5391523,18.05489 70.4635344,17.8808353 C68.156283,12.5620676 74.9134476,3.89614725 80.7663531,1.57844898 Z" id="Eye-Browse-Reddit" transform="translate(85.000000, 9.000000) scale(-1, 1) translate(-85.000000, -9.000000) "></path></g></g><g id="Top" stroke-width="1" fill-rule="evenodd"><defs><rect id="react-path-1463249" x="0" y="0" width="264" height="280"></rect><path d="M162.831093,71.6181521 C162.943003,73.0640672 163,74.5253775 163,76 L163,114 C163,136.339168 149.919579,155.623239 131,164.610951 L131,183 L135,183 C136.524404,183 137.037743,183.047374 138.538625,183.140731 C123.625568,210.496321 119.823733,233.574048 137.47212,247.543277 C139.169858,248.745686 140.396085,249.328761 140.607243,249.428275 C142.980035,250.546232 145.444343,251.76781 148.074296,252.382591 C152.696796,253.463231 158.007057,252.010459 162.630756,251.429524 C164.742591,251.164137 166.847633,251.000636 168.977452,250.993519 C171.542066,250.985014 174.188404,251.078221 176.119408,252.691023 C178.003455,254.264772 177.763079,259.889444 172.244213,262.523872 C176.3432,264.37915 181.25603,260.071171 182.931671,257.34666 C184.398107,254.962171 185.526058,252.378599 186.146081,249.741914 C186.917963,246.458686 186.967717,243.016815 186.363678,239.728032 C185.106048,232.88022 182.187563,226.295538 180.201011,219.605673 C179.468692,217.139607 178.51478,214.440611 178.099366,211.916746 C177.986471,211.23167 177.851996,208.701383 177.957698,208.171998 C178.036425,207.778517 178.016643,207.37549 179.372782,206.996069 C183.288539,205.899634 187.379733,204.063449 190.225486,201.476579 C193.590156,198.418295 195.343925,194.445304 196.758409,190.497133 C198.998525,184.244662 200.281132,177.550111 200.870584,171.057073 C200.99307,169.708269 201.062205,168.361722 201.086383,167.009968 C201.10077,166.193153 201.000862,165.263344 201.094375,164.445141 C201.247433,163.105189 201.039826,163.457881 202.341615,162.571291 C206.599454,159.671476 209.921164,155.448546 212.051783,151.200622 C215.39827,144.528634 215.834064,137.49302 213.117591,130.733555 C210.864687,125.12728 207.291411,119.498616 201.725588,115.887863 C199.588776,114.501568 197.334273,113.244582 195.115337,111.95809 C193.906862,111.257566 191.067703,110.342511 190.209501,109.441341 C189.609259,108.810939 190.56477,105.649382 190.685858,104.583322 C191.213967,99.9353218 190.606132,95.4261763 189.520542,90.8868298 C187.127368,80.8793698 177.487944,64.7382958 173.617944,55.2249863 C170.293437,47.0528435 165.481911,-0.0750473139 108.58669,0.198941193 C51.691468,0.4729297 41.4185991,50.4377258 33.7159879,59.7736698 C25.3512665,69.9121239 16.9074766,89.1763214 22.602684,107.035643 C17.099033,113.95809 4.54481227,124.04369 1.3853513,134.125611 C-0.596804833,140.450807 -0.511883829,147.495621 2.0289526,153.633016 C3.46621561,157.104393 5.52490056,160.250502 7.94045353,163.272162 C10.0566849,165.919435 12.4084972,168.423513 14.4577909,171.110359 C15.6946403,172.732013 16.0263318,173.129312 15.5599656,175.128304 C14.6406208,179.068318 12.7411877,182.853334 11.0939201,186.603116 C8.54189405,192.412639 6.39748885,197.82226 6.0799842,204.016065 C5.77766543,209.912373 7.40435223,226.688671 24.3409972,236.576369 C26.3249517,237.73442 28.2831301,238.743202 30.3833764,239.685161 C29.2931905,236.290327 30.5294405,224.161856 32.7263968,219.653578 C33.2860762,221.204589 34.2369916,222.697108 35.2618383,224.05216 C36.8611506,226.167444 40.636039,231.460774 45.4085994,231.706547 C43.4722007,228.722725 41.3891385,226.708805 40.7853002,223.10864 C44.7616013,225.068753 50.4191385,226.855644 55.0466338,226.691448 C58.4512667,226.570818 63.4709972,224.871405 66.0000446,222.74779 C57.6284322,224.074724 49.679027,221.3155 46.4820009,215.419366 C45.8146217,214.188415 45.3084926,212.898625 45.0141664,211.558847 C44.5967546,209.659309 43.9381673,206.615432 44.8227444,204.862039 C45.0375932,204.436124 45.3893685,204.001198 45.806628,203.572743 C45.7407358,203.49425 45.6753213,203.415537 45.6103845,203.336606 C51.303506,198.550494 58.4494475,190.932516 62.2752482,185.367908 C62.3459243,185.245492 62.416066,185.122857 62.4856702,185 L62.5253504,185 C62.5536953,184.957813 62.5818364,184.915755 62.6097716,184.873828 C67.874859,183.648086 73.3617452,183 79,183 L83,183 L83,164.610951 C64.0804213,155.623239 51,136.339168 51,114 L51,76 L51,76 C51,73.537425 51.1589523,71.1119753 51.4671565,68.733351 C55.4088487,67.4702772 59.365485,66.2776957 63.3986046,65.2045441 C67.8552588,64.0189378 77.7980098,62.0907786 81.6887904,61.1941723 L84.4252449,58.215348 L85.4876566,60.1702128 C87.6456492,60.0042337 99.5663601,58.212708 99.5663601,58.212708 L100.896323,54.9898699 C102.612526,56.7530625 103.834989,57.668872 103.834989,57.668872 C106.391211,57.460454 117.488488,57.2113208 120.119841,57.2427023 C120.119841,57.2427023 127.460212,57.5012269 129.240756,57.5714137 L130.907605,56.9328981 L131.456495,58.0098503 C132.910143,58.601117 141.699367,61.6008734 143.434153,62.138079 L145.980784,61.2323702 C147.100342,63.9256202 149.920119,63.586016 152.257345,65.7132858 C154.760315,67.9915694 159.482831,69.7372554 162.831093,71.6181521 Z" id="react-path-1463250"></path></defs><mask id="react-mask-1463247" fill="white"><use xlink:href="#react-path-1463249"></use></mask><g id="Mask"></g><g id="Top/Long-Hair/Curvy" mask="url(#react-mask-1463247)"><g transform="translate(-1.000000, 0.000000)"><path d="M100.899906,42.4648024 C91.1016204,48.4721303 82.3855283,56.3273858 76.5871222,65.36024 C73.8252914,69.662826 71.5532049,74.1995784 69.4361743,78.7575668 C68.3739624,81.0447336 67.4048638,83.3600237 66.475928,85.6893613 C65.8894735,87.1594817 64.9889112,88.7449062 65.8359233,90.2878445 C66.3526427,89.9857996 66.5492598,90.0943892 66.224362,90.6353417 C68.9162579,91.3693254 72.6583769,89.3003017 74.9906073,88.5362205 C79.7539763,86.9753339 84.5203425,85.5025753 89.3986046,84.2045441 C93.8552588,83.0189378 103.79801,81.0907786 107.68879,80.1941723 L110.425245,77.215348 L111.487657,79.1702128 C113.645649,79.0042337 125.56636,77.212708 125.56636,77.212708 L126.896323,73.9898699 C128.612526,75.7530625 129.834989,76.668872 129.834989,76.668872 C132.391211,76.460454 143.488488,76.2113208 146.119841,76.2427023 C146.119841,76.2427023 153.460212,76.5012269 155.240756,76.5714137 L156.907605,75.9328981 L157.456495,77.0098503 C158.910143,77.601117 167.699367,80.6008734 169.434153,81.138079 L171.980784,80.2323702 C173.100342,82.9256202 175.920119,82.586016 178.257345,84.7132858 C181.34867,87.5271086 187.825645,89.5285179 190.917768,91.9756241 C192.024938,92.8519441 193.059576,93.7675012 194.100208,94.7015404 C195.255933,95.7385867 195.085291,95.890424 195.460742,97.0802141 C195.573237,97.4361731 196.715775,99.2788807 197.202722,99.4296139 C198.935909,99.9660566 187.048767,68.9435732 183.785603,64.9771662 C180.417736,60.8830307 158.574915,33.3231248 129.612057,34.2254634" id="Top-Shadow" fill-opacity="0.16" fill="#000000" fill-rule="evenodd"></path><g id="Hair" stroke-width="1" fill="none" fill-rule="evenodd" transform="translate(26.000000, 16.000000)"><mask id="react-mask-1463248" fill="white"><use xlink:href="#react-path-1463250"></use></mask><use id="Hair-Mask" fill="#361A0A" xlink:href="#react-path-1463250"></use><g id="Skin/👶🏽-03-Brown" mask="url(#react-mask-1463248)" fill="#4A312C"><g transform="translate(0.000000, 0.000000) " id="Color"><rect x="0" y="0" width="264" height="280"></rect></g></g><path d="M62.6794556,184.462132 C69.755442,174.755405 62.148959,147.786913 56.1278159,137.800593 C72.9649824,130.137708 106.213574,131.553467 155.87359,142.047871 C151.079203,150.900348 149.123448,158.803527 150.006324,165.757409 C145.469118,171.332534 141.720304,177.127222 138.759883,183.141474 L103.888915,191.746789 C81.8528509,194.400378 68.1163643,191.97216 62.6794556,184.462132 Z" id="Shadow" fill-opacity="0.24" fill="#000000" mask="url(#react-mask-1463248)"></path></g><path d="M79.0404573,170.094305 C78.9812573,169.892618 78.8354573,169.667152 78.6348573,169.428842 C78.7708573,169.650142 78.9074573,169.871269 79.0404573,170.094305 Z M56.409572,120.375261 C57.2661752,126.5406 58.7356083,132.465374 60.8662263,138.377476 C62.9277086,144.09848 65.285915,149.836145 68.678559,155.067858 C71.8402179,159.943234 75.6031176,164.4923 78.6348973,169.428772 C77.8378388,168.48126 76.1633964,167.329804 75.5207941,166.65115 C74.4643769,165.535276 73.4750971,164.385382 72.5369698,163.193485 C70.6143583,160.749982 68.9003527,158.193833 67.243494,155.609567 C63.9913192,150.536843 61.5529875,145.034363 59.4397533,139.530668 C55.2902133,128.722708 51.1268862,115.61687 54.7738936,104.200899 C54.4921557,104.935095 55.2326668,106.688314 55.3491585,107.497319 C55.5525692,108.91069 55.7349995,110.333608 55.8267142,111.757219 C56.0123415,114.639678 56.0109428,117.505994 56.409572,120.375261 Z M68.8553146,165.041212 C67.4967783,163.309515 64.9739252,161.944396 63.4129772,160.279177 C61.9976938,158.769648 60.9019131,157.07822 59.9070386,155.339754 C57.6517365,151.39922 56.1697151,147.374505 55.6897616,142.969154 C55.7992598,143.49177 56.6083072,144.395543 56.8630702,144.824778 C57.4766993,145.858902 58.0839345,146.89424 58.6508072,147.948671 C59.7481863,149.989667 60.6639345,152.099744 61.7731027,154.135533 C63.8106073,157.875421 66.402796,161.495374 68.8553146,165.041212 Z M73.5320242,183.498629 C74.6465874,185.460651 75.5723262,187.464851 76.1569823,189.60079 C76.4654954,190.727599 76.7138643,191.869508 76.9272658,193.013501 C76.9962017,193.382508 77.0093894,194.709963 77.1846264,195.283955 C74.9700864,190.992812 73.2798587,186.448779 70.6421125,182.34214 C68.0381348,178.288092 64.6948448,174.560527 61.1958996,171.061031 C57.5013364,167.36575 53.7855929,163.879099 51.8038364,159.214262 C50.0788411,155.153619 49.4126608,150.996124 49.8138875,146.658464 C49.8160855,148.56911 51.5706533,151.280256 52.1766896,153.126681 C53.0063178,155.654018 53.6655046,158.231689 54.9143429,160.634229 C57.039566,164.722991 60.873,167.876911 64.0792175,171.321558 C67.631513,175.137643 71.0245567,179.084252 73.5320242,183.498629 Z M59.2286696,174.179456 C60.2874847,175.196917 61.2164205,176.28259 62.0352588,177.454354 C62.9328239,178.738937 63.5914112,180.09017 64.1800637,181.504062 C64.6869921,182.721301 64.9105841,184.986375 65.7074428,186.0021 C63.1288415,182.856337 60.4739112,179.884838 58.6955655,176.312444 C58.0893295,175.089825 57.1480051,173.289222 56.4530516,171.817184 C56.6844363,172.409922 58.7059559,173.677148 59.2286696,174.179456 Z M48.9033745,180.528033 C51.7405353,184.777866 55.450684,188.609052 57.877027,193.056233 C60.7067946,198.242644 61.9518364,203.862978 62.202803,209.595957 C62.3216924,212.307277 62.3152983,215.0606 61.9498383,217.764455 C61.7540204,219.211673 61.4399126,220.650211 61.0810465,222.075732 C60.944973,222.616747 60.2406283,224.002173 60.1037556,224.846586 C59.8140251,214.305575 61.5584024,203.763696 56.0767017,193.942823 C53.4811162,189.292219 49.4912277,185.327212 46.398105,180.924811 C43.6164926,176.966226 40.8998197,173.083838 38.6846803,168.851361 C40.0408188,170.567263 42.485145,171.915893 44.0009349,173.619818 C45.8995688,175.753674 47.3488206,178.199606 48.9033745,180.528033 Z M60.1036574,224.846603 C60.0710574,225.050581 60.0700574,225.224111 60.1172574,225.346603 C60.1116574,225.180112 60.1082574,225.01327 60.1036574,224.846603 Z M50.5604331,202.493815 C50.5610325,202.989874 51.376474,204.011501 51.5992667,204.528562 C52.1207816,205.73799 52.5455864,207.007473 52.7573894,208.289626 C53.1752007,210.818004 52.6269108,213.429521 51.6899823,215.850286 C49.7909489,220.757251 46.8161162,225.102895 43.0767946,229.15 C44.4121524,227.402335 44.9438578,224.56136 45.8833838,222.612182 C46.8478866,220.611106 47.8829238,218.6411 48.7335325,216.600624 C50.652947,211.995842 50.4835046,207.289696 50.5604331,202.493815 Z M41.9174331,221.200893 C42.3180604,220.652936 42.1102537,218.018161 42.3222565,217.328919 C42.714092,216.055618 43.3920613,214.827097 44.170737,213.693866 C43.7551236,214.392828 44.3691524,216.160106 44.1663411,217.067177 C43.8338504,218.55553 42.9962296,219.998582 41.9174331,221.200893 Z M99.6077106,42.748374 C99.5269106,42.804974 99.4471106,42.908174 99.3681106,43.044574 C99.4481106,42.945974 99.5267106,42.846574 99.6077106,42.748374 Z M84.8469387,64.3317143 C86.2672175,63.085837 87.0237138,60.1410677 88.0032026,58.5522183 C89.1283559,56.7269681 90.4213532,54.9730547 91.6476125,53.1960567 C94.0795502,49.6719145 96.3744154,46.2123399 99.3680307,43.0054816 C98.7464089,43.9398028 98.1949219,46.7736616 97.8536394,47.5189663 C96.9620688,49.4667561 95.8988578,51.3334892 94.6328355,53.1235049 C91.7722965,57.1680066 88.7029517,60.9266404 84.8469387,64.3317143 Z M84.3117165,54.1218036 C85.0620186,52.7952168 86.2055548,51.6739619 87.4917584,50.7082248 C86.9188913,51.2107066 86.6607314,53.2831189 86.2670976,53.9831221 C85.472237,55.3952784 84.3143141,56.6130375 83.0714703,57.7545999 C83.7352528,57.1726235 83.842553,54.9516363 84.3117165,54.1218036 Z M203.505599,152.127968 C203.498805,152.179518 203.485417,152.282271 203.464637,152.438483 C203.462638,150.913159 202.784469,149.237352 202.704144,147.668984 C202.592048,145.478545 202.906556,143.353715 203.787137,141.277137 C205.526519,137.175704 208.790083,134.069516 212.950612,131.638511 C211.805877,132.313173 210.683921,134.851617 209.949604,135.906916 C208.84663,137.493162 207.668126,139.094161 206.735993,140.757819 C204.793001,144.225725 204.229725,148.375062 203.505599,152.127968 Z M201.998401,130.481881 C201.761221,131.706583 201.448912,132.921738 201.009121,134.107908 C200.534762,135.386937 199.915938,136.630558 199.22578,137.835993 C198.79578,138.586852 197.246621,140.162684 197.24762,140.993211 C197.165296,136.095098 198.975812,131.657983 202.419809,127.7355 C202.04236,128.392806 202.137271,129.766083 201.998401,130.481881 Z M201.196906,165.719988 C204.852905,165.202752 208.302496,166.981313 210.618342,169.271033 C211.855791,170.494694 212.955568,171.900428 213.683091,173.404055 C214.229783,174.534509 214.228783,176.387356 214.9631,177.323587 C213.165772,174.905078 210.886892,172.951214 208.638584,170.859535 C207.075238,169.404855 203.950944,165.678852 201.196906,165.719988 Z M200.41897,176.096698 C200.227148,176.031957 198.485169,175.539368 198.081944,175.776984 C198.679388,175.510035 199.412106,175.184941 200.068895,175.097983 C204.35311,174.529024 209.561066,178.239232 210.13633,181.81909 C209.657576,180.592826 207.111145,179.578489 205.959616,178.968568 C204.136711,178.002484 202.395531,176.832456 200.41897,176.096698 Z M202.227687,183.908269 C202.969797,184.089822 204.54713,185.083504 205.275252,185.072742 C202.345977,185.143906 199.703236,184.81829 196.883858,184.158729 C197.036117,184.200212 198.643022,183.702937 198.694974,183.695647 C199.910043,183.523987 201.052381,183.620492 202.227687,183.908269 Z M190.882541,197.765243 C195.171151,197.522941 200.218656,198.149351 204.314046,199.181739 C206.346955,199.694288 208.253382,200.468058 210.006351,201.476666 C211.420436,202.290531 213.935896,203.408661 214.881616,204.614097 C211.142494,198.162369 203.032039,194.811448 194.722769,196.473197 C193.615199,196.695886 191.914181,197.749796 190.882541,197.765243 Z M189.923153,210.197773 C192.611453,209.233424 195.584487,208.30431 198.505969,208.169273 C201.277391,208.042395 204.351332,208.458613 206.915546,209.342078 C206.033367,209.102206 203.92333,209.674289 202.995793,209.779298 C201.699199,209.926138 200.399608,210.077837 199.099817,210.196558 C197.506299,210.342009 195.898395,210.422718 194.298883,210.41942 C193.159543,210.41699 190.979371,209.87858 189.923153,210.197773 Z M179.458947,227.410508 C179.711912,231.383499 182.010574,234.84533 185.39043,237.491388 C188.973097,240.296087 193.769036,241.572686 196.369816,245.319691 C197.637437,247.145462 198.312809,249.270812 198.20431,251.417686 C198.148362,252.524014 197.870221,253.636069 197.5695,254.712196 C197.371684,255.420184 196.66734,256.580144 196.667939,257.270775 C196.69911,253.384221 196.751661,248.859281 194.031592,245.598095 C191.300932,242.324066 186.539161,241.170701 183.203065,238.482813 C179.924714,235.841442 177.437828,232.389157 176.877749,228.498264 C176.425569,225.354411 176.648562,219.871892 179.90773,217.738557 C179.246345,218.128392 179.377224,220.111764 179.361438,220.669267 C179.298097,222.900321 179.317079,225.185182 179.458947,227.410508 Z M177.005789,242.672904 C177.402221,243.19257 179.575399,243.82436 180.213805,244.182606 C181.67045,245.000116 183.07914,245.92923 184.234665,247.059684 C186.55111,249.326146 188.044121,252.504886 188.151821,255.553623 C188.151821,254.833139 186.505553,253.096583 186.043183,252.481107 C185.275297,251.458613 184.407904,250.511969 183.524526,249.564283 C181.371329,247.253734 179.135209,244.999942 177.005789,242.672904 Z M229.167807,153.791051 C230.371887,154.841663 231.178936,156.147595 231.842519,157.49987 C233.373295,160.619424 233.65823,164.217333 232.431571,167.500388 C232.634582,166.795698 232.030544,165.31585 231.860502,164.601614 C231.488248,163.038626 230.906389,161.56225 230.298355,160.059664 C229.118053,157.144401 228.163741,154.41208 226.113648,151.858014 C226.644354,152.52556 228.442481,153.157872 229.167807,153.791051 Z M171.509602,41.9832998 C171.510002,42.3148163 172.426549,43.2758671 172.633357,43.6374111 C173.149677,44.5392749 173.557297,45.4857459 173.696967,46.4924453 C173.85542,47.6336606 173.6616,48.7505762 173.315522,49.8605491 C173.109914,50.5202844 172.131624,51.7949741 172.132423,52.3894475 C171.972572,48.891167 171.198691,45.5298324 171.509602,41.9832998 Z M179.146978,48.8048339 C179.312224,50.0477605 178.906202,51.4491555 178.183074,52.546805 C178.314952,52.2364639 177.729296,50.1642252 177.710314,49.7849773 C177.650969,48.6118253 177.77925,47.4056953 177.856378,46.2332376 C177.857178,46.8738803 179.039478,47.9958294 179.146978,48.8048339 Z M118.377388,50.3732542 C117.142336,51.8857333 115.738043,53.3032702 114.227248,54.6164922 C113.2036,55.5060327 111.243024,56.5057893 110.46315,57.5267214 C113.964293,51.8147436 118.00913,46.8878178 122.764906,41.8951095 C122.049172,42.8155452 121.862346,44.8121078 121.337434,45.8885819 C120.563354,47.4758692 119.527518,48.9645693 118.377388,50.3732542 Z M124.275361,52.8515919 C124.845431,52.5155626 125.378934,50.859195 125.81333,50.3013446 C126.54465,49.3623371 127.437619,48.4554398 128.390733,47.6728177 C128.186123,47.8927295 127.788693,49.7158968 127.5657,50.0739694 C126.843372,51.2344508 125.56616,52.1809219 124.275361,52.8515919 Z" id="Lights" fill-opacity="0.6" fill="#FFFFFF" fill-rule="evenodd"></path></g></g></g></g></g></g></g>` },
+        sleeping: { vb: '0 0 264 280', corpo: `<desc>Created with getavataaars.com</desc><defs><circle id="react-path-3783617" cx="120" cy="120" r="120"></circle><path d="M12,160 C12,226.27417 65.72583,280 132,280 C198.27417,280 252,226.27417 252,160 L264,160 L264,-1.42108547e-14 L-3.19744231e-14,-1.42108547e-14 L-3.19744231e-14,160 L12,160 Z" id="react-path-3783618"></path><path d="M124,144.610951 L124,163 L128,163 L128,163 C167.764502,163 200,195.235498 200,235 L200,244 L0,244 L0,235 C-4.86974701e-15,195.235498 32.235498,163 72,163 L72,163 L76,163 L76,144.610951 C58.7626345,136.422372 46.3722246,119.687011 44.3051388,99.8812385 C38.4803105,99.0577866 34,94.0521096 34,88 L34,74 C34,68.0540074 38.3245733,63.1180731 44,62.1659169 L44,56 L44,56 C44,25.072054 69.072054,5.68137151e-15 100,0 L100,0 L100,0 C130.927946,-5.68137151e-15 156,25.072054 156,56 L156,62.1659169 C161.675427,63.1180731 166,68.0540074 166,74 L166,88 C166,94.0521096 161.51969,99.0577866 155.694861,99.8812385 C153.627775,119.687011 141.237365,136.422372 124,144.610951 Z" id="react-path-3783619"></path></defs><g id="Avataaar" stroke="none" stroke-width="1" fill="none" fill-rule="evenodd"><g transform="translate(-825.000000, -1100.000000)" id="Avataaar/Circle"><g transform="translate(825.000000, 1100.000000)"><g id="Mask"></g><g id="Avataaar" stroke-width="1" fill-rule="evenodd" mask="url(#react-mask-3783621)"><g id="Body" transform="translate(32.000000, 36.000000)"><mask id="react-mask-3783622" fill="white"><use xlink:href="#react-path-3783619"></use></mask><use fill="#D0C6AC" xlink:href="#react-path-3783619"></use><g id="Skin/👶🏽-03-Brown" mask="url(#react-mask-3783622)" fill="#EDB98A"><g transform="translate(0.000000, 0.000000)" id="Color"><rect x="0" y="0" width="264" height="280"></rect></g></g><path d="M156,79 L156,102 C156,132.927946 130.927946,158 100,158 C69.072054,158 44,132.927946 44,102 L44,79 L44,94 C44,124.927946 69.072054,150 100,150 C130.927946,150 156,124.927946 156,94 L156,79 Z" id="Neck-Shadow" fill-opacity="0.100000001" fill="#000000" mask="url(#react-mask-3783622)"></path></g><g id="Clothing/Shirt-Crew-Neck" transform="translate(0.000000, 170.000000)"><defs><path d="M165.960472,29.2949161 C202.936473,32.3249982 232,63.2942856 232,101.051724 L232,110 L32,110 L32,101.051724 C32,62.9525631 61.591985,31.7649812 99.0454063,29.2195264 C99.0152598,29.5931145 99,29.9692272 99,30.3476251 C99,42.2107177 113.998461,51.8276544 132.5,51.8276544 C151.001539,51.8276544 166,42.2107177 166,30.3476251 C166,29.9946691 165.986723,29.6437014 165.960472,29.2949161 Z" id="react-path-3783623"></path></defs><mask id="react-mask-3783624" fill="white"><use xlink:href="#react-path-3783623"></use></mask><use id="Clothes" fill="#E6E6E6" fill-rule="evenodd" xlink:href="#react-path-3783623"></use><g id="Color/Palette/Gray-01" mask="url(#react-mask-3783624)" fill-rule="evenodd" fill="#262E33"><rect id="🖍Color" x="0" y="0" width="264" height="110"></rect></g><g id="Shadowy" opacity="0.599999964" stroke-width="1" fill-rule="evenodd" mask="url(#react-mask-3783624)" fill-opacity="0.16" fill="#000000"><g transform="translate(92.000000, 4.000000)" id="Hola-👋🏼"><ellipse cx="40.5" cy="27.8476251" rx="39.6351047" ry="26.9138272"></ellipse></g></g></g><g id="Face" transform="translate(76.000000, 82.000000)" fill="#000000"><g id="Mouth/Serious" transform="translate(2.000000, 52.000000)" fill="#000000" fill-opacity="0.699999988"><rect id="Why-so-serious?" x="42" y="18" width="24" height="6" rx="3"></rect></g><g id="Nose/Default" transform="translate(28.000000, 40.000000)" fill-opacity="0.16"><path d="M16,8 C16,12.418278 21.372583,16 28,16 L28,16 C34.627417,16 40,12.418278 40,8" id="Nose"></path></g><g id="Eyes/Closed-😌" transform="translate(0.000000, 8.000000)" fill-opacity="0.599999964"><path d="M16.1601674,32.4473116 C18.006676,28.648508 22.1644225,26 26.9975803,26 C31.8136766,26 35.9591217,28.629842 37.8153518,32.4071242 C38.3667605,33.5291977 37.5821037,34.4474817 36.790607,33.7670228 C34.3395063,31.6597833 30.8587163,30.3437884 26.9975803,30.3437884 C23.2572061,30.3437884 19.8737584,31.5787519 17.4375392,33.5716412 C16.5467928,34.3002944 15.6201012,33.5583844 16.1601674,32.4473116 Z" id="Closed-Eye" transform="translate(27.000000, 30.000000) scale(1, -1) translate(-27.000000, -30.000000) "></path><path d="M74.1601674,32.4473116 C76.006676,28.648508 80.1644225,26 84.9975803,26 C89.8136766,26 93.9591217,28.629842 95.8153518,32.4071242 C96.3667605,33.5291977 95.5821037,34.4474817 94.790607,33.7670228 C92.3395063,31.6597833 88.8587163,30.3437884 84.9975803,30.3437884 C81.2572061,30.3437884 77.8737584,31.5787519 75.4375392,33.5716412 C74.5467928,34.3002944 73.6201012,33.5583844 74.1601674,32.4473116 Z" id="Closed-Eye" transform="translate(85.000000, 30.000000) scale(1, -1) translate(-85.000000, -30.000000) "></path></g><g id="Eyebrow/Natural/Default-Natural" fill-opacity="0.599999964"><path d="M26.0390934,6.21012364 C20.2775554,6.98346216 11.2929313,12.0052479 12.04426,17.8178111 C12.0689481,18.0080543 12.3567302,18.0673468 12.4809077,17.9084937 C14.9674041,14.7203351 34.1927973,10.0365481 41.1942673,11.0147151 C41.8350523,11.1044465 42.2580662,10.4430343 41.8210501,10.0302067 C38.0765663,6.49485426 31.2003792,5.51224825 26.0390934,6.21012364" id="Eyebrow" transform="translate(27.000000, 12.000000) rotate(5.000000) translate(-27.000000, -12.000000) "></path><path d="M85.0390934,6.21012364 C79.2775554,6.98346216 70.2929313,12.0052479 71.04426,17.8178111 C71.0689481,18.0080543 71.3567302,18.0673468 71.4809077,17.9084937 C73.9674041,14.7203351 93.1927973,10.0365481 100.194267,11.0147151 C100.835052,11.1044465 101.258066,10.4430343 100.82105,10.0302067 C97.0765663,6.49485426 90.2003792,5.51224825 85.0390934,6.21012364" id="Eyebrow" transform="translate(86.000000, 12.000000) scale(-1, 1) rotate(5.000000) translate(-86.000000, -12.000000) "></path></g></g><g id="Top" stroke-width="1" fill-rule="evenodd"><defs><rect id="react-path-3783627" x="0" y="0" width="264" height="280"></rect><path d="M162.831093,71.6181521 C162.943003,73.0640672 163,74.5253775 163,76 L163,114 C163,136.339168 149.919579,155.623239 131,164.610951 L131,183 L135,183 C136.524404,183 137.037743,183.047374 138.538625,183.140731 C123.625568,210.496321 119.823733,233.574048 137.47212,247.543277 C139.169858,248.745686 140.396085,249.328761 140.607243,249.428275 C142.980035,250.546232 145.444343,251.76781 148.074296,252.382591 C152.696796,253.463231 158.007057,252.010459 162.630756,251.429524 C164.742591,251.164137 166.847633,251.000636 168.977452,250.993519 C171.542066,250.985014 174.188404,251.078221 176.119408,252.691023 C178.003455,254.264772 177.763079,259.889444 172.244213,262.523872 C176.3432,264.37915 181.25603,260.071171 182.931671,257.34666 C184.398107,254.962171 185.526058,252.378599 186.146081,249.741914 C186.917963,246.458686 186.967717,243.016815 186.363678,239.728032 C185.106048,232.88022 182.187563,226.295538 180.201011,219.605673 C179.468692,217.139607 178.51478,214.440611 178.099366,211.916746 C177.986471,211.23167 177.851996,208.701383 177.957698,208.171998 C178.036425,207.778517 178.016643,207.37549 179.372782,206.996069 C183.288539,205.899634 187.379733,204.063449 190.225486,201.476579 C193.590156,198.418295 195.343925,194.445304 196.758409,190.497133 C198.998525,184.244662 200.281132,177.550111 200.870584,171.057073 C200.99307,169.708269 201.062205,168.361722 201.086383,167.009968 C201.10077,166.193153 201.000862,165.263344 201.094375,164.445141 C201.247433,163.105189 201.039826,163.457881 202.341615,162.571291 C206.599454,159.671476 209.921164,155.448546 212.051783,151.200622 C215.39827,144.528634 215.834064,137.49302 213.117591,130.733555 C210.864687,125.12728 207.291411,119.498616 201.725588,115.887863 C199.588776,114.501568 197.334273,113.244582 195.115337,111.95809 C193.906862,111.257566 191.067703,110.342511 190.209501,109.441341 C189.609259,108.810939 190.56477,105.649382 190.685858,104.583322 C191.213967,99.9353218 190.606132,95.4261763 189.520542,90.8868298 C187.127368,80.8793698 177.487944,64.7382958 173.617944,55.2249863 C170.293437,47.0528435 165.481911,-0.0750473139 108.58669,0.198941193 C51.691468,0.4729297 41.4185991,50.4377258 33.7159879,59.7736698 C25.3512665,69.9121239 16.9074766,89.1763214 22.602684,107.035643 C17.099033,113.95809 4.54481227,124.04369 1.3853513,134.125611 C-0.596804833,140.450807 -0.511883829,147.495621 2.0289526,153.633016 C3.46621561,157.104393 5.52490056,160.250502 7.94045353,163.272162 C10.0566849,165.919435 12.4084972,168.423513 14.4577909,171.110359 C15.6946403,172.732013 16.0263318,173.129312 15.5599656,175.128304 C14.6406208,179.068318 12.7411877,182.853334 11.0939201,186.603116 C8.54189405,192.412639 6.39748885,197.82226 6.0799842,204.016065 C5.77766543,209.912373 7.40435223,226.688671 24.3409972,236.576369 C26.3249517,237.73442 28.2831301,238.743202 30.3833764,239.685161 C29.2931905,236.290327 30.5294405,224.161856 32.7263968,219.653578 C33.2860762,221.204589 34.2369916,222.697108 35.2618383,224.05216 C36.8611506,226.167444 40.636039,231.460774 45.4085994,231.706547 C43.4722007,228.722725 41.3891385,226.708805 40.7853002,223.10864 C44.7616013,225.068753 50.4191385,226.855644 55.0466338,226.691448 C58.4512667,226.570818 63.4709972,224.871405 66.0000446,222.74779 C57.6284322,224.074724 49.679027,221.3155 46.4820009,215.419366 C45.8146217,214.188415 45.3084926,212.898625 45.0141664,211.558847 C44.5967546,209.659309 43.9381673,206.615432 44.8227444,204.862039 C45.0375932,204.436124 45.3893685,204.001198 45.806628,203.572743 C45.7407358,203.49425 45.6753213,203.415537 45.6103845,203.336606 C51.303506,198.550494 58.4494475,190.932516 62.2752482,185.367908 C62.3459243,185.245492 62.416066,185.122857 62.4856702,185 L62.5253504,185 C62.5536953,184.957813 62.5818364,184.915755 62.6097716,184.873828 C67.874859,183.648086 73.3617452,183 79,183 L83,183 L83,164.610951 C64.0804213,155.623239 51,136.339168 51,114 L51,76 L51,76 C51,73.537425 51.1589523,71.1119753 51.4671565,68.733351 C55.4088487,67.4702772 59.365485,66.2776957 63.3986046,65.2045441 C67.8552588,64.0189378 77.7980098,62.0907786 81.6887904,61.1941723 L84.4252449,58.215348 L85.4876566,60.1702128 C87.6456492,60.0042337 99.5663601,58.212708 99.5663601,58.212708 L100.896323,54.9898699 C102.612526,56.7530625 103.834989,57.668872 103.834989,57.668872 C106.391211,57.460454 117.488488,57.2113208 120.119841,57.2427023 C120.119841,57.2427023 127.460212,57.5012269 129.240756,57.5714137 L130.907605,56.9328981 L131.456495,58.0098503 C132.910143,58.601117 141.699367,61.6008734 143.434153,62.138079 L145.980784,61.2323702 C147.100342,63.9256202 149.920119,63.586016 152.257345,65.7132858 C154.760315,67.9915694 159.482831,69.7372554 162.831093,71.6181521 Z" id="react-path-3783628"></path></defs><mask id="react-mask-3783625" fill="white"><use xlink:href="#react-path-3783627"></use></mask><g id="Mask"></g><g id="Top/Long-Hair/Curvy" mask="url(#react-mask-3783625)"><g transform="translate(-1.000000, 0.000000)"><path d="M100.899906,42.4648024 C91.1016204,48.4721303 82.3855283,56.3273858 76.5871222,65.36024 C73.8252914,69.662826 71.5532049,74.1995784 69.4361743,78.7575668 C68.3739624,81.0447336 67.4048638,83.3600237 66.475928,85.6893613 C65.8894735,87.1594817 64.9889112,88.7449062 65.8359233,90.2878445 C66.3526427,89.9857996 66.5492598,90.0943892 66.224362,90.6353417 C68.9162579,91.3693254 72.6583769,89.3003017 74.9906073,88.5362205 C79.7539763,86.9753339 84.5203425,85.5025753 89.3986046,84.2045441 C93.8552588,83.0189378 103.79801,81.0907786 107.68879,80.1941723 L110.425245,77.215348 L111.487657,79.1702128 C113.645649,79.0042337 125.56636,77.212708 125.56636,77.212708 L126.896323,73.9898699 C128.612526,75.7530625 129.834989,76.668872 129.834989,76.668872 C132.391211,76.460454 143.488488,76.2113208 146.119841,76.2427023 C146.119841,76.2427023 153.460212,76.5012269 155.240756,76.5714137 L156.907605,75.9328981 L157.456495,77.0098503 C158.910143,77.601117 167.699367,80.6008734 169.434153,81.138079 L171.980784,80.2323702 C173.100342,82.9256202 175.920119,82.586016 178.257345,84.7132858 C181.34867,87.5271086 187.825645,89.5285179 190.917768,91.9756241 C192.024938,92.8519441 193.059576,93.7675012 194.100208,94.7015404 C195.255933,95.7385867 195.085291,95.890424 195.460742,97.0802141 C195.573237,97.4361731 196.715775,99.2788807 197.202722,99.4296139 C198.935909,99.9660566 187.048767,68.9435732 183.785603,64.9771662 C180.417736,60.8830307 158.574915,33.3231248 129.612057,34.2254634" id="Top-Shadow" fill-opacity="0.16" fill="#000000" fill-rule="evenodd"></path><g id="Hair" stroke-width="1" fill="none" fill-rule="evenodd" transform="translate(26.000000, 16.000000)"><mask id="react-mask-3783626" fill="white"><use xlink:href="#react-path-3783628"></use></mask><use id="Hair-Mask" fill="#361A0A" xlink:href="#react-path-3783628"></use><g id="Skin/👶🏽-03-Brown" mask="url(#react-mask-3783626)" fill="#4A312C"><g transform="translate(0.000000, 0.000000) " id="Color"><rect x="0" y="0" width="264" height="280"></rect></g></g><path d="M62.6794556,184.462132 C69.755442,174.755405 62.148959,147.786913 56.1278159,137.800593 C72.9649824,130.137708 106.213574,131.553467 155.87359,142.047871 C151.079203,150.900348 149.123448,158.803527 150.006324,165.757409 C145.469118,171.332534 141.720304,177.127222 138.759883,183.141474 L103.888915,191.746789 C81.8528509,194.400378 68.1163643,191.97216 62.6794556,184.462132 Z" id="Shadow" fill-opacity="0.24" fill="#000000" mask="url(#react-mask-3783626)"></path></g><path d="M79.0404573,170.094305 C78.9812573,169.892618 78.8354573,169.667152 78.6348573,169.428842 C78.7708573,169.650142 78.9074573,169.871269 79.0404573,170.094305 Z M56.409572,120.375261 C57.2661752,126.5406 58.7356083,132.465374 60.8662263,138.377476 C62.9277086,144.09848 65.285915,149.836145 68.678559,155.067858 C71.8402179,159.943234 75.6031176,164.4923 78.6348973,169.428772 C77.8378388,168.48126 76.1633964,167.329804 75.5207941,166.65115 C74.4643769,165.535276 73.4750971,164.385382 72.5369698,163.193485 C70.6143583,160.749982 68.9003527,158.193833 67.243494,155.609567 C63.9913192,150.536843 61.5529875,145.034363 59.4397533,139.530668 C55.2902133,128.722708 51.1268862,115.61687 54.7738936,104.200899 C54.4921557,104.935095 55.2326668,106.688314 55.3491585,107.497319 C55.5525692,108.91069 55.7349995,110.333608 55.8267142,111.757219 C56.0123415,114.639678 56.0109428,117.505994 56.409572,120.375261 Z M68.8553146,165.041212 C67.4967783,163.309515 64.9739252,161.944396 63.4129772,160.279177 C61.9976938,158.769648 60.9019131,157.07822 59.9070386,155.339754 C57.6517365,151.39922 56.1697151,147.374505 55.6897616,142.969154 C55.7992598,143.49177 56.6083072,144.395543 56.8630702,144.824778 C57.4766993,145.858902 58.0839345,146.89424 58.6508072,147.948671 C59.7481863,149.989667 60.6639345,152.099744 61.7731027,154.135533 C63.8106073,157.875421 66.402796,161.495374 68.8553146,165.041212 Z M73.5320242,183.498629 C74.6465874,185.460651 75.5723262,187.464851 76.1569823,189.60079 C76.4654954,190.727599 76.7138643,191.869508 76.9272658,193.013501 C76.9962017,193.382508 77.0093894,194.709963 77.1846264,195.283955 C74.9700864,190.992812 73.2798587,186.448779 70.6421125,182.34214 C68.0381348,178.288092 64.6948448,174.560527 61.1958996,171.061031 C57.5013364,167.36575 53.7855929,163.879099 51.8038364,159.214262 C50.0788411,155.153619 49.4126608,150.996124 49.8138875,146.658464 C49.8160855,148.56911 51.5706533,151.280256 52.1766896,153.126681 C53.0063178,155.654018 53.6655046,158.231689 54.9143429,160.634229 C57.039566,164.722991 60.873,167.876911 64.0792175,171.321558 C67.631513,175.137643 71.0245567,179.084252 73.5320242,183.498629 Z M59.2286696,174.179456 C60.2874847,175.196917 61.2164205,176.28259 62.0352588,177.454354 C62.9328239,178.738937 63.5914112,180.09017 64.1800637,181.504062 C64.6869921,182.721301 64.9105841,184.986375 65.7074428,186.0021 C63.1288415,182.856337 60.4739112,179.884838 58.6955655,176.312444 C58.0893295,175.089825 57.1480051,173.289222 56.4530516,171.817184 C56.6844363,172.409922 58.7059559,173.677148 59.2286696,174.179456 Z M48.9033745,180.528033 C51.7405353,184.777866 55.450684,188.609052 57.877027,193.056233 C60.7067946,198.242644 61.9518364,203.862978 62.202803,209.595957 C62.3216924,212.307277 62.3152983,215.0606 61.9498383,217.764455 C61.7540204,219.211673 61.4399126,220.650211 61.0810465,222.075732 C60.944973,222.616747 60.2406283,224.002173 60.1037556,224.846586 C59.8140251,214.305575 61.5584024,203.763696 56.0767017,193.942823 C53.4811162,189.292219 49.4912277,185.327212 46.398105,180.924811 C43.6164926,176.966226 40.8998197,173.083838 38.6846803,168.851361 C40.0408188,170.567263 42.485145,171.915893 44.0009349,173.619818 C45.8995688,175.753674 47.3488206,178.199606 48.9033745,180.528033 Z M60.1036574,224.846603 C60.0710574,225.050581 60.0700574,225.224111 60.1172574,225.346603 C60.1116574,225.180112 60.1082574,225.01327 60.1036574,224.846603 Z M50.5604331,202.493815 C50.5610325,202.989874 51.376474,204.011501 51.5992667,204.528562 C52.1207816,205.73799 52.5455864,207.007473 52.7573894,208.289626 C53.1752007,210.818004 52.6269108,213.429521 51.6899823,215.850286 C49.7909489,220.757251 46.8161162,225.102895 43.0767946,229.15 C44.4121524,227.402335 44.9438578,224.56136 45.8833838,222.612182 C46.8478866,220.611106 47.8829238,218.6411 48.7335325,216.600624 C50.652947,211.995842 50.4835046,207.289696 50.5604331,202.493815 Z M41.9174331,221.200893 C42.3180604,220.652936 42.1102537,218.018161 42.3222565,217.328919 C42.714092,216.055618 43.3920613,214.827097 44.170737,213.693866 C43.7551236,214.392828 44.3691524,216.160106 44.1663411,217.067177 C43.8338504,218.55553 42.9962296,219.998582 41.9174331,221.200893 Z M99.6077106,42.748374 C99.5269106,42.804974 99.4471106,42.908174 99.3681106,43.044574 C99.4481106,42.945974 99.5267106,42.846574 99.6077106,42.748374 Z M84.8469387,64.3317143 C86.2672175,63.085837 87.0237138,60.1410677 88.0032026,58.5522183 C89.1283559,56.7269681 90.4213532,54.9730547 91.6476125,53.1960567 C94.0795502,49.6719145 96.3744154,46.2123399 99.3680307,43.0054816 C98.7464089,43.9398028 98.1949219,46.7736616 97.8536394,47.5189663 C96.9620688,49.4667561 95.8988578,51.3334892 94.6328355,53.1235049 C91.7722965,57.1680066 88.7029517,60.9266404 84.8469387,64.3317143 Z M84.3117165,54.1218036 C85.0620186,52.7952168 86.2055548,51.6739619 87.4917584,50.7082248 C86.9188913,51.2107066 86.6607314,53.2831189 86.2670976,53.9831221 C85.472237,55.3952784 84.3143141,56.6130375 83.0714703,57.7545999 C83.7352528,57.1726235 83.842553,54.9516363 84.3117165,54.1218036 Z M203.505599,152.127968 C203.498805,152.179518 203.485417,152.282271 203.464637,152.438483 C203.462638,150.913159 202.784469,149.237352 202.704144,147.668984 C202.592048,145.478545 202.906556,143.353715 203.787137,141.277137 C205.526519,137.175704 208.790083,134.069516 212.950612,131.638511 C211.805877,132.313173 210.683921,134.851617 209.949604,135.906916 C208.84663,137.493162 207.668126,139.094161 206.735993,140.757819 C204.793001,144.225725 204.229725,148.375062 203.505599,152.127968 Z M201.998401,130.481881 C201.761221,131.706583 201.448912,132.921738 201.009121,134.107908 C200.534762,135.386937 199.915938,136.630558 199.22578,137.835993 C198.79578,138.586852 197.246621,140.162684 197.24762,140.993211 C197.165296,136.095098 198.975812,131.657983 202.419809,127.7355 C202.04236,128.392806 202.137271,129.766083 201.998401,130.481881 Z M201.196906,165.719988 C204.852905,165.202752 208.302496,166.981313 210.618342,169.271033 C211.855791,170.494694 212.955568,171.900428 213.683091,173.404055 C214.229783,174.534509 214.228783,176.387356 214.9631,177.323587 C213.165772,174.905078 210.886892,172.951214 208.638584,170.859535 C207.075238,169.404855 203.950944,165.678852 201.196906,165.719988 Z M200.41897,176.096698 C200.227148,176.031957 198.485169,175.539368 198.081944,175.776984 C198.679388,175.510035 199.412106,175.184941 200.068895,175.097983 C204.35311,174.529024 209.561066,178.239232 210.13633,181.81909 C209.657576,180.592826 207.111145,179.578489 205.959616,178.968568 C204.136711,178.002484 202.395531,176.832456 200.41897,176.096698 Z M202.227687,183.908269 C202.969797,184.089822 204.54713,185.083504 205.275252,185.072742 C202.345977,185.143906 199.703236,184.81829 196.883858,184.158729 C197.036117,184.200212 198.643022,183.702937 198.694974,183.695647 C199.910043,183.523987 201.052381,183.620492 202.227687,183.908269 Z M190.882541,197.765243 C195.171151,197.522941 200.218656,198.149351 204.314046,199.181739 C206.346955,199.694288 208.253382,200.468058 210.006351,201.476666 C211.420436,202.290531 213.935896,203.408661 214.881616,204.614097 C211.142494,198.162369 203.032039,194.811448 194.722769,196.473197 C193.615199,196.695886 191.914181,197.749796 190.882541,197.765243 Z M189.923153,210.197773 C192.611453,209.233424 195.584487,208.30431 198.505969,208.169273 C201.277391,208.042395 204.351332,208.458613 206.915546,209.342078 C206.033367,209.102206 203.92333,209.674289 202.995793,209.779298 C201.699199,209.926138 200.399608,210.077837 199.099817,210.196558 C197.506299,210.342009 195.898395,210.422718 194.298883,210.41942 C193.159543,210.41699 190.979371,209.87858 189.923153,210.197773 Z M179.458947,227.410508 C179.711912,231.383499 182.010574,234.84533 185.39043,237.491388 C188.973097,240.296087 193.769036,241.572686 196.369816,245.319691 C197.637437,247.145462 198.312809,249.270812 198.20431,251.417686 C198.148362,252.524014 197.870221,253.636069 197.5695,254.712196 C197.371684,255.420184 196.66734,256.580144 196.667939,257.270775 C196.69911,253.384221 196.751661,248.859281 194.031592,245.598095 C191.300932,242.324066 186.539161,241.170701 183.203065,238.482813 C179.924714,235.841442 177.437828,232.389157 176.877749,228.498264 C176.425569,225.354411 176.648562,219.871892 179.90773,217.738557 C179.246345,218.128392 179.377224,220.111764 179.361438,220.669267 C179.298097,222.900321 179.317079,225.185182 179.458947,227.410508 Z M177.005789,242.672904 C177.402221,243.19257 179.575399,243.82436 180.213805,244.182606 C181.67045,245.000116 183.07914,245.92923 184.234665,247.059684 C186.55111,249.326146 188.044121,252.504886 188.151821,255.553623 C188.151821,254.833139 186.505553,253.096583 186.043183,252.481107 C185.275297,251.458613 184.407904,250.511969 183.524526,249.564283 C181.371329,247.253734 179.135209,244.999942 177.005789,242.672904 Z M229.167807,153.791051 C230.371887,154.841663 231.178936,156.147595 231.842519,157.49987 C233.373295,160.619424 233.65823,164.217333 232.431571,167.500388 C232.634582,166.795698 232.030544,165.31585 231.860502,164.601614 C231.488248,163.038626 230.906389,161.56225 230.298355,160.059664 C229.118053,157.144401 228.163741,154.41208 226.113648,151.858014 C226.644354,152.52556 228.442481,153.157872 229.167807,153.791051 Z M171.509602,41.9832998 C171.510002,42.3148163 172.426549,43.2758671 172.633357,43.6374111 C173.149677,44.5392749 173.557297,45.4857459 173.696967,46.4924453 C173.85542,47.6336606 173.6616,48.7505762 173.315522,49.8605491 C173.109914,50.5202844 172.131624,51.7949741 172.132423,52.3894475 C171.972572,48.891167 171.198691,45.5298324 171.509602,41.9832998 Z M179.146978,48.8048339 C179.312224,50.0477605 178.906202,51.4491555 178.183074,52.546805 C178.314952,52.2364639 177.729296,50.1642252 177.710314,49.7849773 C177.650969,48.6118253 177.77925,47.4056953 177.856378,46.2332376 C177.857178,46.8738803 179.039478,47.9958294 179.146978,48.8048339 Z M118.377388,50.3732542 C117.142336,51.8857333 115.738043,53.3032702 114.227248,54.6164922 C113.2036,55.5060327 111.243024,56.5057893 110.46315,57.5267214 C113.964293,51.8147436 118.00913,46.8878178 122.764906,41.8951095 C122.049172,42.8155452 121.862346,44.8121078 121.337434,45.8885819 C120.563354,47.4758692 119.527518,48.9645693 118.377388,50.3732542 Z M124.275361,52.8515919 C124.845431,52.5155626 125.378934,50.859195 125.81333,50.3013446 C126.54465,49.3623371 127.437619,48.4554398 128.390733,47.6728177 C128.186123,47.8927295 127.788693,49.7158968 127.5657,50.0739694 C126.843372,51.2344508 125.56616,52.1809219 124.275361,52.8515919 Z" id="Lights" fill-opacity="0.6" fill="#FFFFFF" fill-rule="evenodd"></path></g></g></g></g></g></g></g>` },
       },
       pesquisa: {
         idle: { vb: '0 0 264 280', corpo: `<desc>Created with getavataaars.com</desc><defs><circle id="react-path-1463439" cx="120" cy="120" r="120"></circle><path d="M12,160 C12,226.27417 65.72583,280 132,280 C198.27417,280 252,226.27417 252,160 L264,160 L264,-1.42108547e-14 L-3.19744231e-14,-1.42108547e-14 L-3.19744231e-14,160 L12,160 Z" id="react-path-1463440"></path><path d="M124,144.610951 L124,163 L128,163 L128,163 C167.764502,163 200,195.235498 200,235 L200,244 L0,244 L0,235 C-4.86974701e-15,195.235498 32.235498,163 72,163 L72,163 L76,163 L76,144.610951 C58.7626345,136.422372 46.3722246,119.687011 44.3051388,99.8812385 C38.4803105,99.0577866 34,94.0521096 34,88 L34,74 C34,68.0540074 38.3245733,63.1180731 44,62.1659169 L44,56 L44,56 C44,25.072054 69.072054,5.68137151e-15 100,0 L100,0 L100,0 C130.927946,-5.68137151e-15 156,25.072054 156,56 L156,62.1659169 C161.675427,63.1180731 166,68.0540074 166,74 L166,88 C166,94.0521096 161.51969,99.0577866 155.694861,99.8812385 C153.627775,119.687011 141.237365,136.422372 124,144.610951 Z" id="react-path-1463441"></path></defs><g id="Avataaar" stroke="none" stroke-width="1" fill="none" fill-rule="evenodd"><g transform="translate(-825.000000, -1100.000000)" id="Avataaar/Circle"><g transform="translate(825.000000, 1100.000000)"><g id="Mask"></g><g id="Avataaar" stroke-width="1" fill-rule="evenodd" mask="url(#react-mask-1463443)"><g id="Body" transform="translate(32.000000, 36.000000)"><mask id="react-mask-1463444" fill="white"><use xlink:href="#react-path-1463441"></use></mask><use fill="#D0C6AC" xlink:href="#react-path-1463441"></use><g id="Skin/👶🏽-03-Brown" mask="url(#react-mask-1463444)" fill="#AE5D29"><g transform="translate(0.000000, 0.000000)" id="Color"><rect x="0" y="0" width="264" height="280"></rect></g></g><path d="M156,79 L156,102 C156,132.927946 130.927946,158 100,158 C69.072054,158 44,132.927946 44,102 L44,79 L44,94 C44,124.927946 69.072054,150 100,150 C130.927946,150 156,124.927946 156,94 L156,79 Z" id="Neck-Shadow" fill-opacity="0.100000001" fill="#000000" mask="url(#react-mask-1463444)"></path></g><g id="Clothing/Collar-+-Sweater" transform="translate(0.000000, 170.000000)"><defs><path d="M105.192402,29.0517235 L104,29.0517235 L104,29.0517235 C64.235498,29.0517235 32,61.2872215 32,101.051724 L32,110 L232,110 L232,101.051724 C232,61.2872215 199.764502,29.0517235 160,29.0517235 L160,29.0517235 L158.807598,29.0517235 C158.934638,30.0353144 159,31.0364513 159,32.0517235 C159,45.8588423 146.911688,57.0517235 132,57.0517235 C117.088312,57.0517235 105,45.8588423 105,32.0517235 C105,31.0364513 105.065362,30.0353144 105.192402,29.0517235 Z" id="react-path-1463445"></path></defs><mask id="react-mask-1463446" fill="white"><use xlink:href="#react-path-1463445"></use></mask><use id="Clothes" fill="#E6E6E6" fill-rule="evenodd" xlink:href="#react-path-1463445"></use><g id="Color/Palette/Gray-01" mask="url(#react-mask-1463446)" fill-rule="evenodd" fill="#3C8652"><rect id="🖍Color" x="0" y="0" width="264" height="110"></rect></g><path d="M156,22.2794906 C162.181647,26.8351858 166,33.1057265 166,40.027915 C166,47.2334941 161.862605,53.7329769 155.228997,58.3271669 L149.57933,53.8764929 L145,54.207887 L146,51.0567821 L145.922229,50.995516 C152.022491,47.8530505 156,42.7003578 156,36.8768102 L156,22.2794906 Z M108,21.5714994 C101.232748,26.1740081 97,32.7397769 97,40.027915 C97,47.4261549 101.361602,54.080035 108.308428,58.6915723 L114.42067,53.8764929 L119,54.207887 L118,51.0567821 L118.077771,50.995516 C111.977509,47.8530505 108,42.7003578 108,36.8768102 L108,21.5714994 Z" id="Collar" fill="#F2F2F2" fill-rule="evenodd"></path></g><g id="Face" transform="translate(76.000000, 82.000000)" fill="#000000"><g id="Mouth/Smile" transform="translate(2.000000, 52.000000)"><defs><path d="M35.117844,15.1280772 C36.1757121,24.6198025 44.2259873,32 54,32 C63.8042055,32 71.8740075,24.574136 72.8917593,15.0400546 C72.9736685,14.272746 72.1167429,13 71.042767,13 C56.1487536,13 44.7379213,13 37.0868244,13 C36.0066168,13 35.0120058,14.1784435 35.117844,15.1280772 Z" id="react-path-1463447"></path></defs><mask id="react-mask-1463448" fill="white"><use xlink:href="#react-path-1463447"></use></mask><use id="Mouth" fill-opacity="0.699999988" fill="#000000" fill-rule="evenodd" xlink:href="#react-path-1463447"></use><rect id="Teeth" fill="#FFFFFF" fill-rule="evenodd" mask="url(#react-mask-1463448)" x="39" y="2" width="31" height="16" rx="5"></rect><g id="Tongue" stroke-width="1" fill-rule="evenodd" mask="url(#react-mask-1463448)" fill="#FF4F6D"><g transform="translate(38.000000, 24.000000)"><circle cx="11" cy="11" r="11"></circle><circle cx="21" cy="11" r="11"></circle></g></g></g><g id="Nose/Default" transform="translate(28.000000, 40.000000)" fill-opacity="0.16"><path d="M16,8 C16,12.418278 21.372583,16 28,16 L28,16 C34.627417,16 40,12.418278 40,8" id="Nose"></path></g><g id="Eyes/Default-😀" transform="translate(0.000000, 8.000000)" fill-opacity="0.599999964"><circle id="Eye" cx="30" cy="22" r="6"></circle><circle id="Eye" cx="82" cy="22" r="6"></circle></g><g id="Eyebrow/Natural/Default-Natural" fill-opacity="0.599999964"><path d="M26.0390934,6.21012364 C20.2775554,6.98346216 11.2929313,12.0052479 12.04426,17.8178111 C12.0689481,18.0080543 12.3567302,18.0673468 12.4809077,17.9084937 C14.9674041,14.7203351 34.1927973,10.0365481 41.1942673,11.0147151 C41.8350523,11.1044465 42.2580662,10.4430343 41.8210501,10.0302067 C38.0765663,6.49485426 31.2003792,5.51224825 26.0390934,6.21012364" id="Eyebrow" transform="translate(27.000000, 12.000000) rotate(5.000000) translate(-27.000000, -12.000000) "></path><path d="M85.0390934,6.21012364 C79.2775554,6.98346216 70.2929313,12.0052479 71.04426,17.8178111 C71.0689481,18.0080543 71.3567302,18.0673468 71.4809077,17.9084937 C73.9674041,14.7203351 93.1927973,10.0365481 100.194267,11.0147151 C100.835052,11.1044465 101.258066,10.4430343 100.82105,10.0302067 C97.0765663,6.49485426 90.2003792,5.51224825 85.0390934,6.21012364" id="Eyebrow" transform="translate(86.000000, 12.000000) scale(-1, 1) rotate(5.000000) translate(-86.000000, -12.000000) "></path></g></g><g id="Top" stroke-width="1" fill-rule="evenodd"><defs><rect id="react-path-1463453" x="0" y="0" width="264" height="280"></rect><path d="M94.2519269,52.0221149 C94.3749353,51.9677149 94.0696712,51.9468149 93.3361345,51.9595149 C94.2276637,51.9577149 94.5329279,51.9785149 94.2519269,52.0221149 M86.1169775,36.3015924 C86.1148422,36.2819924 86.1337548,36.4526924 86.1169775,36.3015924 M193.765056,70.7656665 C193.500946,67.448734 193.03295,64.1518864 192.246676,60.9110823 C191.622233,58.3353492 190.769007,55.8775343 189.760006,53.4200433 C189.150703,51.9353766 187.727538,49.8961062 187.560324,48.2944933 C187.395466,46.7168527 188.626521,44.969138 188.889285,43.1323368 C189.144311,41.3447761 189.100909,39.4652134 188.734183,37.6938503 C187.901144,33.6710288 185.140271,29.9300447 180.877167,28.8814158 C179.925362,28.6471994 177.913417,28.9358396 177.240862,28.3815597 C176.469729,27.7459682 175.932761,25.5806808 175.234637,24.7121687 C173.244224,22.2362125 170.13984,20.6417265 166.865887,21.1976261 C164.454917,21.606776 165.839391,22.1053363 164.032005,20.6864317 C163.027041,19.8976114 162.276095,18.6931622 161.300066,17.8392279 C159.832826,16.5563826 158.149588,15.4581893 156.408146,14.556958 C151.851325,12.19892 146.654249,10.4848961 141.564162,9.64942693 C132.278934,8.12523827 122.368926,9.45408458 113.368668,11.8688141 C108.890239,13.0703477 104.381531,14.5951842 100.222053,16.6117782 C98.4385542,17.4764029 97.4090304,18.1936301 95.5494951,18.4200717 C92.6207355,18.7767416 90.1404579,18.7589243 87.3661268,20.0009517 C78.8298269,23.8229236 74.9849256,32.6897818 78.3066539,41.1750259 C78.974835,42.8815988 79.8795374,44.3801954 81.1267416,45.7586062 C82.6474761,47.4392631 83.1975648,47.1085093 81.8877817,49.0411999 C79.9289949,51.9311653 78.2777195,55.0129095 76.9332826,58.2128958 C73.4043038,66.6145606 72.8138416,76.0771643 73.043634,85.0373203 C73.1240445,88.1741362 73.2586228,91.3495022 73.753198,94.4561907 C73.966841,95.8009106 74.0267283,98.3293468 75.0353925,99.3271154 C75.5471264,99.8331265 76.2762042,100.115288 77.0035997,99.9137903 C78.7130802,99.4401742 78.1253096,98.1787097 78.1650102,97.0076274 C78.364859,91.1240324 78.0950295,85.9191145 79.4943071,80.1064647 C80.5278683,75.8118486 82.2504702,71.9114806 84.4827873,68.0713675 C87.3213795,63.1871608 90.3857268,58.8977279 94.2895061,54.7155226 C95.2073299,53.7320079 95.4078515,53.3150832 96.6385698,53.243814 C97.5705244,53.1900382 98.9338023,53.8282213 99.8398505,54.0491558 C101.837665,54.5360539 103.83918,55.0174448 105.873331,55.3452831 C109.613261,55.9481556 113.316519,55.9886494 117.090094,55.8704074 C124.516459,55.6381346 131.974787,55.1172217 139.175061,53.2470535 C143.956964,52.00535 148.196516,49.7762443 152.776887,48.1422364 C152.858644,48.1130808 154.006596,47.2951049 154.207791,47.3284719 C154.488723,47.3747968 156.184746,49.1542588 156.471061,49.3784327 C158.696649,51.1238798 161.137899,51.8566566 163.541467,53.2081794 C166.504881,54.8745825 163.634999,52.4899804 165.269452,54.5668292 C165.745859,55.1716454 165.989782,56.2931632 166.371984,56.9783192 C167.587899,59.1610999 169.279548,61.0795367 171.302932,62.6017816 C173.258018,64.0725184 176.196198,64.7829426 177.193087,66.697168 C177.961865,68.1740599 178.220929,70.1812592 178.841334,71.7579279 C180.468722,75.8931602 182.617937,79.7494709 184.767152,83.6443317 C186.498502,86.7830913 188.392354,89.5250111 188.584801,93.1117947 C188.651754,94.3603012 187.463764,101.849397 190.357534,99.5716982 C190.786502,99.2341415 191.711391,95.415733 191.901483,94.7678314 C192.672616,92.135083 192.94682,89.3866841 193.29605,86.6816947 C193.990474,81.3021672 194.218584,76.1837441 193.765056,70.7656665" id="react-path-1463452"></path><filter x="-0.8%" y="-2.0%" width="101.5%" height="108.0%" filterUnits="objectBoundingBox" id="react-filter-1463449"><feOffset dx="0" dy="2" in="SourceAlpha" result="shadowOffsetOuter1"></feOffset><feColorMatrix values="0 0 0 0 0   0 0 0 0 0   0 0 0 0 0  0 0 0 0.16 0" type="matrix" in="shadowOffsetOuter1" result="shadowMatrixOuter1"></feColorMatrix><feMerge><feMergeNode in="shadowMatrixOuter1"></feMergeNode><feMergeNode in="SourceGraphic"></feMergeNode></feMerge></filter></defs><mask id="react-mask-1463451" fill="white"><use xlink:href="#react-path-1463453"></use></mask><g id="Mask"></g><g id="Top/Short-Hair/Short-Curly" mask="url(#react-mask-1463451)"><g transform="translate(-1.000000, 0.000000)"><mask id="react-mask-1463450" fill="white"><use xlink:href="#react-path-1463452"></use></mask><use id="Short-Hair" stroke="none" fill="#28354B" fill-rule="evenodd" xlink:href="#react-path-1463452"></use><g id="Skin/👶🏽-03-Brown" mask="url(#react-mask-1463450)" fill="#2C1B18"><g transform="translate(0.000000, 0.000000) " id="Color"><rect x="0" y="0" width="264" height="280"></rect></g></g><g id="Top/_Resources/Prescription-02" fill="none" transform="translate(62.000000, 85.000000)" stroke-width="1"><defs><filter x="-0.8%" y="-2.4%" width="101.5%" height="109.8%" filterUnits="objectBoundingBox" id="react-filter-1463454"><feOffset dx="0" dy="2" in="SourceAlpha" result="shadowOffsetOuter1"></feOffset><feColorMatrix values="0 0 0 0 0   0 0 0 0 0   0 0 0 0 0  0 0 0 0.2 0" type="matrix" in="shadowOffsetOuter1" result="shadowMatrixOuter1"></feColorMatrix><feMerge><feMergeNode in="shadowMatrixOuter1"></feMergeNode><feMergeNode in="SourceGraphic"></feMergeNode></feMerge></filter></defs><g id="Wayfarers" filter="url(#react-filter-1463454)" transform="translate(6.000000, 7.000000)" fill="#252C2F"><path d="M34,41 L31.2421498,41 C17.3147125,41 9,33.3359286 9,20.5 C9,10.127 10.8170058,0 32.5299306,0 L35.4700694,0 C57.1829942,0 59,10.127 59,20.5 C59,32.5686429 48.7212748,41 34,41 Z M32.3853606,6 C13,6 13,12.8410159 13,21.5015498 C13,28.5719428 16.116254,37 30.9709365,37 L34,37 C46.3649085,37 55,30.6270373 55,21.5015498 C55,12.8410159 55,6 35.6146394,6 L32.3853606,6 Z" id="Left" fill-rule="nonzero"></path><path d="M96,41 L93.2421498,41 C79.3147125,41 71,33.3359286 71,20.5 C71,10.127 72.8170058,0 94.5299306,0 L97.4700694,0 C119.182994,0 121,10.127 121,20.5 C121,32.5686429 110.721275,41 96,41 Z M94.3853606,6 C75,6 75,12.8410159 75,21.5015498 C75,28.5719428 78.1194833,37 92.9709365,37 L96,37 C108.364909,37 117,30.6270373 117,21.5015498 C117,12.8410159 117,6 97.6146394,6 L94.3853606,6 Z" id="Right" fill-rule="nonzero"></path><path d="M2.95454545,5.77156439 C3.64590909,5.09629136 11.2095455,0 32.5,0 C50.3513636,0 54.1302273,1.85267217 59.8502273,4.6518809 L60.2689233,4.85850899 C60.6666014,4.99901896 62.7002447,5.68982981 65.0790606,5.76579519 C67.2462948,5.67278567 69.1000195,5.08540191 69.641698,4.89719767 C76.1703915,1.7220864 82.5610971,0 97.5,0 C118.790455,0 126.354091,5.09629136 127.045455,5.77156439 C128.679318,5.77156439 130,7.06150904 130,8.65734659 L130,11.5431288 C130,13.1389663 128.679318,14.428911 127.045455,14.428911 C127.045455,14.428911 120.143997,14.428911 120.143997,17.3146932 C120.143997,20.2004754 118.181818,13.1389663 118.181818,11.5431288 L118.181818,8.73240251 C114.578575,7.35340151 108.128411,4.78617535 97.5,4.78617535 C85.6584651,4.78617535 79.7610984,6.88602813 74.7022935,8.97112368 L74.7588636,9.10752861 L74.7563667,11.0937608 L72.5391666,16.4436339 L69.8004908,15.3608351 C69.5558969,15.2641292 69.0281396,15.090392 68.2963505,14.9099044 C66.256272,14.4067419 64.1589087,14.253569 62.3040836,14.6343084 C61.6235903,14.7739931 60.9922286,14.9836085 60.4128127,15.266732 L57.7704824,16.5578701 L55.1266751,11.3962031 L55.2440909,9.10175705 L55.3248203,8.90683855 C50.9620526,6.87386374 46.9392639,4.78617535 32.5,4.78617535 C21.8721459,4.78617535 15.422131,7.3524397 11.8181818,8.7314671 L11.8181818,11.5431288 C11.8181818,13.1389663 8.86363636,20.2004754 8.86363636,17.3146932 C8.86363636,14.428911 2.95454545,14.428911 2.95454545,14.428911 C1.32363636,14.428911 0,13.1389663 0,11.5431288 L0,8.65734659 C0,7.06150904 1.32363636,5.77156439 2.95454545,5.77156439 Z" id="Stuff" fill-rule="nonzero"></path></g></g></g></g></g></g></g></g></g>` },
@@ -1222,6 +1585,7 @@ window.__ModuleLoader__.load({
         waiting: { vb: '0 0 264 280', corpo: `<desc>Created with getavataaars.com</desc><defs><circle id="react-path-1463866" cx="120" cy="120" r="120"></circle><path d="M12,160 C12,226.27417 65.72583,280 132,280 C198.27417,280 252,226.27417 252,160 L264,160 L264,-1.42108547e-14 L-3.19744231e-14,-1.42108547e-14 L-3.19744231e-14,160 L12,160 Z" id="react-path-1463867"></path><path d="M124,144.610951 L124,163 L128,163 L128,163 C167.764502,163 200,195.235498 200,235 L200,244 L0,244 L0,235 C-4.86974701e-15,195.235498 32.235498,163 72,163 L72,163 L76,163 L76,144.610951 C58.7626345,136.422372 46.3722246,119.687011 44.3051388,99.8812385 C38.4803105,99.0577866 34,94.0521096 34,88 L34,74 C34,68.0540074 38.3245733,63.1180731 44,62.1659169 L44,56 L44,56 C44,25.072054 69.072054,5.68137151e-15 100,0 L100,0 L100,0 C130.927946,-5.68137151e-15 156,25.072054 156,56 L156,62.1659169 C161.675427,63.1180731 166,68.0540074 166,74 L166,88 C166,94.0521096 161.51969,99.0577866 155.694861,99.8812385 C153.627775,119.687011 141.237365,136.422372 124,144.610951 Z" id="react-path-1463868"></path></defs><g id="Avataaar" stroke="none" stroke-width="1" fill="none" fill-rule="evenodd"><g transform="translate(-825.000000, -1100.000000)" id="Avataaar/Circle"><g transform="translate(825.000000, 1100.000000)"><g id="Mask"></g><g id="Avataaar" stroke-width="1" fill-rule="evenodd" mask="url(#react-mask-1463870)"><g id="Body" transform="translate(32.000000, 36.000000)"><mask id="react-mask-1463871" fill="white"><use xlink:href="#react-path-1463868"></use></mask><use fill="#D0C6AC" xlink:href="#react-path-1463868"></use><g id="Skin/👶🏽-03-Brown" mask="url(#react-mask-1463871)" fill="#AE5D29"><g transform="translate(0.000000, 0.000000)" id="Color"><rect x="0" y="0" width="264" height="280"></rect></g></g><path d="M156,79 L156,102 C156,132.927946 130.927946,158 100,158 C69.072054,158 44,132.927946 44,102 L44,79 L44,94 C44,124.927946 69.072054,150 100,150 C130.927946,150 156,124.927946 156,94 L156,79 Z" id="Neck-Shadow" fill-opacity="0.100000001" fill="#000000" mask="url(#react-mask-1463871)"></path></g><g id="Clothing/Collar-+-Sweater" transform="translate(0.000000, 170.000000)"><defs><path d="M105.192402,29.0517235 L104,29.0517235 L104,29.0517235 C64.235498,29.0517235 32,61.2872215 32,101.051724 L32,110 L232,110 L232,101.051724 C232,61.2872215 199.764502,29.0517235 160,29.0517235 L160,29.0517235 L158.807598,29.0517235 C158.934638,30.0353144 159,31.0364513 159,32.0517235 C159,45.8588423 146.911688,57.0517235 132,57.0517235 C117.088312,57.0517235 105,45.8588423 105,32.0517235 C105,31.0364513 105.065362,30.0353144 105.192402,29.0517235 Z" id="react-path-1463872"></path></defs><mask id="react-mask-1463873" fill="white"><use xlink:href="#react-path-1463872"></use></mask><use id="Clothes" fill="#E6E6E6" fill-rule="evenodd" xlink:href="#react-path-1463872"></use><g id="Color/Palette/Gray-01" mask="url(#react-mask-1463873)" fill-rule="evenodd" fill="#3C8652"><rect id="🖍Color" x="0" y="0" width="264" height="110"></rect></g><path d="M156,22.2794906 C162.181647,26.8351858 166,33.1057265 166,40.027915 C166,47.2334941 161.862605,53.7329769 155.228997,58.3271669 L149.57933,53.8764929 L145,54.207887 L146,51.0567821 L145.922229,50.995516 C152.022491,47.8530505 156,42.7003578 156,36.8768102 L156,22.2794906 Z M108,21.5714994 C101.232748,26.1740081 97,32.7397769 97,40.027915 C97,47.4261549 101.361602,54.080035 108.308428,58.6915723 L114.42067,53.8764929 L119,54.207887 L118,51.0567821 L118.077771,50.995516 C111.977509,47.8530505 108,42.7003578 108,36.8768102 L108,21.5714994 Z" id="Collar" fill="#F2F2F2" fill-rule="evenodd"></path></g><g id="Face" transform="translate(76.000000, 82.000000)" fill="#000000"><g id="Mouth/Sad" transform="translate(2.000000, 52.000000)" fill-opacity="0.699999988" fill="#000000"><path d="M40.0582943,16.6539438 C40.7076459,23.6831146 46.7016363,28.3768187 54,28.3768187 C61.3416045,28.3768187 67.3633339,23.627332 67.9526838,16.5287605 C67.9840218,16.1513016 67.0772329,15.8529531 66.6289111,16.077395 C61.0902255,18.8502083 56.8805885,20.2366149 54,20.2366149 C51.1558456,20.2366149 47.0072148,18.8804569 41.5541074,16.168141 C41.0473376,15.9160792 40.0197139,16.2363147 40.0582943,16.6539438 Z" id="Mouth" transform="translate(54.005357, 22.188409) scale(1, -1) translate(-54.005357, -22.188409) "></path></g><g id="Nose/Default" transform="translate(28.000000, 40.000000)" fill-opacity="0.16"><path d="M16,8 C16,12.418278 21.372583,16 28,16 L28,16 C34.627417,16 40,12.418278 40,8" id="Nose"></path></g><g id="Eyes/Default-😀" transform="translate(0.000000, 8.000000)" fill-opacity="0.599999964"><circle id="Eye" cx="30" cy="22" r="6"></circle><circle id="Eye" cx="82" cy="22" r="6"></circle></g><g id="Eyebrow/Outline/Sad-Concerned" fill-opacity="0.599999964" fill-rule="nonzero"><path d="M15.9726042,19.4088529 C17.452356,11.0203704 30.0622688,5.22829657 39.2106453,8.9774793 C40.2254706,9.39337449 41.4016967,8.94600219 41.8378196,7.97824531 C42.2739426,7.01048842 41.8048116,5.88881678 40.7899862,5.47292159 C29.3457328,0.782843812 13.9550264,7.85221132 12.0280273,18.7760684 C11.84479,19.8148122 12.5792704,20.798534 13.6685352,20.9732726 C14.7578,21.1480113 15.7893668,20.4475967 15.9726042,19.4088529 Z" id="Eyebrow" transform="translate(27.000414, 12.500000) scale(-1, -1) translate(-27.000414, -12.500000) "></path><path d="M73.9726042,19.4088529 C75.452356,11.0203704 88.0622688,5.22829657 97.2106453,8.9774793 C98.2254706,9.39337449 99.4016967,8.94600219 99.8378196,7.97824531 C100.273943,7.01048842 99.8048116,5.88881678 98.7899862,5.47292159 C87.3457328,0.782843812 71.9550264,7.85221132 70.0280273,18.7760684 C69.84479,19.8148122 70.5792704,20.798534 71.6685352,20.9732726 C72.7578,21.1480113 73.7893668,20.4475967 73.9726042,19.4088529 Z" id="Eyebrow" transform="translate(85.000414, 12.500000) scale(1, -1) translate(-85.000414, -12.500000) "></path></g></g><g id="Top" stroke-width="1" fill-rule="evenodd"><defs><rect id="react-path-1463878" x="0" y="0" width="264" height="280"></rect><path d="M94.2519269,52.0221149 C94.3749353,51.9677149 94.0696712,51.9468149 93.3361345,51.9595149 C94.2276637,51.9577149 94.5329279,51.9785149 94.2519269,52.0221149 M86.1169775,36.3015924 C86.1148422,36.2819924 86.1337548,36.4526924 86.1169775,36.3015924 M193.765056,70.7656665 C193.500946,67.448734 193.03295,64.1518864 192.246676,60.9110823 C191.622233,58.3353492 190.769007,55.8775343 189.760006,53.4200433 C189.150703,51.9353766 187.727538,49.8961062 187.560324,48.2944933 C187.395466,46.7168527 188.626521,44.969138 188.889285,43.1323368 C189.144311,41.3447761 189.100909,39.4652134 188.734183,37.6938503 C187.901144,33.6710288 185.140271,29.9300447 180.877167,28.8814158 C179.925362,28.6471994 177.913417,28.9358396 177.240862,28.3815597 C176.469729,27.7459682 175.932761,25.5806808 175.234637,24.7121687 C173.244224,22.2362125 170.13984,20.6417265 166.865887,21.1976261 C164.454917,21.606776 165.839391,22.1053363 164.032005,20.6864317 C163.027041,19.8976114 162.276095,18.6931622 161.300066,17.8392279 C159.832826,16.5563826 158.149588,15.4581893 156.408146,14.556958 C151.851325,12.19892 146.654249,10.4848961 141.564162,9.64942693 C132.278934,8.12523827 122.368926,9.45408458 113.368668,11.8688141 C108.890239,13.0703477 104.381531,14.5951842 100.222053,16.6117782 C98.4385542,17.4764029 97.4090304,18.1936301 95.5494951,18.4200717 C92.6207355,18.7767416 90.1404579,18.7589243 87.3661268,20.0009517 C78.8298269,23.8229236 74.9849256,32.6897818 78.3066539,41.1750259 C78.974835,42.8815988 79.8795374,44.3801954 81.1267416,45.7586062 C82.6474761,47.4392631 83.1975648,47.1085093 81.8877817,49.0411999 C79.9289949,51.9311653 78.2777195,55.0129095 76.9332826,58.2128958 C73.4043038,66.6145606 72.8138416,76.0771643 73.043634,85.0373203 C73.1240445,88.1741362 73.2586228,91.3495022 73.753198,94.4561907 C73.966841,95.8009106 74.0267283,98.3293468 75.0353925,99.3271154 C75.5471264,99.8331265 76.2762042,100.115288 77.0035997,99.9137903 C78.7130802,99.4401742 78.1253096,98.1787097 78.1650102,97.0076274 C78.364859,91.1240324 78.0950295,85.9191145 79.4943071,80.1064647 C80.5278683,75.8118486 82.2504702,71.9114806 84.4827873,68.0713675 C87.3213795,63.1871608 90.3857268,58.8977279 94.2895061,54.7155226 C95.2073299,53.7320079 95.4078515,53.3150832 96.6385698,53.243814 C97.5705244,53.1900382 98.9338023,53.8282213 99.8398505,54.0491558 C101.837665,54.5360539 103.83918,55.0174448 105.873331,55.3452831 C109.613261,55.9481556 113.316519,55.9886494 117.090094,55.8704074 C124.516459,55.6381346 131.974787,55.1172217 139.175061,53.2470535 C143.956964,52.00535 148.196516,49.7762443 152.776887,48.1422364 C152.858644,48.1130808 154.006596,47.2951049 154.207791,47.3284719 C154.488723,47.3747968 156.184746,49.1542588 156.471061,49.3784327 C158.696649,51.1238798 161.137899,51.8566566 163.541467,53.2081794 C166.504881,54.8745825 163.634999,52.4899804 165.269452,54.5668292 C165.745859,55.1716454 165.989782,56.2931632 166.371984,56.9783192 C167.587899,59.1610999 169.279548,61.0795367 171.302932,62.6017816 C173.258018,64.0725184 176.196198,64.7829426 177.193087,66.697168 C177.961865,68.1740599 178.220929,70.1812592 178.841334,71.7579279 C180.468722,75.8931602 182.617937,79.7494709 184.767152,83.6443317 C186.498502,86.7830913 188.392354,89.5250111 188.584801,93.1117947 C188.651754,94.3603012 187.463764,101.849397 190.357534,99.5716982 C190.786502,99.2341415 191.711391,95.415733 191.901483,94.7678314 C192.672616,92.135083 192.94682,89.3866841 193.29605,86.6816947 C193.990474,81.3021672 194.218584,76.1837441 193.765056,70.7656665" id="react-path-1463877"></path><filter x="-0.8%" y="-2.0%" width="101.5%" height="108.0%" filterUnits="objectBoundingBox" id="react-filter-1463874"><feOffset dx="0" dy="2" in="SourceAlpha" result="shadowOffsetOuter1"></feOffset><feColorMatrix values="0 0 0 0 0   0 0 0 0 0   0 0 0 0 0  0 0 0 0.16 0" type="matrix" in="shadowOffsetOuter1" result="shadowMatrixOuter1"></feColorMatrix><feMerge><feMergeNode in="shadowMatrixOuter1"></feMergeNode><feMergeNode in="SourceGraphic"></feMergeNode></feMerge></filter></defs><mask id="react-mask-1463876" fill="white"><use xlink:href="#react-path-1463878"></use></mask><g id="Mask"></g><g id="Top/Short-Hair/Short-Curly" mask="url(#react-mask-1463876)"><g transform="translate(-1.000000, 0.000000)"><mask id="react-mask-1463875" fill="white"><use xlink:href="#react-path-1463877"></use></mask><use id="Short-Hair" stroke="none" fill="#28354B" fill-rule="evenodd" xlink:href="#react-path-1463877"></use><g id="Skin/👶🏽-03-Brown" mask="url(#react-mask-1463875)" fill="#2C1B18"><g transform="translate(0.000000, 0.000000) " id="Color"><rect x="0" y="0" width="264" height="280"></rect></g></g><g id="Top/_Resources/Prescription-02" fill="none" transform="translate(62.000000, 85.000000)" stroke-width="1"><defs><filter x="-0.8%" y="-2.4%" width="101.5%" height="109.8%" filterUnits="objectBoundingBox" id="react-filter-1463879"><feOffset dx="0" dy="2" in="SourceAlpha" result="shadowOffsetOuter1"></feOffset><feColorMatrix values="0 0 0 0 0   0 0 0 0 0   0 0 0 0 0  0 0 0 0.2 0" type="matrix" in="shadowOffsetOuter1" result="shadowMatrixOuter1"></feColorMatrix><feMerge><feMergeNode in="shadowMatrixOuter1"></feMergeNode><feMergeNode in="SourceGraphic"></feMergeNode></feMerge></filter></defs><g id="Wayfarers" filter="url(#react-filter-1463879)" transform="translate(6.000000, 7.000000)" fill="#252C2F"><path d="M34,41 L31.2421498,41 C17.3147125,41 9,33.3359286 9,20.5 C9,10.127 10.8170058,0 32.5299306,0 L35.4700694,0 C57.1829942,0 59,10.127 59,20.5 C59,32.5686429 48.7212748,41 34,41 Z M32.3853606,6 C13,6 13,12.8410159 13,21.5015498 C13,28.5719428 16.116254,37 30.9709365,37 L34,37 C46.3649085,37 55,30.6270373 55,21.5015498 C55,12.8410159 55,6 35.6146394,6 L32.3853606,6 Z" id="Left" fill-rule="nonzero"></path><path d="M96,41 L93.2421498,41 C79.3147125,41 71,33.3359286 71,20.5 C71,10.127 72.8170058,0 94.5299306,0 L97.4700694,0 C119.182994,0 121,10.127 121,20.5 C121,32.5686429 110.721275,41 96,41 Z M94.3853606,6 C75,6 75,12.8410159 75,21.5015498 C75,28.5719428 78.1194833,37 92.9709365,37 L96,37 C108.364909,37 117,30.6270373 117,21.5015498 C117,12.8410159 117,6 97.6146394,6 L94.3853606,6 Z" id="Right" fill-rule="nonzero"></path><path d="M2.95454545,5.77156439 C3.64590909,5.09629136 11.2095455,0 32.5,0 C50.3513636,0 54.1302273,1.85267217 59.8502273,4.6518809 L60.2689233,4.85850899 C60.6666014,4.99901896 62.7002447,5.68982981 65.0790606,5.76579519 C67.2462948,5.67278567 69.1000195,5.08540191 69.641698,4.89719767 C76.1703915,1.7220864 82.5610971,0 97.5,0 C118.790455,0 126.354091,5.09629136 127.045455,5.77156439 C128.679318,5.77156439 130,7.06150904 130,8.65734659 L130,11.5431288 C130,13.1389663 128.679318,14.428911 127.045455,14.428911 C127.045455,14.428911 120.143997,14.428911 120.143997,17.3146932 C120.143997,20.2004754 118.181818,13.1389663 118.181818,11.5431288 L118.181818,8.73240251 C114.578575,7.35340151 108.128411,4.78617535 97.5,4.78617535 C85.6584651,4.78617535 79.7610984,6.88602813 74.7022935,8.97112368 L74.7588636,9.10752861 L74.7563667,11.0937608 L72.5391666,16.4436339 L69.8004908,15.3608351 C69.5558969,15.2641292 69.0281396,15.090392 68.2963505,14.9099044 C66.256272,14.4067419 64.1589087,14.253569 62.3040836,14.6343084 C61.6235903,14.7739931 60.9922286,14.9836085 60.4128127,15.266732 L57.7704824,16.5578701 L55.1266751,11.3962031 L55.2440909,9.10175705 L55.3248203,8.90683855 C50.9620526,6.87386374 46.9392639,4.78617535 32.5,4.78617535 C21.8721459,4.78617535 15.422131,7.3524397 11.8181818,8.7314671 L11.8181818,11.5431288 C11.8181818,13.1389663 8.86363636,20.2004754 8.86363636,17.3146932 C8.86363636,14.428911 2.95454545,14.428911 2.95454545,14.428911 C1.32363636,14.428911 0,13.1389663 0,11.5431288 L0,8.65734659 C0,7.06150904 1.32363636,5.77156439 2.95454545,5.77156439 Z" id="Stuff" fill-rule="nonzero"></path></g></g></g></g></g></g></g></g></g>` },
         error: { vb: '0 0 264 280', corpo: `<desc>Created with getavataaars.com</desc><defs><circle id="react-path-1463995" cx="120" cy="120" r="120"></circle><path d="M12,160 C12,226.27417 65.72583,280 132,280 C198.27417,280 252,226.27417 252,160 L264,160 L264,-1.42108547e-14 L-3.19744231e-14,-1.42108547e-14 L-3.19744231e-14,160 L12,160 Z" id="react-path-1463996"></path><path d="M124,144.610951 L124,163 L128,163 L128,163 C167.764502,163 200,195.235498 200,235 L200,244 L0,244 L0,235 C-4.86974701e-15,195.235498 32.235498,163 72,163 L72,163 L76,163 L76,144.610951 C58.7626345,136.422372 46.3722246,119.687011 44.3051388,99.8812385 C38.4803105,99.0577866 34,94.0521096 34,88 L34,74 C34,68.0540074 38.3245733,63.1180731 44,62.1659169 L44,56 L44,56 C44,25.072054 69.072054,5.68137151e-15 100,0 L100,0 L100,0 C130.927946,-5.68137151e-15 156,25.072054 156,56 L156,62.1659169 C161.675427,63.1180731 166,68.0540074 166,74 L166,88 C166,94.0521096 161.51969,99.0577866 155.694861,99.8812385 C153.627775,119.687011 141.237365,136.422372 124,144.610951 Z" id="react-path-1463997"></path></defs><g id="Avataaar" stroke="none" stroke-width="1" fill="none" fill-rule="evenodd"><g transform="translate(-825.000000, -1100.000000)" id="Avataaar/Circle"><g transform="translate(825.000000, 1100.000000)"><g id="Mask"></g><g id="Avataaar" stroke-width="1" fill-rule="evenodd" mask="url(#react-mask-1463999)"><g id="Body" transform="translate(32.000000, 36.000000)"><mask id="react-mask-1464000" fill="white"><use xlink:href="#react-path-1463997"></use></mask><use fill="#D0C6AC" xlink:href="#react-path-1463997"></use><g id="Skin/👶🏽-03-Brown" mask="url(#react-mask-1464000)" fill="#AE5D29"><g transform="translate(0.000000, 0.000000)" id="Color"><rect x="0" y="0" width="264" height="280"></rect></g></g><path d="M156,79 L156,102 C156,132.927946 130.927946,158 100,158 C69.072054,158 44,132.927946 44,102 L44,79 L44,94 C44,124.927946 69.072054,150 100,150 C130.927946,150 156,124.927946 156,94 L156,79 Z" id="Neck-Shadow" fill-opacity="0.100000001" fill="#000000" mask="url(#react-mask-1464000)"></path></g><g id="Clothing/Collar-+-Sweater" transform="translate(0.000000, 170.000000)"><defs><path d="M105.192402,29.0517235 L104,29.0517235 L104,29.0517235 C64.235498,29.0517235 32,61.2872215 32,101.051724 L32,110 L232,110 L232,101.051724 C232,61.2872215 199.764502,29.0517235 160,29.0517235 L160,29.0517235 L158.807598,29.0517235 C158.934638,30.0353144 159,31.0364513 159,32.0517235 C159,45.8588423 146.911688,57.0517235 132,57.0517235 C117.088312,57.0517235 105,45.8588423 105,32.0517235 C105,31.0364513 105.065362,30.0353144 105.192402,29.0517235 Z" id="react-path-1464001"></path></defs><mask id="react-mask-1464002" fill="white"><use xlink:href="#react-path-1464001"></use></mask><use id="Clothes" fill="#E6E6E6" fill-rule="evenodd" xlink:href="#react-path-1464001"></use><g id="Color/Palette/Gray-01" mask="url(#react-mask-1464002)" fill-rule="evenodd" fill="#3C8652"><rect id="🖍Color" x="0" y="0" width="264" height="110"></rect></g><path d="M156,22.2794906 C162.181647,26.8351858 166,33.1057265 166,40.027915 C166,47.2334941 161.862605,53.7329769 155.228997,58.3271669 L149.57933,53.8764929 L145,54.207887 L146,51.0567821 L145.922229,50.995516 C152.022491,47.8530505 156,42.7003578 156,36.8768102 L156,22.2794906 Z M108,21.5714994 C101.232748,26.1740081 97,32.7397769 97,40.027915 C97,47.4261549 101.361602,54.080035 108.308428,58.6915723 L114.42067,53.8764929 L119,54.207887 L118,51.0567821 L118.077771,50.995516 C111.977509,47.8530505 108,42.7003578 108,36.8768102 L108,21.5714994 Z" id="Collar" fill="#F2F2F2" fill-rule="evenodd"></path></g><g id="Face" transform="translate(76.000000, 82.000000)" fill="#000000"><g id="Mouth/Grimace" transform="translate(2.000000, 52.000000)"><defs><rect id="react-path-1464003" x="24" y="9" width="60" height="22" rx="11"></rect></defs><rect id="Mouth" fill-opacity="0.599999964" fill="#000000" fill-rule="evenodd" x="22" y="7" width="64" height="26" rx="13"></rect><mask id="react-mask-1464004" fill="white"><use xlink:href="#react-path-1464003"></use></mask><use id="Mouth" fill="#FFFFFF" fill-rule="evenodd" xlink:href="#react-path-1464003"></use><path d="M71,22 L62,22 L62,34 L58,34 L58,22 L49,22 L49,34 L45,34 L45,22 L36,22 L36,34 L32,34 L32,22 L24,22 L24,18 L32,18 L32,6 L36,6 L36,18 L45,18 L45,6 L49,6 L49,18 L58,18 L58,6 L62,6 L62,18 L71,18 L71,6 L75,6 L75,18 L83.8666667,18 L83.8666667,22 L75,22 L75,34 L71,34 L71,22 Z" id="Grimace-Teeth" fill="#E6E6E6" fill-rule="evenodd" mask="url(#react-mask-1464004)"></path></g><g id="Nose/Default" transform="translate(28.000000, 40.000000)" fill-opacity="0.16"><path d="M16,8 C16,12.418278 21.372583,16 28,16 L28,16 C34.627417,16 40,12.418278 40,8" id="Nose"></path></g><g id="Eyes/Cry-😢" transform="translate(0.000000, 8.000000)"><circle id="Eye" fill-opacity="0.599999964" fill="#000000" fill-rule="evenodd" cx="30" cy="22" r="6"></circle><path d="M25,27 C25,27 19,34.2706667 19,38.2706667 C19,41.5846667 21.686,44.2706667 25,44.2706667 C28.314,44.2706667 31,41.5846667 31,38.2706667 C31,34.2706667 25,27 25,27 Z" id="Drop" fill="#92D9FF" fill-rule="nonzero"></path><circle id="Eye" fill-opacity="0.599999964" fill="#000000" fill-rule="evenodd" cx="82" cy="22" r="6"></circle></g><g id="Eyebrow/Natural/Angry-Natural" fill-opacity="0.599999964"><path d="M44.8565785,12.2282877 C44.8578785,12.2192877 44.8578785,12.2192877 44.8565785,12.2282877 M17.5862288,7.89238094 C15.2441598,8.3302947 13.0866155,9.78806858 12.1523766,12.0987479 C11.8009169,12.967391 11.3917103,14.9243181 11.7083227,15.8073302 C11.8284629,16.14295 12.0332321,16.1008692 12.9555234,16.0430509 C14.643791,15.9369937 16.9330912,13.6622369 18.7484684,13.2557982 C21.2753939,12.6899315 23.9825295,13.1148447 26.4961798,13.6882381 C30.8109365,14.6725177 36.4854008,17.7875215 40.9461842,16.1699775 C41.2783949,16.0495512 45.6210294,12.9225732 44.3685187,12.2769925 C43.9238011,11.9068186 41.1370145,12.0854053 40.6216067,11.9988489 C38.2277647,11.5971998 35.7297127,10.9345131 33.373373,10.3265657 C28.2329017,9.00016592 22.9666484,6.88073171 17.5862288,7.89238094" id="Eyebrows-The-Web" transform="translate(28.094701, 12.127505) rotate(17.000000) translate(-28.094701, -12.127505) "></path><path d="M100.918293,12.2094196 C100.919593,12.2004196 100.919593,12.2004196 100.918293,12.2094196 M73.5862288,7.89238094 C71.2441598,8.3302947 69.0866155,9.78806858 68.1523766,12.0987479 C67.8009169,12.967391 67.3917103,14.9243181 67.7083227,15.8073302 C67.8284629,16.14295 68.0332321,16.1008692 68.9555234,16.0430509 C70.643791,15.9369937 72.9330912,13.6622369 74.7484684,13.2557982 C77.2753939,12.6899315 79.9825295,13.1148447 82.4961798,13.6882381 C86.8109365,14.6725177 92.4854008,17.7875215 96.9461842,16.1699775 C97.2783949,16.0495512 101.621029,12.9225732 100.368519,12.2769925 C99.9238011,11.9068186 97.1370145,12.0854053 96.6216067,11.9988489 C94.2277647,11.5971998 91.7297127,10.9345131 89.373373,10.3265657 C84.2329017,9.00016592 78.9666484,6.88073171 73.5862288,7.89238094" id="Eyebrows-The-Web" transform="translate(84.094701, 12.127505) scale(-1, 1) rotate(17.000000) translate(-84.094701, -12.127505) "></path></g></g><g id="Top" stroke-width="1" fill-rule="evenodd"><defs><rect id="react-path-1464009" x="0" y="0" width="264" height="280"></rect><path d="M94.2519269,52.0221149 C94.3749353,51.9677149 94.0696712,51.9468149 93.3361345,51.9595149 C94.2276637,51.9577149 94.5329279,51.9785149 94.2519269,52.0221149 M86.1169775,36.3015924 C86.1148422,36.2819924 86.1337548,36.4526924 86.1169775,36.3015924 M193.765056,70.7656665 C193.500946,67.448734 193.03295,64.1518864 192.246676,60.9110823 C191.622233,58.3353492 190.769007,55.8775343 189.760006,53.4200433 C189.150703,51.9353766 187.727538,49.8961062 187.560324,48.2944933 C187.395466,46.7168527 188.626521,44.969138 188.889285,43.1323368 C189.144311,41.3447761 189.100909,39.4652134 188.734183,37.6938503 C187.901144,33.6710288 185.140271,29.9300447 180.877167,28.8814158 C179.925362,28.6471994 177.913417,28.9358396 177.240862,28.3815597 C176.469729,27.7459682 175.932761,25.5806808 175.234637,24.7121687 C173.244224,22.2362125 170.13984,20.6417265 166.865887,21.1976261 C164.454917,21.606776 165.839391,22.1053363 164.032005,20.6864317 C163.027041,19.8976114 162.276095,18.6931622 161.300066,17.8392279 C159.832826,16.5563826 158.149588,15.4581893 156.408146,14.556958 C151.851325,12.19892 146.654249,10.4848961 141.564162,9.64942693 C132.278934,8.12523827 122.368926,9.45408458 113.368668,11.8688141 C108.890239,13.0703477 104.381531,14.5951842 100.222053,16.6117782 C98.4385542,17.4764029 97.4090304,18.1936301 95.5494951,18.4200717 C92.6207355,18.7767416 90.1404579,18.7589243 87.3661268,20.0009517 C78.8298269,23.8229236 74.9849256,32.6897818 78.3066539,41.1750259 C78.974835,42.8815988 79.8795374,44.3801954 81.1267416,45.7586062 C82.6474761,47.4392631 83.1975648,47.1085093 81.8877817,49.0411999 C79.9289949,51.9311653 78.2777195,55.0129095 76.9332826,58.2128958 C73.4043038,66.6145606 72.8138416,76.0771643 73.043634,85.0373203 C73.1240445,88.1741362 73.2586228,91.3495022 73.753198,94.4561907 C73.966841,95.8009106 74.0267283,98.3293468 75.0353925,99.3271154 C75.5471264,99.8331265 76.2762042,100.115288 77.0035997,99.9137903 C78.7130802,99.4401742 78.1253096,98.1787097 78.1650102,97.0076274 C78.364859,91.1240324 78.0950295,85.9191145 79.4943071,80.1064647 C80.5278683,75.8118486 82.2504702,71.9114806 84.4827873,68.0713675 C87.3213795,63.1871608 90.3857268,58.8977279 94.2895061,54.7155226 C95.2073299,53.7320079 95.4078515,53.3150832 96.6385698,53.243814 C97.5705244,53.1900382 98.9338023,53.8282213 99.8398505,54.0491558 C101.837665,54.5360539 103.83918,55.0174448 105.873331,55.3452831 C109.613261,55.9481556 113.316519,55.9886494 117.090094,55.8704074 C124.516459,55.6381346 131.974787,55.1172217 139.175061,53.2470535 C143.956964,52.00535 148.196516,49.7762443 152.776887,48.1422364 C152.858644,48.1130808 154.006596,47.2951049 154.207791,47.3284719 C154.488723,47.3747968 156.184746,49.1542588 156.471061,49.3784327 C158.696649,51.1238798 161.137899,51.8566566 163.541467,53.2081794 C166.504881,54.8745825 163.634999,52.4899804 165.269452,54.5668292 C165.745859,55.1716454 165.989782,56.2931632 166.371984,56.9783192 C167.587899,59.1610999 169.279548,61.0795367 171.302932,62.6017816 C173.258018,64.0725184 176.196198,64.7829426 177.193087,66.697168 C177.961865,68.1740599 178.220929,70.1812592 178.841334,71.7579279 C180.468722,75.8931602 182.617937,79.7494709 184.767152,83.6443317 C186.498502,86.7830913 188.392354,89.5250111 188.584801,93.1117947 C188.651754,94.3603012 187.463764,101.849397 190.357534,99.5716982 C190.786502,99.2341415 191.711391,95.415733 191.901483,94.7678314 C192.672616,92.135083 192.94682,89.3866841 193.29605,86.6816947 C193.990474,81.3021672 194.218584,76.1837441 193.765056,70.7656665" id="react-path-1464008"></path><filter x="-0.8%" y="-2.0%" width="101.5%" height="108.0%" filterUnits="objectBoundingBox" id="react-filter-1464005"><feOffset dx="0" dy="2" in="SourceAlpha" result="shadowOffsetOuter1"></feOffset><feColorMatrix values="0 0 0 0 0   0 0 0 0 0   0 0 0 0 0  0 0 0 0.16 0" type="matrix" in="shadowOffsetOuter1" result="shadowMatrixOuter1"></feColorMatrix><feMerge><feMergeNode in="shadowMatrixOuter1"></feMergeNode><feMergeNode in="SourceGraphic"></feMergeNode></feMerge></filter></defs><mask id="react-mask-1464007" fill="white"><use xlink:href="#react-path-1464009"></use></mask><g id="Mask"></g><g id="Top/Short-Hair/Short-Curly" mask="url(#react-mask-1464007)"><g transform="translate(-1.000000, 0.000000)"><mask id="react-mask-1464006" fill="white"><use xlink:href="#react-path-1464008"></use></mask><use id="Short-Hair" stroke="none" fill="#28354B" fill-rule="evenodd" xlink:href="#react-path-1464008"></use><g id="Skin/👶🏽-03-Brown" mask="url(#react-mask-1464006)" fill="#2C1B18"><g transform="translate(0.000000, 0.000000) " id="Color"><rect x="0" y="0" width="264" height="280"></rect></g></g><g id="Top/_Resources/Prescription-02" fill="none" transform="translate(62.000000, 85.000000)" stroke-width="1"><defs><filter x="-0.8%" y="-2.4%" width="101.5%" height="109.8%" filterUnits="objectBoundingBox" id="react-filter-1464010"><feOffset dx="0" dy="2" in="SourceAlpha" result="shadowOffsetOuter1"></feOffset><feColorMatrix values="0 0 0 0 0   0 0 0 0 0   0 0 0 0 0  0 0 0 0.2 0" type="matrix" in="shadowOffsetOuter1" result="shadowMatrixOuter1"></feColorMatrix><feMerge><feMergeNode in="shadowMatrixOuter1"></feMergeNode><feMergeNode in="SourceGraphic"></feMergeNode></feMerge></filter></defs><g id="Wayfarers" filter="url(#react-filter-1464010)" transform="translate(6.000000, 7.000000)" fill="#252C2F"><path d="M34,41 L31.2421498,41 C17.3147125,41 9,33.3359286 9,20.5 C9,10.127 10.8170058,0 32.5299306,0 L35.4700694,0 C57.1829942,0 59,10.127 59,20.5 C59,32.5686429 48.7212748,41 34,41 Z M32.3853606,6 C13,6 13,12.8410159 13,21.5015498 C13,28.5719428 16.116254,37 30.9709365,37 L34,37 C46.3649085,37 55,30.6270373 55,21.5015498 C55,12.8410159 55,6 35.6146394,6 L32.3853606,6 Z" id="Left" fill-rule="nonzero"></path><path d="M96,41 L93.2421498,41 C79.3147125,41 71,33.3359286 71,20.5 C71,10.127 72.8170058,0 94.5299306,0 L97.4700694,0 C119.182994,0 121,10.127 121,20.5 C121,32.5686429 110.721275,41 96,41 Z M94.3853606,6 C75,6 75,12.8410159 75,21.5015498 C75,28.5719428 78.1194833,37 92.9709365,37 L96,37 C108.364909,37 117,30.6270373 117,21.5015498 C117,12.8410159 117,6 97.6146394,6 L94.3853606,6 Z" id="Right" fill-rule="nonzero"></path><path d="M2.95454545,5.77156439 C3.64590909,5.09629136 11.2095455,0 32.5,0 C50.3513636,0 54.1302273,1.85267217 59.8502273,4.6518809 L60.2689233,4.85850899 C60.6666014,4.99901896 62.7002447,5.68982981 65.0790606,5.76579519 C67.2462948,5.67278567 69.1000195,5.08540191 69.641698,4.89719767 C76.1703915,1.7220864 82.5610971,0 97.5,0 C118.790455,0 126.354091,5.09629136 127.045455,5.77156439 C128.679318,5.77156439 130,7.06150904 130,8.65734659 L130,11.5431288 C130,13.1389663 128.679318,14.428911 127.045455,14.428911 C127.045455,14.428911 120.143997,14.428911 120.143997,17.3146932 C120.143997,20.2004754 118.181818,13.1389663 118.181818,11.5431288 L118.181818,8.73240251 C114.578575,7.35340151 108.128411,4.78617535 97.5,4.78617535 C85.6584651,4.78617535 79.7610984,6.88602813 74.7022935,8.97112368 L74.7588636,9.10752861 L74.7563667,11.0937608 L72.5391666,16.4436339 L69.8004908,15.3608351 C69.5558969,15.2641292 69.0281396,15.090392 68.2963505,14.9099044 C66.256272,14.4067419 64.1589087,14.253569 62.3040836,14.6343084 C61.6235903,14.7739931 60.9922286,14.9836085 60.4128127,15.266732 L57.7704824,16.5578701 L55.1266751,11.3962031 L55.2440909,9.10175705 L55.3248203,8.90683855 C50.9620526,6.87386374 46.9392639,4.78617535 32.5,4.78617535 C21.8721459,4.78617535 15.422131,7.3524397 11.8181818,8.7314671 L11.8181818,11.5431288 C11.8181818,13.1389663 8.86363636,20.2004754 8.86363636,17.3146932 C8.86363636,14.428911 2.95454545,14.428911 2.95454545,14.428911 C1.32363636,14.428911 0,13.1389663 0,11.5431288 L0,8.65734659 C0,7.06150904 1.32363636,5.77156439 2.95454545,5.77156439 Z" id="Stuff" fill-rule="nonzero"></path></g></g></g></g></g></g></g></g></g>` },
         success: { vb: '0 0 264 280', corpo: `<desc>Created with getavataaars.com</desc><defs><circle id="react-path-1463950" cx="120" cy="120" r="120"></circle><path d="M12,160 C12,226.27417 65.72583,280 132,280 C198.27417,280 252,226.27417 252,160 L264,160 L264,-1.42108547e-14 L-3.19744231e-14,-1.42108547e-14 L-3.19744231e-14,160 L12,160 Z" id="react-path-1463951"></path><path d="M124,144.610951 L124,163 L128,163 L128,163 C167.764502,163 200,195.235498 200,235 L200,244 L0,244 L0,235 C-4.86974701e-15,195.235498 32.235498,163 72,163 L72,163 L76,163 L76,144.610951 C58.7626345,136.422372 46.3722246,119.687011 44.3051388,99.8812385 C38.4803105,99.0577866 34,94.0521096 34,88 L34,74 C34,68.0540074 38.3245733,63.1180731 44,62.1659169 L44,56 L44,56 C44,25.072054 69.072054,5.68137151e-15 100,0 L100,0 L100,0 C130.927946,-5.68137151e-15 156,25.072054 156,56 L156,62.1659169 C161.675427,63.1180731 166,68.0540074 166,74 L166,88 C166,94.0521096 161.51969,99.0577866 155.694861,99.8812385 C153.627775,119.687011 141.237365,136.422372 124,144.610951 Z" id="react-path-1463952"></path></defs><g id="Avataaar" stroke="none" stroke-width="1" fill="none" fill-rule="evenodd"><g transform="translate(-825.000000, -1100.000000)" id="Avataaar/Circle"><g transform="translate(825.000000, 1100.000000)"><g id="Mask"></g><g id="Avataaar" stroke-width="1" fill-rule="evenodd" mask="url(#react-mask-1463954)"><g id="Body" transform="translate(32.000000, 36.000000)"><mask id="react-mask-1463955" fill="white"><use xlink:href="#react-path-1463952"></use></mask><use fill="#D0C6AC" xlink:href="#react-path-1463952"></use><g id="Skin/👶🏽-03-Brown" mask="url(#react-mask-1463955)" fill="#AE5D29"><g transform="translate(0.000000, 0.000000)" id="Color"><rect x="0" y="0" width="264" height="280"></rect></g></g><path d="M156,79 L156,102 C156,132.927946 130.927946,158 100,158 C69.072054,158 44,132.927946 44,102 L44,79 L44,94 C44,124.927946 69.072054,150 100,150 C130.927946,150 156,124.927946 156,94 L156,79 Z" id="Neck-Shadow" fill-opacity="0.100000001" fill="#000000" mask="url(#react-mask-1463955)"></path></g><g id="Clothing/Collar-+-Sweater" transform="translate(0.000000, 170.000000)"><defs><path d="M105.192402,29.0517235 L104,29.0517235 L104,29.0517235 C64.235498,29.0517235 32,61.2872215 32,101.051724 L32,110 L232,110 L232,101.051724 C232,61.2872215 199.764502,29.0517235 160,29.0517235 L160,29.0517235 L158.807598,29.0517235 C158.934638,30.0353144 159,31.0364513 159,32.0517235 C159,45.8588423 146.911688,57.0517235 132,57.0517235 C117.088312,57.0517235 105,45.8588423 105,32.0517235 C105,31.0364513 105.065362,30.0353144 105.192402,29.0517235 Z" id="react-path-1463956"></path></defs><mask id="react-mask-1463957" fill="white"><use xlink:href="#react-path-1463956"></use></mask><use id="Clothes" fill="#E6E6E6" fill-rule="evenodd" xlink:href="#react-path-1463956"></use><g id="Color/Palette/Gray-01" mask="url(#react-mask-1463957)" fill-rule="evenodd" fill="#3C8652"><rect id="🖍Color" x="0" y="0" width="264" height="110"></rect></g><path d="M156,22.2794906 C162.181647,26.8351858 166,33.1057265 166,40.027915 C166,47.2334941 161.862605,53.7329769 155.228997,58.3271669 L149.57933,53.8764929 L145,54.207887 L146,51.0567821 L145.922229,50.995516 C152.022491,47.8530505 156,42.7003578 156,36.8768102 L156,22.2794906 Z M108,21.5714994 C101.232748,26.1740081 97,32.7397769 97,40.027915 C97,47.4261549 101.361602,54.080035 108.308428,58.6915723 L114.42067,53.8764929 L119,54.207887 L118,51.0567821 L118.077771,50.995516 C111.977509,47.8530505 108,42.7003578 108,36.8768102 L108,21.5714994 Z" id="Collar" fill="#F2F2F2" fill-rule="evenodd"></path></g><g id="Face" transform="translate(76.000000, 82.000000)" fill="#000000"><g id="Mouth/Smile" transform="translate(2.000000, 52.000000)"><defs><path d="M35.117844,15.1280772 C36.1757121,24.6198025 44.2259873,32 54,32 C63.8042055,32 71.8740075,24.574136 72.8917593,15.0400546 C72.9736685,14.272746 72.1167429,13 71.042767,13 C56.1487536,13 44.7379213,13 37.0868244,13 C36.0066168,13 35.0120058,14.1784435 35.117844,15.1280772 Z" id="react-path-1463958"></path></defs><mask id="react-mask-1463959" fill="white"><use xlink:href="#react-path-1463958"></use></mask><use id="Mouth" fill-opacity="0.699999988" fill="#000000" fill-rule="evenodd" xlink:href="#react-path-1463958"></use><rect id="Teeth" fill="#FFFFFF" fill-rule="evenodd" mask="url(#react-mask-1463959)" x="39" y="2" width="31" height="16" rx="5"></rect><g id="Tongue" stroke-width="1" fill-rule="evenodd" mask="url(#react-mask-1463959)" fill="#FF4F6D"><g transform="translate(38.000000, 24.000000)"><circle cx="11" cy="11" r="11"></circle><circle cx="21" cy="11" r="11"></circle></g></g></g><g id="Nose/Default" transform="translate(28.000000, 40.000000)" fill-opacity="0.16"><path d="M16,8 C16,12.418278 21.372583,16 28,16 L28,16 C34.627417,16 40,12.418278 40,8" id="Nose"></path></g><g id="Eyes/Happy-😁" transform="translate(0.000000, 8.000000)" fill-opacity="0.599999964"><path d="M16.1601674,22.4473116 C18.006676,18.648508 22.1644225,16 26.9975803,16 C31.8136766,16 35.9591217,18.629842 37.8153518,22.4071242 C38.3667605,23.5291977 37.5821037,24.4474817 36.790607,23.7670228 C34.3395063,21.6597833 30.8587163,20.3437884 26.9975803,20.3437884 C23.2572061,20.3437884 19.8737584,21.5787519 17.4375392,23.5716412 C16.5467928,24.3002944 15.6201012,23.5583844 16.1601674,22.4473116 Z" id="Squint"></path><path d="M74.1601674,22.4473116 C76.006676,18.648508 80.1644225,16 84.9975803,16 C89.8136766,16 93.9591217,18.629842 95.8153518,22.4071242 C96.3667605,23.5291977 95.5821037,24.4474817 94.790607,23.7670228 C92.3395063,21.6597833 88.8587163,20.3437884 84.9975803,20.3437884 C81.2572061,20.3437884 77.8737584,21.5787519 75.4375392,23.5716412 C74.5467928,24.3002944 73.6201012,23.5583844 74.1601674,22.4473116 Z" id="Squint"></path></g><g id="Eyebrow/Natural/Raised-Excited-Natural" fill-opacity="0.599999964"><path d="M22.7663531,1.57844898 L23.6772984,1.17582144 C28.9190996,-0.905265751 36.8645466,-0.0328729562 41.7227321,2.29911638 C42.2897848,2.57148957 41.9021563,3.4519421 41.3211012,3.40711006 C26.4021788,2.25602197 16.3582869,11.5525942 12.9460869,17.8470939 C12.8449215,18.0337142 12.5391523,18.05489 12.4635344,17.8808353 C10.156283,12.5620676 16.9134476,3.89614725 22.7663531,1.57844898 Z" id="Eye-Browse-Reddit"></path><path d="M80.7663531,1.57844898 L81.6772984,1.17582144 C86.9190996,-0.905265751 94.8645466,-0.0328729562 99.7227321,2.29911638 C100.289785,2.57148957 99.9021563,3.4519421 99.3211012,3.40711006 C84.4021788,2.25602197 74.3582869,11.5525942 70.9460869,17.8470939 C70.8449215,18.0337142 70.5391523,18.05489 70.4635344,17.8808353 C68.156283,12.5620676 74.9134476,3.89614725 80.7663531,1.57844898 Z" id="Eye-Browse-Reddit" transform="translate(85.000000, 9.000000) scale(-1, 1) translate(-85.000000, -9.000000) "></path></g></g><g id="Top" stroke-width="1" fill-rule="evenodd"><defs><rect id="react-path-1463964" x="0" y="0" width="264" height="280"></rect><path d="M94.2519269,52.0221149 C94.3749353,51.9677149 94.0696712,51.9468149 93.3361345,51.9595149 C94.2276637,51.9577149 94.5329279,51.9785149 94.2519269,52.0221149 M86.1169775,36.3015924 C86.1148422,36.2819924 86.1337548,36.4526924 86.1169775,36.3015924 M193.765056,70.7656665 C193.500946,67.448734 193.03295,64.1518864 192.246676,60.9110823 C191.622233,58.3353492 190.769007,55.8775343 189.760006,53.4200433 C189.150703,51.9353766 187.727538,49.8961062 187.560324,48.2944933 C187.395466,46.7168527 188.626521,44.969138 188.889285,43.1323368 C189.144311,41.3447761 189.100909,39.4652134 188.734183,37.6938503 C187.901144,33.6710288 185.140271,29.9300447 180.877167,28.8814158 C179.925362,28.6471994 177.913417,28.9358396 177.240862,28.3815597 C176.469729,27.7459682 175.932761,25.5806808 175.234637,24.7121687 C173.244224,22.2362125 170.13984,20.6417265 166.865887,21.1976261 C164.454917,21.606776 165.839391,22.1053363 164.032005,20.6864317 C163.027041,19.8976114 162.276095,18.6931622 161.300066,17.8392279 C159.832826,16.5563826 158.149588,15.4581893 156.408146,14.556958 C151.851325,12.19892 146.654249,10.4848961 141.564162,9.64942693 C132.278934,8.12523827 122.368926,9.45408458 113.368668,11.8688141 C108.890239,13.0703477 104.381531,14.5951842 100.222053,16.6117782 C98.4385542,17.4764029 97.4090304,18.1936301 95.5494951,18.4200717 C92.6207355,18.7767416 90.1404579,18.7589243 87.3661268,20.0009517 C78.8298269,23.8229236 74.9849256,32.6897818 78.3066539,41.1750259 C78.974835,42.8815988 79.8795374,44.3801954 81.1267416,45.7586062 C82.6474761,47.4392631 83.1975648,47.1085093 81.8877817,49.0411999 C79.9289949,51.9311653 78.2777195,55.0129095 76.9332826,58.2128958 C73.4043038,66.6145606 72.8138416,76.0771643 73.043634,85.0373203 C73.1240445,88.1741362 73.2586228,91.3495022 73.753198,94.4561907 C73.966841,95.8009106 74.0267283,98.3293468 75.0353925,99.3271154 C75.5471264,99.8331265 76.2762042,100.115288 77.0035997,99.9137903 C78.7130802,99.4401742 78.1253096,98.1787097 78.1650102,97.0076274 C78.364859,91.1240324 78.0950295,85.9191145 79.4943071,80.1064647 C80.5278683,75.8118486 82.2504702,71.9114806 84.4827873,68.0713675 C87.3213795,63.1871608 90.3857268,58.8977279 94.2895061,54.7155226 C95.2073299,53.7320079 95.4078515,53.3150832 96.6385698,53.243814 C97.5705244,53.1900382 98.9338023,53.8282213 99.8398505,54.0491558 C101.837665,54.5360539 103.83918,55.0174448 105.873331,55.3452831 C109.613261,55.9481556 113.316519,55.9886494 117.090094,55.8704074 C124.516459,55.6381346 131.974787,55.1172217 139.175061,53.2470535 C143.956964,52.00535 148.196516,49.7762443 152.776887,48.1422364 C152.858644,48.1130808 154.006596,47.2951049 154.207791,47.3284719 C154.488723,47.3747968 156.184746,49.1542588 156.471061,49.3784327 C158.696649,51.1238798 161.137899,51.8566566 163.541467,53.2081794 C166.504881,54.8745825 163.634999,52.4899804 165.269452,54.5668292 C165.745859,55.1716454 165.989782,56.2931632 166.371984,56.9783192 C167.587899,59.1610999 169.279548,61.0795367 171.302932,62.6017816 C173.258018,64.0725184 176.196198,64.7829426 177.193087,66.697168 C177.961865,68.1740599 178.220929,70.1812592 178.841334,71.7579279 C180.468722,75.8931602 182.617937,79.7494709 184.767152,83.6443317 C186.498502,86.7830913 188.392354,89.5250111 188.584801,93.1117947 C188.651754,94.3603012 187.463764,101.849397 190.357534,99.5716982 C190.786502,99.2341415 191.711391,95.415733 191.901483,94.7678314 C192.672616,92.135083 192.94682,89.3866841 193.29605,86.6816947 C193.990474,81.3021672 194.218584,76.1837441 193.765056,70.7656665" id="react-path-1463963"></path><filter x="-0.8%" y="-2.0%" width="101.5%" height="108.0%" filterUnits="objectBoundingBox" id="react-filter-1463960"><feOffset dx="0" dy="2" in="SourceAlpha" result="shadowOffsetOuter1"></feOffset><feColorMatrix values="0 0 0 0 0   0 0 0 0 0   0 0 0 0 0  0 0 0 0.16 0" type="matrix" in="shadowOffsetOuter1" result="shadowMatrixOuter1"></feColorMatrix><feMerge><feMergeNode in="shadowMatrixOuter1"></feMergeNode><feMergeNode in="SourceGraphic"></feMergeNode></feMerge></filter></defs><mask id="react-mask-1463962" fill="white"><use xlink:href="#react-path-1463964"></use></mask><g id="Mask"></g><g id="Top/Short-Hair/Short-Curly" mask="url(#react-mask-1463962)"><g transform="translate(-1.000000, 0.000000)"><mask id="react-mask-1463961" fill="white"><use xlink:href="#react-path-1463963"></use></mask><use id="Short-Hair" stroke="none" fill="#28354B" fill-rule="evenodd" xlink:href="#react-path-1463963"></use><g id="Skin/👶🏽-03-Brown" mask="url(#react-mask-1463961)" fill="#2C1B18"><g transform="translate(0.000000, 0.000000) " id="Color"><rect x="0" y="0" width="264" height="280"></rect></g></g><g id="Top/_Resources/Prescription-02" fill="none" transform="translate(62.000000, 85.000000)" stroke-width="1"><defs><filter x="-0.8%" y="-2.4%" width="101.5%" height="109.8%" filterUnits="objectBoundingBox" id="react-filter-1463965"><feOffset dx="0" dy="2" in="SourceAlpha" result="shadowOffsetOuter1"></feOffset><feColorMatrix values="0 0 0 0 0   0 0 0 0 0   0 0 0 0 0  0 0 0 0.2 0" type="matrix" in="shadowOffsetOuter1" result="shadowMatrixOuter1"></feColorMatrix><feMerge><feMergeNode in="shadowMatrixOuter1"></feMergeNode><feMergeNode in="SourceGraphic"></feMergeNode></feMerge></filter></defs><g id="Wayfarers" filter="url(#react-filter-1463965)" transform="translate(6.000000, 7.000000)" fill="#252C2F"><path d="M34,41 L31.2421498,41 C17.3147125,41 9,33.3359286 9,20.5 C9,10.127 10.8170058,0 32.5299306,0 L35.4700694,0 C57.1829942,0 59,10.127 59,20.5 C59,32.5686429 48.7212748,41 34,41 Z M32.3853606,6 C13,6 13,12.8410159 13,21.5015498 C13,28.5719428 16.116254,37 30.9709365,37 L34,37 C46.3649085,37 55,30.6270373 55,21.5015498 C55,12.8410159 55,6 35.6146394,6 L32.3853606,6 Z" id="Left" fill-rule="nonzero"></path><path d="M96,41 L93.2421498,41 C79.3147125,41 71,33.3359286 71,20.5 C71,10.127 72.8170058,0 94.5299306,0 L97.4700694,0 C119.182994,0 121,10.127 121,20.5 C121,32.5686429 110.721275,41 96,41 Z M94.3853606,6 C75,6 75,12.8410159 75,21.5015498 C75,28.5719428 78.1194833,37 92.9709365,37 L96,37 C108.364909,37 117,30.6270373 117,21.5015498 C117,12.8410159 117,6 97.6146394,6 L94.3853606,6 Z" id="Right" fill-rule="nonzero"></path><path d="M2.95454545,5.77156439 C3.64590909,5.09629136 11.2095455,0 32.5,0 C50.3513636,0 54.1302273,1.85267217 59.8502273,4.6518809 L60.2689233,4.85850899 C60.6666014,4.99901896 62.7002447,5.68982981 65.0790606,5.76579519 C67.2462948,5.67278567 69.1000195,5.08540191 69.641698,4.89719767 C76.1703915,1.7220864 82.5610971,0 97.5,0 C118.790455,0 126.354091,5.09629136 127.045455,5.77156439 C128.679318,5.77156439 130,7.06150904 130,8.65734659 L130,11.5431288 C130,13.1389663 128.679318,14.428911 127.045455,14.428911 C127.045455,14.428911 120.143997,14.428911 120.143997,17.3146932 C120.143997,20.2004754 118.181818,13.1389663 118.181818,11.5431288 L118.181818,8.73240251 C114.578575,7.35340151 108.128411,4.78617535 97.5,4.78617535 C85.6584651,4.78617535 79.7610984,6.88602813 74.7022935,8.97112368 L74.7588636,9.10752861 L74.7563667,11.0937608 L72.5391666,16.4436339 L69.8004908,15.3608351 C69.5558969,15.2641292 69.0281396,15.090392 68.2963505,14.9099044 C66.256272,14.4067419 64.1589087,14.253569 62.3040836,14.6343084 C61.6235903,14.7739931 60.9922286,14.9836085 60.4128127,15.266732 L57.7704824,16.5578701 L55.1266751,11.3962031 L55.2440909,9.10175705 L55.3248203,8.90683855 C50.9620526,6.87386374 46.9392639,4.78617535 32.5,4.78617535 C21.8721459,4.78617535 15.422131,7.3524397 11.8181818,8.7314671 L11.8181818,11.5431288 C11.8181818,13.1389663 8.86363636,20.2004754 8.86363636,17.3146932 C8.86363636,14.428911 2.95454545,14.428911 2.95454545,14.428911 C1.32363636,14.428911 0,13.1389663 0,11.5431288 L0,8.65734659 C0,7.06150904 1.32363636,5.77156439 2.95454545,5.77156439 Z" id="Stuff" fill-rule="nonzero"></path></g></g></g></g></g></g></g></g></g>` },
+        sleeping: { vb: '0 0 264 280', corpo: `<desc>Created with getavataaars.com</desc><defs><circle id="react-path-3783695" cx="120" cy="120" r="120"></circle><path d="M12,160 C12,226.27417 65.72583,280 132,280 C198.27417,280 252,226.27417 252,160 L264,160 L264,-1.42108547e-14 L-3.19744231e-14,-1.42108547e-14 L-3.19744231e-14,160 L12,160 Z" id="react-path-3783696"></path><path d="M124,144.610951 L124,163 L128,163 L128,163 C167.764502,163 200,195.235498 200,235 L200,244 L0,244 L0,235 C-4.86974701e-15,195.235498 32.235498,163 72,163 L72,163 L76,163 L76,144.610951 C58.7626345,136.422372 46.3722246,119.687011 44.3051388,99.8812385 C38.4803105,99.0577866 34,94.0521096 34,88 L34,74 C34,68.0540074 38.3245733,63.1180731 44,62.1659169 L44,56 L44,56 C44,25.072054 69.072054,5.68137151e-15 100,0 L100,0 L100,0 C130.927946,-5.68137151e-15 156,25.072054 156,56 L156,62.1659169 C161.675427,63.1180731 166,68.0540074 166,74 L166,88 C166,94.0521096 161.51969,99.0577866 155.694861,99.8812385 C153.627775,119.687011 141.237365,136.422372 124,144.610951 Z" id="react-path-3783697"></path></defs><g id="Avataaar" stroke="none" stroke-width="1" fill="none" fill-rule="evenodd"><g transform="translate(-825.000000, -1100.000000)" id="Avataaar/Circle"><g transform="translate(825.000000, 1100.000000)"><g id="Mask"></g><g id="Avataaar" stroke-width="1" fill-rule="evenodd" mask="url(#react-mask-3783699)"><g id="Body" transform="translate(32.000000, 36.000000)"><mask id="react-mask-3783700" fill="white"><use xlink:href="#react-path-3783697"></use></mask><use fill="#D0C6AC" xlink:href="#react-path-3783697"></use><g id="Skin/👶🏽-03-Brown" mask="url(#react-mask-3783700)" fill="#AE5D29"><g transform="translate(0.000000, 0.000000)" id="Color"><rect x="0" y="0" width="264" height="280"></rect></g></g><path d="M156,79 L156,102 C156,132.927946 130.927946,158 100,158 C69.072054,158 44,132.927946 44,102 L44,79 L44,94 C44,124.927946 69.072054,150 100,150 C130.927946,150 156,124.927946 156,94 L156,79 Z" id="Neck-Shadow" fill-opacity="0.100000001" fill="#000000" mask="url(#react-mask-3783700)"></path></g><g id="Clothing/Collar-+-Sweater" transform="translate(0.000000, 170.000000)"><defs><path d="M105.192402,29.0517235 L104,29.0517235 L104,29.0517235 C64.235498,29.0517235 32,61.2872215 32,101.051724 L32,110 L232,110 L232,101.051724 C232,61.2872215 199.764502,29.0517235 160,29.0517235 L160,29.0517235 L158.807598,29.0517235 C158.934638,30.0353144 159,31.0364513 159,32.0517235 C159,45.8588423 146.911688,57.0517235 132,57.0517235 C117.088312,57.0517235 105,45.8588423 105,32.0517235 C105,31.0364513 105.065362,30.0353144 105.192402,29.0517235 Z" id="react-path-3783701"></path></defs><mask id="react-mask-3783702" fill="white"><use xlink:href="#react-path-3783701"></use></mask><use id="Clothes" fill="#E6E6E6" fill-rule="evenodd" xlink:href="#react-path-3783701"></use><g id="Color/Palette/Gray-01" mask="url(#react-mask-3783702)" fill-rule="evenodd" fill="#3C8652"><rect id="🖍Color" x="0" y="0" width="264" height="110"></rect></g><path d="M156,22.2794906 C162.181647,26.8351858 166,33.1057265 166,40.027915 C166,47.2334941 161.862605,53.7329769 155.228997,58.3271669 L149.57933,53.8764929 L145,54.207887 L146,51.0567821 L145.922229,50.995516 C152.022491,47.8530505 156,42.7003578 156,36.8768102 L156,22.2794906 Z M108,21.5714994 C101.232748,26.1740081 97,32.7397769 97,40.027915 C97,47.4261549 101.361602,54.080035 108.308428,58.6915723 L114.42067,53.8764929 L119,54.207887 L118,51.0567821 L118.077771,50.995516 C111.977509,47.8530505 108,42.7003578 108,36.8768102 L108,21.5714994 Z" id="Collar" fill="#F2F2F2" fill-rule="evenodd"></path></g><g id="Face" transform="translate(76.000000, 82.000000)" fill="#000000"><g id="Mouth/Serious" transform="translate(2.000000, 52.000000)" fill="#000000" fill-opacity="0.699999988"><rect id="Why-so-serious?" x="42" y="18" width="24" height="6" rx="3"></rect></g><g id="Nose/Default" transform="translate(28.000000, 40.000000)" fill-opacity="0.16"><path d="M16,8 C16,12.418278 21.372583,16 28,16 L28,16 C34.627417,16 40,12.418278 40,8" id="Nose"></path></g><g id="Eyes/Closed-😌" transform="translate(0.000000, 8.000000)" fill-opacity="0.599999964"><path d="M16.1601674,32.4473116 C18.006676,28.648508 22.1644225,26 26.9975803,26 C31.8136766,26 35.9591217,28.629842 37.8153518,32.4071242 C38.3667605,33.5291977 37.5821037,34.4474817 36.790607,33.7670228 C34.3395063,31.6597833 30.8587163,30.3437884 26.9975803,30.3437884 C23.2572061,30.3437884 19.8737584,31.5787519 17.4375392,33.5716412 C16.5467928,34.3002944 15.6201012,33.5583844 16.1601674,32.4473116 Z" id="Closed-Eye" transform="translate(27.000000, 30.000000) scale(1, -1) translate(-27.000000, -30.000000) "></path><path d="M74.1601674,32.4473116 C76.006676,28.648508 80.1644225,26 84.9975803,26 C89.8136766,26 93.9591217,28.629842 95.8153518,32.4071242 C96.3667605,33.5291977 95.5821037,34.4474817 94.790607,33.7670228 C92.3395063,31.6597833 88.8587163,30.3437884 84.9975803,30.3437884 C81.2572061,30.3437884 77.8737584,31.5787519 75.4375392,33.5716412 C74.5467928,34.3002944 73.6201012,33.5583844 74.1601674,32.4473116 Z" id="Closed-Eye" transform="translate(85.000000, 30.000000) scale(1, -1) translate(-85.000000, -30.000000) "></path></g><g id="Eyebrow/Natural/Default-Natural" fill-opacity="0.599999964"><path d="M26.0390934,6.21012364 C20.2775554,6.98346216 11.2929313,12.0052479 12.04426,17.8178111 C12.0689481,18.0080543 12.3567302,18.0673468 12.4809077,17.9084937 C14.9674041,14.7203351 34.1927973,10.0365481 41.1942673,11.0147151 C41.8350523,11.1044465 42.2580662,10.4430343 41.8210501,10.0302067 C38.0765663,6.49485426 31.2003792,5.51224825 26.0390934,6.21012364" id="Eyebrow" transform="translate(27.000000, 12.000000) rotate(5.000000) translate(-27.000000, -12.000000) "></path><path d="M85.0390934,6.21012364 C79.2775554,6.98346216 70.2929313,12.0052479 71.04426,17.8178111 C71.0689481,18.0080543 71.3567302,18.0673468 71.4809077,17.9084937 C73.9674041,14.7203351 93.1927973,10.0365481 100.194267,11.0147151 C100.835052,11.1044465 101.258066,10.4430343 100.82105,10.0302067 C97.0765663,6.49485426 90.2003792,5.51224825 85.0390934,6.21012364" id="Eyebrow" transform="translate(86.000000, 12.000000) scale(-1, 1) rotate(5.000000) translate(-86.000000, -12.000000) "></path></g></g><g id="Top" stroke-width="1" fill-rule="evenodd"><defs><rect id="react-path-3783707" x="0" y="0" width="264" height="280"></rect><path d="M94.2519269,52.0221149 C94.3749353,51.9677149 94.0696712,51.9468149 93.3361345,51.9595149 C94.2276637,51.9577149 94.5329279,51.9785149 94.2519269,52.0221149 M86.1169775,36.3015924 C86.1148422,36.2819924 86.1337548,36.4526924 86.1169775,36.3015924 M193.765056,70.7656665 C193.500946,67.448734 193.03295,64.1518864 192.246676,60.9110823 C191.622233,58.3353492 190.769007,55.8775343 189.760006,53.4200433 C189.150703,51.9353766 187.727538,49.8961062 187.560324,48.2944933 C187.395466,46.7168527 188.626521,44.969138 188.889285,43.1323368 C189.144311,41.3447761 189.100909,39.4652134 188.734183,37.6938503 C187.901144,33.6710288 185.140271,29.9300447 180.877167,28.8814158 C179.925362,28.6471994 177.913417,28.9358396 177.240862,28.3815597 C176.469729,27.7459682 175.932761,25.5806808 175.234637,24.7121687 C173.244224,22.2362125 170.13984,20.6417265 166.865887,21.1976261 C164.454917,21.606776 165.839391,22.1053363 164.032005,20.6864317 C163.027041,19.8976114 162.276095,18.6931622 161.300066,17.8392279 C159.832826,16.5563826 158.149588,15.4581893 156.408146,14.556958 C151.851325,12.19892 146.654249,10.4848961 141.564162,9.64942693 C132.278934,8.12523827 122.368926,9.45408458 113.368668,11.8688141 C108.890239,13.0703477 104.381531,14.5951842 100.222053,16.6117782 C98.4385542,17.4764029 97.4090304,18.1936301 95.5494951,18.4200717 C92.6207355,18.7767416 90.1404579,18.7589243 87.3661268,20.0009517 C78.8298269,23.8229236 74.9849256,32.6897818 78.3066539,41.1750259 C78.974835,42.8815988 79.8795374,44.3801954 81.1267416,45.7586062 C82.6474761,47.4392631 83.1975648,47.1085093 81.8877817,49.0411999 C79.9289949,51.9311653 78.2777195,55.0129095 76.9332826,58.2128958 C73.4043038,66.6145606 72.8138416,76.0771643 73.043634,85.0373203 C73.1240445,88.1741362 73.2586228,91.3495022 73.753198,94.4561907 C73.966841,95.8009106 74.0267283,98.3293468 75.0353925,99.3271154 C75.5471264,99.8331265 76.2762042,100.115288 77.0035997,99.9137903 C78.7130802,99.4401742 78.1253096,98.1787097 78.1650102,97.0076274 C78.364859,91.1240324 78.0950295,85.9191145 79.4943071,80.1064647 C80.5278683,75.8118486 82.2504702,71.9114806 84.4827873,68.0713675 C87.3213795,63.1871608 90.3857268,58.8977279 94.2895061,54.7155226 C95.2073299,53.7320079 95.4078515,53.3150832 96.6385698,53.243814 C97.5705244,53.1900382 98.9338023,53.8282213 99.8398505,54.0491558 C101.837665,54.5360539 103.83918,55.0174448 105.873331,55.3452831 C109.613261,55.9481556 113.316519,55.9886494 117.090094,55.8704074 C124.516459,55.6381346 131.974787,55.1172217 139.175061,53.2470535 C143.956964,52.00535 148.196516,49.7762443 152.776887,48.1422364 C152.858644,48.1130808 154.006596,47.2951049 154.207791,47.3284719 C154.488723,47.3747968 156.184746,49.1542588 156.471061,49.3784327 C158.696649,51.1238798 161.137899,51.8566566 163.541467,53.2081794 C166.504881,54.8745825 163.634999,52.4899804 165.269452,54.5668292 C165.745859,55.1716454 165.989782,56.2931632 166.371984,56.9783192 C167.587899,59.1610999 169.279548,61.0795367 171.302932,62.6017816 C173.258018,64.0725184 176.196198,64.7829426 177.193087,66.697168 C177.961865,68.1740599 178.220929,70.1812592 178.841334,71.7579279 C180.468722,75.8931602 182.617937,79.7494709 184.767152,83.6443317 C186.498502,86.7830913 188.392354,89.5250111 188.584801,93.1117947 C188.651754,94.3603012 187.463764,101.849397 190.357534,99.5716982 C190.786502,99.2341415 191.711391,95.415733 191.901483,94.7678314 C192.672616,92.135083 192.94682,89.3866841 193.29605,86.6816947 C193.990474,81.3021672 194.218584,76.1837441 193.765056,70.7656665" id="react-path-3783706"></path><filter x="-0.8%" y="-2.0%" width="101.5%" height="108.0%" filterUnits="objectBoundingBox" id="react-filter-3783703"><feOffset dx="0" dy="2" in="SourceAlpha" result="shadowOffsetOuter1"></feOffset><feColorMatrix values="0 0 0 0 0   0 0 0 0 0   0 0 0 0 0  0 0 0 0.16 0" type="matrix" in="shadowOffsetOuter1" result="shadowMatrixOuter1"></feColorMatrix><feMerge><feMergeNode in="shadowMatrixOuter1"></feMergeNode><feMergeNode in="SourceGraphic"></feMergeNode></feMerge></filter></defs><mask id="react-mask-3783705" fill="white"><use xlink:href="#react-path-3783707"></use></mask><g id="Mask"></g><g id="Top/Short-Hair/Short-Curly" mask="url(#react-mask-3783705)"><g transform="translate(-1.000000, 0.000000)"><mask id="react-mask-3783704" fill="white"><use xlink:href="#react-path-3783706"></use></mask><use id="Short-Hair" stroke="none" fill="#28354B" fill-rule="evenodd" xlink:href="#react-path-3783706"></use><g id="Skin/👶🏽-03-Brown" mask="url(#react-mask-3783704)" fill="#2C1B18"><g transform="translate(0.000000, 0.000000) " id="Color"><rect x="0" y="0" width="264" height="280"></rect></g></g><g id="Top/_Resources/Prescription-02" fill="none" transform="translate(62.000000, 85.000000)" stroke-width="1"><defs><filter x="-0.8%" y="-2.4%" width="101.5%" height="109.8%" filterUnits="objectBoundingBox" id="react-filter-3783708"><feOffset dx="0" dy="2" in="SourceAlpha" result="shadowOffsetOuter1"></feOffset><feColorMatrix values="0 0 0 0 0   0 0 0 0 0   0 0 0 0 0  0 0 0 0.2 0" type="matrix" in="shadowOffsetOuter1" result="shadowMatrixOuter1"></feColorMatrix><feMerge><feMergeNode in="shadowMatrixOuter1"></feMergeNode><feMergeNode in="SourceGraphic"></feMergeNode></feMerge></filter></defs><g id="Wayfarers" filter="url(#react-filter-3783708)" transform="translate(6.000000, 7.000000)" fill="#252C2F"><path d="M34,41 L31.2421498,41 C17.3147125,41 9,33.3359286 9,20.5 C9,10.127 10.8170058,0 32.5299306,0 L35.4700694,0 C57.1829942,0 59,10.127 59,20.5 C59,32.5686429 48.7212748,41 34,41 Z M32.3853606,6 C13,6 13,12.8410159 13,21.5015498 C13,28.5719428 16.116254,37 30.9709365,37 L34,37 C46.3649085,37 55,30.6270373 55,21.5015498 C55,12.8410159 55,6 35.6146394,6 L32.3853606,6 Z" id="Left" fill-rule="nonzero"></path><path d="M96,41 L93.2421498,41 C79.3147125,41 71,33.3359286 71,20.5 C71,10.127 72.8170058,0 94.5299306,0 L97.4700694,0 C119.182994,0 121,10.127 121,20.5 C121,32.5686429 110.721275,41 96,41 Z M94.3853606,6 C75,6 75,12.8410159 75,21.5015498 C75,28.5719428 78.1194833,37 92.9709365,37 L96,37 C108.364909,37 117,30.6270373 117,21.5015498 C117,12.8410159 117,6 97.6146394,6 L94.3853606,6 Z" id="Right" fill-rule="nonzero"></path><path d="M2.95454545,5.77156439 C3.64590909,5.09629136 11.2095455,0 32.5,0 C50.3513636,0 54.1302273,1.85267217 59.8502273,4.6518809 L60.2689233,4.85850899 C60.6666014,4.99901896 62.7002447,5.68982981 65.0790606,5.76579519 C67.2462948,5.67278567 69.1000195,5.08540191 69.641698,4.89719767 C76.1703915,1.7220864 82.5610971,0 97.5,0 C118.790455,0 126.354091,5.09629136 127.045455,5.77156439 C128.679318,5.77156439 130,7.06150904 130,8.65734659 L130,11.5431288 C130,13.1389663 128.679318,14.428911 127.045455,14.428911 C127.045455,14.428911 120.143997,14.428911 120.143997,17.3146932 C120.143997,20.2004754 118.181818,13.1389663 118.181818,11.5431288 L118.181818,8.73240251 C114.578575,7.35340151 108.128411,4.78617535 97.5,4.78617535 C85.6584651,4.78617535 79.7610984,6.88602813 74.7022935,8.97112368 L74.7588636,9.10752861 L74.7563667,11.0937608 L72.5391666,16.4436339 L69.8004908,15.3608351 C69.5558969,15.2641292 69.0281396,15.090392 68.2963505,14.9099044 C66.256272,14.4067419 64.1589087,14.253569 62.3040836,14.6343084 C61.6235903,14.7739931 60.9922286,14.9836085 60.4128127,15.266732 L57.7704824,16.5578701 L55.1266751,11.3962031 L55.2440909,9.10175705 L55.3248203,8.90683855 C50.9620526,6.87386374 46.9392639,4.78617535 32.5,4.78617535 C21.8721459,4.78617535 15.422131,7.3524397 11.8181818,8.7314671 L11.8181818,11.5431288 C11.8181818,13.1389663 8.86363636,20.2004754 8.86363636,17.3146932 C8.86363636,14.428911 2.95454545,14.428911 2.95454545,14.428911 C1.32363636,14.428911 0,13.1389663 0,11.5431288 L0,8.65734659 C0,7.06150904 1.32363636,5.77156439 2.95454545,5.77156439 Z" id="Stuff" fill-rule="nonzero"></path></g></g></g></g></g></g></g></g></g>` },
       },
       codigo: {
         idle: { vb: '0 0 264 280', corpo: `<desc>Created with getavataaars.com</desc><defs><circle id="react-path-1060449" cx="120" cy="120" r="120"></circle><path d="M12,160 C12,226.27417 65.72583,280 132,280 C198.27417,280 252,226.27417 252,160 L264,160 L264,-1.42108547e-14 L-3.19744231e-14,-1.42108547e-14 L-3.19744231e-14,160 L12,160 Z" id="react-path-1060450"></path><path d="M124,144.610951 L124,163 L128,163 L128,163 C167.764502,163 200,195.235498 200,235 L200,244 L0,244 L0,235 C-4.86974701e-15,195.235498 32.235498,163 72,163 L72,163 L76,163 L76,144.610951 C58.7626345,136.422372 46.3722246,119.687011 44.3051388,99.8812385 C38.4803105,99.0577866 34,94.0521096 34,88 L34,74 C34,68.0540074 38.3245733,63.1180731 44,62.1659169 L44,56 L44,56 C44,25.072054 69.072054,5.68137151e-15 100,0 L100,0 L100,0 C130.927946,-5.68137151e-15 156,25.072054 156,56 L156,62.1659169 C161.675427,63.1180731 166,68.0540074 166,74 L166,88 C166,94.0521096 161.51969,99.0577866 155.694861,99.8812385 C153.627775,119.687011 141.237365,136.422372 124,144.610951 Z" id="react-path-1060451"></path></defs><g id="Avataaar" stroke="none" stroke-width="1" fill="none" fill-rule="evenodd"><g transform="translate(-825.000000, -1100.000000)" id="Avataaar/Circle"><g transform="translate(825.000000, 1100.000000)"><g id="Mask"></g><g id="Avataaar" stroke-width="1" fill-rule="evenodd" mask="url(#react-mask-1060453)"><g id="Body" transform="translate(32.000000, 36.000000)"><mask id="react-mask-1060454" fill="white"><use xlink:href="#react-path-1060451"></use></mask><use fill="#D0C6AC" xlink:href="#react-path-1060451"></use><g id="Skin/👶🏽-03-Brown" mask="url(#react-mask-1060454)" fill="#EDB98A"><g transform="translate(0.000000, 0.000000)" id="Color"><rect x="0" y="0" width="264" height="280"></rect></g></g><path d="M156,79 L156,102 C156,132.927946 130.927946,158 100,158 C69.072054,158 44,132.927946 44,102 L44,79 L44,94 C44,124.927946 69.072054,150 100,150 C130.927946,150 156,124.927946 156,94 L156,79 Z" id="Neck-Shadow" fill-opacity="0.100000001" fill="#000000" mask="url(#react-mask-1060454)"></path></g><g id="Clothing/Hoodie" transform="translate(0.000000, 170.000000)"><defs><path d="M108,13.0708856 C90.0813006,15.075938 76.2798424,20.5518341 76.004203,34.6449676 C50.1464329,45.5680933 32,71.1646257 32,100.999485 L32,100.999485 L32,110 L232,110 L232,100.999485 C232,71.1646257 213.853567,45.5680933 187.995797,34.6449832 C187.720158,20.5518341 173.918699,15.075938 156,13.0708856 L156,32 L156,32 C156,45.254834 145.254834,56 132,56 L132,56 C118.745166,56 108,45.254834 108,32 L108,13.0708856 Z" id="react-path-1060455"></path></defs><mask id="react-mask-1060456" fill="white"><use xlink:href="#react-path-1060455"></use></mask><use id="Hoodie" fill="#B7C1DB" fill-rule="evenodd" xlink:href="#react-path-1060455"></use><g id="Color/Palette/Gray-01" mask="url(#react-mask-1060456)" fill-rule="evenodd" fill="#D47A36"><rect id="🖍Color" x="0" y="0" width="264" height="110"></rect></g><path d="M102,61.7390531 L102,110 L95,110 L95,58.1502625 C97.2037542,59.4600576 99.5467694,60.6607878 102,61.7390531 Z M169,58.1502625 L169,98.5 C169,100.432997 167.432997,102 165.5,102 C163.567003,102 162,100.432997 162,98.5 L162,61.7390531 C164.453231,60.6607878 166.796246,59.4600576 169,58.1502625 Z" id="Straps" fill="#F4F4F4" fill-rule="evenodd" mask="url(#react-mask-1060456)"></path><path d="M90.9601329,12.7243537 C75.9093095,15.5711782 65.5,21.2428847 65.5,32.3076923 C65.5,52.0200095 98.5376807,68 132,68 C165.462319,68 198.5,52.0200095 198.5,32.3076923 C198.5,21.2428847 188.09069,15.5711782 173.039867,12.7243537 C182.124921,16.0744598 188,21.7060546 188,31.0769231 C188,51.4689754 160.178795,68 132,68 C103.821205,68 76,51.4689754 76,31.0769231 C76,21.7060546 81.8750795,16.0744598 90.9601329,12.7243537 Z" id="Shadow" fill-opacity="0.16" fill="#000000" fill-rule="evenodd" mask="url(#react-mask-1060456)"></path></g><g id="Face" transform="translate(76.000000, 82.000000)" fill="#000000"><g id="Mouth/Smile" transform="translate(2.000000, 52.000000)"><defs><path d="M35.117844,15.1280772 C36.1757121,24.6198025 44.2259873,32 54,32 C63.8042055,32 71.8740075,24.574136 72.8917593,15.0400546 C72.9736685,14.272746 72.1167429,13 71.042767,13 C56.1487536,13 44.7379213,13 37.0868244,13 C36.0066168,13 35.0120058,14.1784435 35.117844,15.1280772 Z" id="react-path-1060457"></path></defs><mask id="react-mask-1060458" fill="white"><use xlink:href="#react-path-1060457"></use></mask><use id="Mouth" fill-opacity="0.699999988" fill="#000000" fill-rule="evenodd" xlink:href="#react-path-1060457"></use><rect id="Teeth" fill="#FFFFFF" fill-rule="evenodd" mask="url(#react-mask-1060458)" x="39" y="2" width="31" height="16" rx="5"></rect><g id="Tongue" stroke-width="1" fill-rule="evenodd" mask="url(#react-mask-1060458)" fill="#FF4F6D"><g transform="translate(38.000000, 24.000000)"><circle cx="11" cy="11" r="11"></circle><circle cx="21" cy="11" r="11"></circle></g></g></g><g id="Nose/Default" transform="translate(28.000000, 40.000000)" fill-opacity="0.16"><path d="M16,8 C16,12.418278 21.372583,16 28,16 L28,16 C34.627417,16 40,12.418278 40,8" id="Nose"></path></g><g id="Eyes/Default-😀" transform="translate(0.000000, 8.000000)" fill-opacity="0.599999964"><circle id="Eye" cx="30" cy="22" r="6"></circle><circle id="Eye" cx="82" cy="22" r="6"></circle></g><g id="Eyebrow/Natural/Default-Natural" fill-opacity="0.599999964"><path d="M26.0390934,6.21012364 C20.2775554,6.98346216 11.2929313,12.0052479 12.04426,17.8178111 C12.0689481,18.0080543 12.3567302,18.0673468 12.4809077,17.9084937 C14.9674041,14.7203351 34.1927973,10.0365481 41.1942673,11.0147151 C41.8350523,11.1044465 42.2580662,10.4430343 41.8210501,10.0302067 C38.0765663,6.49485426 31.2003792,5.51224825 26.0390934,6.21012364" id="Eyebrow" transform="translate(27.000000, 12.000000) rotate(5.000000) translate(-27.000000, -12.000000) "></path><path d="M85.0390934,6.21012364 C79.2775554,6.98346216 70.2929313,12.0052479 71.04426,17.8178111 C71.0689481,18.0080543 71.3567302,18.0673468 71.4809077,17.9084937 C73.9674041,14.7203351 93.1927973,10.0365481 100.194267,11.0147151 C100.835052,11.1044465 101.258066,10.4430343 100.82105,10.0302067 C97.0765663,6.49485426 90.2003792,5.51224825 85.0390934,6.21012364" id="Eyebrow" transform="translate(86.000000, 12.000000) scale(-1, 1) rotate(5.000000) translate(-86.000000, -12.000000) "></path></g></g><g id="Top" stroke-width="1" fill-rule="evenodd"><defs><rect id="react-path-1060463" x="0" y="0" width="264" height="280"></rect><path d="M94.2519269,52.0221149 C94.3749353,51.9677149 94.0696712,51.9468149 93.3361345,51.9595149 C94.2276637,51.9577149 94.5329279,51.9785149 94.2519269,52.0221149 M86.1169775,36.3015924 C86.1148422,36.2819924 86.1337548,36.4526924 86.1169775,36.3015924 M193.765056,70.7656665 C193.500946,67.448734 193.03295,64.1518864 192.246676,60.9110823 C191.622233,58.3353492 190.769007,55.8775343 189.760006,53.4200433 C189.150703,51.9353766 187.727538,49.8961062 187.560324,48.2944933 C187.395466,46.7168527 188.626521,44.969138 188.889285,43.1323368 C189.144311,41.3447761 189.100909,39.4652134 188.734183,37.6938503 C187.901144,33.6710288 185.140271,29.9300447 180.877167,28.8814158 C179.925362,28.6471994 177.913417,28.9358396 177.240862,28.3815597 C176.469729,27.7459682 175.932761,25.5806808 175.234637,24.7121687 C173.244224,22.2362125 170.13984,20.6417265 166.865887,21.1976261 C164.454917,21.606776 165.839391,22.1053363 164.032005,20.6864317 C163.027041,19.8976114 162.276095,18.6931622 161.300066,17.8392279 C159.832826,16.5563826 158.149588,15.4581893 156.408146,14.556958 C151.851325,12.19892 146.654249,10.4848961 141.564162,9.64942693 C132.278934,8.12523827 122.368926,9.45408458 113.368668,11.8688141 C108.890239,13.0703477 104.381531,14.5951842 100.222053,16.6117782 C98.4385542,17.4764029 97.4090304,18.1936301 95.5494951,18.4200717 C92.6207355,18.7767416 90.1404579,18.7589243 87.3661268,20.0009517 C78.8298269,23.8229236 74.9849256,32.6897818 78.3066539,41.1750259 C78.974835,42.8815988 79.8795374,44.3801954 81.1267416,45.7586062 C82.6474761,47.4392631 83.1975648,47.1085093 81.8877817,49.0411999 C79.9289949,51.9311653 78.2777195,55.0129095 76.9332826,58.2128958 C73.4043038,66.6145606 72.8138416,76.0771643 73.043634,85.0373203 C73.1240445,88.1741362 73.2586228,91.3495022 73.753198,94.4561907 C73.966841,95.8009106 74.0267283,98.3293468 75.0353925,99.3271154 C75.5471264,99.8331265 76.2762042,100.115288 77.0035997,99.9137903 C78.7130802,99.4401742 78.1253096,98.1787097 78.1650102,97.0076274 C78.364859,91.1240324 78.0950295,85.9191145 79.4943071,80.1064647 C80.5278683,75.8118486 82.2504702,71.9114806 84.4827873,68.0713675 C87.3213795,63.1871608 90.3857268,58.8977279 94.2895061,54.7155226 C95.2073299,53.7320079 95.4078515,53.3150832 96.6385698,53.243814 C97.5705244,53.1900382 98.9338023,53.8282213 99.8398505,54.0491558 C101.837665,54.5360539 103.83918,55.0174448 105.873331,55.3452831 C109.613261,55.9481556 113.316519,55.9886494 117.090094,55.8704074 C124.516459,55.6381346 131.974787,55.1172217 139.175061,53.2470535 C143.956964,52.00535 148.196516,49.7762443 152.776887,48.1422364 C152.858644,48.1130808 154.006596,47.2951049 154.207791,47.3284719 C154.488723,47.3747968 156.184746,49.1542588 156.471061,49.3784327 C158.696649,51.1238798 161.137899,51.8566566 163.541467,53.2081794 C166.504881,54.8745825 163.634999,52.4899804 165.269452,54.5668292 C165.745859,55.1716454 165.989782,56.2931632 166.371984,56.9783192 C167.587899,59.1610999 169.279548,61.0795367 171.302932,62.6017816 C173.258018,64.0725184 176.196198,64.7829426 177.193087,66.697168 C177.961865,68.1740599 178.220929,70.1812592 178.841334,71.7579279 C180.468722,75.8931602 182.617937,79.7494709 184.767152,83.6443317 C186.498502,86.7830913 188.392354,89.5250111 188.584801,93.1117947 C188.651754,94.3603012 187.463764,101.849397 190.357534,99.5716982 C190.786502,99.2341415 191.711391,95.415733 191.901483,94.7678314 C192.672616,92.135083 192.94682,89.3866841 193.29605,86.6816947 C193.990474,81.3021672 194.218584,76.1837441 193.765056,70.7656665" id="react-path-1060462"></path><filter x="-0.8%" y="-2.0%" width="101.5%" height="108.0%" filterUnits="objectBoundingBox" id="react-filter-1060459"><feOffset dx="0" dy="2" in="SourceAlpha" result="shadowOffsetOuter1"></feOffset><feColorMatrix values="0 0 0 0 0   0 0 0 0 0   0 0 0 0 0  0 0 0 0.16 0" type="matrix" in="shadowOffsetOuter1" result="shadowMatrixOuter1"></feColorMatrix><feMerge><feMergeNode in="shadowMatrixOuter1"></feMergeNode><feMergeNode in="SourceGraphic"></feMergeNode></feMerge></filter></defs><mask id="react-mask-1060461" fill="white"><use xlink:href="#react-path-1060463"></use></mask><g id="Mask"></g><g id="Top/Short-Hair/Short-Curly" mask="url(#react-mask-1060461)"><g transform="translate(-1.000000, 0.000000)"><g id="Facial-Hair/Beard-Medium" transform="translate(49.000000, 72.000000)"><defs><path d="M105.017591,94.1296214 C101.150441,99.7213834 98.257542,95.9467308 94.1374777,92.8762163 C91.6567227,91.0272796 87.9608129,88.7275108 84.5044337,88.8410391 C81.0477114,88.7275108 77.3518016,91.0272796 74.8710466,92.8762163 C70.7509822,95.9467308 67.8580835,99.7213834 63.9909333,94.1296214 C61.0884259,89.9323547 62.3028943,82.8739117 65.014944,78.9027173 C68.8738581,73.2512381 74.1088724,75.9847769 79.9622738,75.3400279 C81.5538829,75.1648137 83.1526985,74.7228407 84.5044337,74 C85.856169,74.7228407 87.4546414,75.1648137 89.0462504,75.3400279 C94.899995,75.9847769 100.134666,73.2512381 103.993923,78.9027173 C106.70563,82.8739117 107.920098,89.9323547 105.017591,94.1296214 M140.39109,26 C136.966521,40.0748212 135.393023,54.4337754 132.909944,68.6711471 C132.392536,71.6390145 131.826063,74.5963095 131.224594,77.5496398 C131.098329,78.1697764 130.973781,80.4725746 130.362704,80.7643064 C128.511632,81.6484223 124.739149,76.9466834 123.730409,75.8851496 C121.196893,73.219256 118.684993,70.5292442 115.599415,68.437233 C109.364783,64.2102603 102.065485,61.7108818 94.4700836,61.117837 C91.2922091,60.8693859 86.9951134,61.3025234 84.000116,63.1104016 C81.0051185,61.3025234 76.7080229,60.8693859 73.5298053,61.117837 C65.9344039,61.7108818 58.6351055,64.2102603 52.4004739,68.437233 C49.3148957,70.5292442 46.8033387,73.219256 44.2694796,75.8851496 C43.2607395,76.9466834 39.4882573,81.6484223 37.6371849,80.7643064 C37.0261079,80.4725746 36.9015594,78.1697764 36.7752954,77.5496398 C36.1738255,74.5963095 35.6073527,71.6390145 35.0899445,68.6711471 C32.6072086,54.4337754 31.0337113,40.0748212 27.6091415,26 C26.6127533,26 25.7385119,44.7478165 25.6273446,46.4945731 C25.174784,53.5889755 24.6463963,60.5254529 25.3216346,67.6261326 C26.485803,79.8749043 27.6993791,95.2339402 37.032627,104.58753 C45.4659003,113.039493 57.7103052,114.806417 68.2713185,120.141327 C69.631059,120.828202 71.4347824,121.676306 73.3798667,122.37111 C75.4289129,123.934171 79.4926946,125 84.1740722,125 C89.0846465,125 93.3155222,123.827456 95.2540874,122.137856 C96.9548781,121.49261 98.5180822,120.752874 99.7285704,120.141327 C110.288776,114.805245 122.533989,113.039493 130.967262,104.58753 C140.30051,95.2339402 141.514086,79.8749043 142.678597,67.6261326 C143.353493,60.5254529 142.825105,53.5889755 142.372887,46.4945731 C142.261377,44.7478165 141.387136,26 140.39109,26 Z" id="react-path-1060465"></path></defs><mask id="react-mask-1060464" fill="white"><use xlink:href="#react-path-1060465"></use></mask><use id="Beardness" fill="#252E32" fill-rule="evenodd" xlink:href="#react-path-1060465"></use><g id="Color/Hair/Brown" mask="url(#react-mask-1060464)" fill="#724133"><g transform="translate(-32.000000, 0.000000)" id="Color"><rect x="0" y="0" width="264" height="244"></rect></g></g></g><mask id="react-mask-1060460" fill="white"><use xlink:href="#react-path-1060462"></use></mask><use id="Short-Hair" stroke="none" fill="#28354B" fill-rule="evenodd" xlink:href="#react-path-1060462"></use><g id="Skin/👶🏽-03-Brown" mask="url(#react-mask-1060460)" fill="#724133"><g transform="translate(0.000000, 0.000000) " id="Color"><rect x="0" y="0" width="264" height="280"></rect></g></g></g></g></g></g></g></g></g>` },
@@ -1230,6 +1594,7 @@ window.__ModuleLoader__.load({
         waiting: { vb: '0 0 264 280', corpo: `<desc>Created with getavataaars.com</desc><defs><circle id="react-path-1464261" cx="120" cy="120" r="120"></circle><path d="M12,160 C12,226.27417 65.72583,280 132,280 C198.27417,280 252,226.27417 252,160 L264,160 L264,-1.42108547e-14 L-3.19744231e-14,-1.42108547e-14 L-3.19744231e-14,160 L12,160 Z" id="react-path-1464262"></path><path d="M124,144.610951 L124,163 L128,163 L128,163 C167.764502,163 200,195.235498 200,235 L200,244 L0,244 L0,235 C-4.86974701e-15,195.235498 32.235498,163 72,163 L72,163 L76,163 L76,144.610951 C58.7626345,136.422372 46.3722246,119.687011 44.3051388,99.8812385 C38.4803105,99.0577866 34,94.0521096 34,88 L34,74 C34,68.0540074 38.3245733,63.1180731 44,62.1659169 L44,56 L44,56 C44,25.072054 69.072054,5.68137151e-15 100,0 L100,0 L100,0 C130.927946,-5.68137151e-15 156,25.072054 156,56 L156,62.1659169 C161.675427,63.1180731 166,68.0540074 166,74 L166,88 C166,94.0521096 161.51969,99.0577866 155.694861,99.8812385 C153.627775,119.687011 141.237365,136.422372 124,144.610951 Z" id="react-path-1464263"></path></defs><g id="Avataaar" stroke="none" stroke-width="1" fill="none" fill-rule="evenodd"><g transform="translate(-825.000000, -1100.000000)" id="Avataaar/Circle"><g transform="translate(825.000000, 1100.000000)"><g id="Mask"></g><g id="Avataaar" stroke-width="1" fill-rule="evenodd" mask="url(#react-mask-1464265)"><g id="Body" transform="translate(32.000000, 36.000000)"><mask id="react-mask-1464266" fill="white"><use xlink:href="#react-path-1464263"></use></mask><use fill="#D0C6AC" xlink:href="#react-path-1464263"></use><g id="Skin/👶🏽-03-Brown" mask="url(#react-mask-1464266)" fill="#EDB98A"><g transform="translate(0.000000, 0.000000)" id="Color"><rect x="0" y="0" width="264" height="280"></rect></g></g><path d="M156,79 L156,102 C156,132.927946 130.927946,158 100,158 C69.072054,158 44,132.927946 44,102 L44,79 L44,94 C44,124.927946 69.072054,150 100,150 C130.927946,150 156,124.927946 156,94 L156,79 Z" id="Neck-Shadow" fill-opacity="0.100000001" fill="#000000" mask="url(#react-mask-1464266)"></path></g><g id="Clothing/Hoodie" transform="translate(0.000000, 170.000000)"><defs><path d="M108,13.0708856 C90.0813006,15.075938 76.2798424,20.5518341 76.004203,34.6449676 C50.1464329,45.5680933 32,71.1646257 32,100.999485 L32,100.999485 L32,110 L232,110 L232,100.999485 C232,71.1646257 213.853567,45.5680933 187.995797,34.6449832 C187.720158,20.5518341 173.918699,15.075938 156,13.0708856 L156,32 L156,32 C156,45.254834 145.254834,56 132,56 L132,56 C118.745166,56 108,45.254834 108,32 L108,13.0708856 Z" id="react-path-1464267"></path></defs><mask id="react-mask-1464268" fill="white"><use xlink:href="#react-path-1464267"></use></mask><use id="Hoodie" fill="#B7C1DB" fill-rule="evenodd" xlink:href="#react-path-1464267"></use><g id="Color/Palette/Gray-01" mask="url(#react-mask-1464268)" fill-rule="evenodd" fill="#D47A36"><rect id="🖍Color" x="0" y="0" width="264" height="110"></rect></g><path d="M102,61.7390531 L102,110 L95,110 L95,58.1502625 C97.2037542,59.4600576 99.5467694,60.6607878 102,61.7390531 Z M169,58.1502625 L169,98.5 C169,100.432997 167.432997,102 165.5,102 C163.567003,102 162,100.432997 162,98.5 L162,61.7390531 C164.453231,60.6607878 166.796246,59.4600576 169,58.1502625 Z" id="Straps" fill="#F4F4F4" fill-rule="evenodd" mask="url(#react-mask-1464268)"></path><path d="M90.9601329,12.7243537 C75.9093095,15.5711782 65.5,21.2428847 65.5,32.3076923 C65.5,52.0200095 98.5376807,68 132,68 C165.462319,68 198.5,52.0200095 198.5,32.3076923 C198.5,21.2428847 188.09069,15.5711782 173.039867,12.7243537 C182.124921,16.0744598 188,21.7060546 188,31.0769231 C188,51.4689754 160.178795,68 132,68 C103.821205,68 76,51.4689754 76,31.0769231 C76,21.7060546 81.8750795,16.0744598 90.9601329,12.7243537 Z" id="Shadow" fill-opacity="0.16" fill="#000000" fill-rule="evenodd" mask="url(#react-mask-1464268)"></path></g><g id="Face" transform="translate(76.000000, 82.000000)" fill="#000000"><g id="Mouth/Sad" transform="translate(2.000000, 52.000000)" fill-opacity="0.699999988" fill="#000000"><path d="M40.0582943,16.6539438 C40.7076459,23.6831146 46.7016363,28.3768187 54,28.3768187 C61.3416045,28.3768187 67.3633339,23.627332 67.9526838,16.5287605 C67.9840218,16.1513016 67.0772329,15.8529531 66.6289111,16.077395 C61.0902255,18.8502083 56.8805885,20.2366149 54,20.2366149 C51.1558456,20.2366149 47.0072148,18.8804569 41.5541074,16.168141 C41.0473376,15.9160792 40.0197139,16.2363147 40.0582943,16.6539438 Z" id="Mouth" transform="translate(54.005357, 22.188409) scale(1, -1) translate(-54.005357, -22.188409) "></path></g><g id="Nose/Default" transform="translate(28.000000, 40.000000)" fill-opacity="0.16"><path d="M16,8 C16,12.418278 21.372583,16 28,16 L28,16 C34.627417,16 40,12.418278 40,8" id="Nose"></path></g><g id="Eyes/Default-😀" transform="translate(0.000000, 8.000000)" fill-opacity="0.599999964"><circle id="Eye" cx="30" cy="22" r="6"></circle><circle id="Eye" cx="82" cy="22" r="6"></circle></g><g id="Eyebrow/Outline/Sad-Concerned" fill-opacity="0.599999964" fill-rule="nonzero"><path d="M15.9726042,19.4088529 C17.452356,11.0203704 30.0622688,5.22829657 39.2106453,8.9774793 C40.2254706,9.39337449 41.4016967,8.94600219 41.8378196,7.97824531 C42.2739426,7.01048842 41.8048116,5.88881678 40.7899862,5.47292159 C29.3457328,0.782843812 13.9550264,7.85221132 12.0280273,18.7760684 C11.84479,19.8148122 12.5792704,20.798534 13.6685352,20.9732726 C14.7578,21.1480113 15.7893668,20.4475967 15.9726042,19.4088529 Z" id="Eyebrow" transform="translate(27.000414, 12.500000) scale(-1, -1) translate(-27.000414, -12.500000) "></path><path d="M73.9726042,19.4088529 C75.452356,11.0203704 88.0622688,5.22829657 97.2106453,8.9774793 C98.2254706,9.39337449 99.4016967,8.94600219 99.8378196,7.97824531 C100.273943,7.01048842 99.8048116,5.88881678 98.7899862,5.47292159 C87.3457328,0.782843812 71.9550264,7.85221132 70.0280273,18.7760684 C69.84479,19.8148122 70.5792704,20.798534 71.6685352,20.9732726 C72.7578,21.1480113 73.7893668,20.4475967 73.9726042,19.4088529 Z" id="Eyebrow" transform="translate(85.000414, 12.500000) scale(1, -1) translate(-85.000414, -12.500000) "></path></g></g><g id="Top" stroke-width="1" fill-rule="evenodd"><defs><rect id="react-path-1464273" x="0" y="0" width="264" height="280"></rect><path d="M94.2519269,52.0221149 C94.3749353,51.9677149 94.0696712,51.9468149 93.3361345,51.9595149 C94.2276637,51.9577149 94.5329279,51.9785149 94.2519269,52.0221149 M86.1169775,36.3015924 C86.1148422,36.2819924 86.1337548,36.4526924 86.1169775,36.3015924 M193.765056,70.7656665 C193.500946,67.448734 193.03295,64.1518864 192.246676,60.9110823 C191.622233,58.3353492 190.769007,55.8775343 189.760006,53.4200433 C189.150703,51.9353766 187.727538,49.8961062 187.560324,48.2944933 C187.395466,46.7168527 188.626521,44.969138 188.889285,43.1323368 C189.144311,41.3447761 189.100909,39.4652134 188.734183,37.6938503 C187.901144,33.6710288 185.140271,29.9300447 180.877167,28.8814158 C179.925362,28.6471994 177.913417,28.9358396 177.240862,28.3815597 C176.469729,27.7459682 175.932761,25.5806808 175.234637,24.7121687 C173.244224,22.2362125 170.13984,20.6417265 166.865887,21.1976261 C164.454917,21.606776 165.839391,22.1053363 164.032005,20.6864317 C163.027041,19.8976114 162.276095,18.6931622 161.300066,17.8392279 C159.832826,16.5563826 158.149588,15.4581893 156.408146,14.556958 C151.851325,12.19892 146.654249,10.4848961 141.564162,9.64942693 C132.278934,8.12523827 122.368926,9.45408458 113.368668,11.8688141 C108.890239,13.0703477 104.381531,14.5951842 100.222053,16.6117782 C98.4385542,17.4764029 97.4090304,18.1936301 95.5494951,18.4200717 C92.6207355,18.7767416 90.1404579,18.7589243 87.3661268,20.0009517 C78.8298269,23.8229236 74.9849256,32.6897818 78.3066539,41.1750259 C78.974835,42.8815988 79.8795374,44.3801954 81.1267416,45.7586062 C82.6474761,47.4392631 83.1975648,47.1085093 81.8877817,49.0411999 C79.9289949,51.9311653 78.2777195,55.0129095 76.9332826,58.2128958 C73.4043038,66.6145606 72.8138416,76.0771643 73.043634,85.0373203 C73.1240445,88.1741362 73.2586228,91.3495022 73.753198,94.4561907 C73.966841,95.8009106 74.0267283,98.3293468 75.0353925,99.3271154 C75.5471264,99.8331265 76.2762042,100.115288 77.0035997,99.9137903 C78.7130802,99.4401742 78.1253096,98.1787097 78.1650102,97.0076274 C78.364859,91.1240324 78.0950295,85.9191145 79.4943071,80.1064647 C80.5278683,75.8118486 82.2504702,71.9114806 84.4827873,68.0713675 C87.3213795,63.1871608 90.3857268,58.8977279 94.2895061,54.7155226 C95.2073299,53.7320079 95.4078515,53.3150832 96.6385698,53.243814 C97.5705244,53.1900382 98.9338023,53.8282213 99.8398505,54.0491558 C101.837665,54.5360539 103.83918,55.0174448 105.873331,55.3452831 C109.613261,55.9481556 113.316519,55.9886494 117.090094,55.8704074 C124.516459,55.6381346 131.974787,55.1172217 139.175061,53.2470535 C143.956964,52.00535 148.196516,49.7762443 152.776887,48.1422364 C152.858644,48.1130808 154.006596,47.2951049 154.207791,47.3284719 C154.488723,47.3747968 156.184746,49.1542588 156.471061,49.3784327 C158.696649,51.1238798 161.137899,51.8566566 163.541467,53.2081794 C166.504881,54.8745825 163.634999,52.4899804 165.269452,54.5668292 C165.745859,55.1716454 165.989782,56.2931632 166.371984,56.9783192 C167.587899,59.1610999 169.279548,61.0795367 171.302932,62.6017816 C173.258018,64.0725184 176.196198,64.7829426 177.193087,66.697168 C177.961865,68.1740599 178.220929,70.1812592 178.841334,71.7579279 C180.468722,75.8931602 182.617937,79.7494709 184.767152,83.6443317 C186.498502,86.7830913 188.392354,89.5250111 188.584801,93.1117947 C188.651754,94.3603012 187.463764,101.849397 190.357534,99.5716982 C190.786502,99.2341415 191.711391,95.415733 191.901483,94.7678314 C192.672616,92.135083 192.94682,89.3866841 193.29605,86.6816947 C193.990474,81.3021672 194.218584,76.1837441 193.765056,70.7656665" id="react-path-1464272"></path><filter x="-0.8%" y="-2.0%" width="101.5%" height="108.0%" filterUnits="objectBoundingBox" id="react-filter-1464269"><feOffset dx="0" dy="2" in="SourceAlpha" result="shadowOffsetOuter1"></feOffset><feColorMatrix values="0 0 0 0 0   0 0 0 0 0   0 0 0 0 0  0 0 0 0.16 0" type="matrix" in="shadowOffsetOuter1" result="shadowMatrixOuter1"></feColorMatrix><feMerge><feMergeNode in="shadowMatrixOuter1"></feMergeNode><feMergeNode in="SourceGraphic"></feMergeNode></feMerge></filter></defs><mask id="react-mask-1464271" fill="white"><use xlink:href="#react-path-1464273"></use></mask><g id="Mask"></g><g id="Top/Short-Hair/Short-Curly" mask="url(#react-mask-1464271)"><g transform="translate(-1.000000, 0.000000)"><g id="Facial-Hair/Beard-Medium" transform="translate(49.000000, 72.000000)"><defs><path d="M105.017591,94.1296214 C101.150441,99.7213834 98.257542,95.9467308 94.1374777,92.8762163 C91.6567227,91.0272796 87.9608129,88.7275108 84.5044337,88.8410391 C81.0477114,88.7275108 77.3518016,91.0272796 74.8710466,92.8762163 C70.7509822,95.9467308 67.8580835,99.7213834 63.9909333,94.1296214 C61.0884259,89.9323547 62.3028943,82.8739117 65.014944,78.9027173 C68.8738581,73.2512381 74.1088724,75.9847769 79.9622738,75.3400279 C81.5538829,75.1648137 83.1526985,74.7228407 84.5044337,74 C85.856169,74.7228407 87.4546414,75.1648137 89.0462504,75.3400279 C94.899995,75.9847769 100.134666,73.2512381 103.993923,78.9027173 C106.70563,82.8739117 107.920098,89.9323547 105.017591,94.1296214 M140.39109,26 C136.966521,40.0748212 135.393023,54.4337754 132.909944,68.6711471 C132.392536,71.6390145 131.826063,74.5963095 131.224594,77.5496398 C131.098329,78.1697764 130.973781,80.4725746 130.362704,80.7643064 C128.511632,81.6484223 124.739149,76.9466834 123.730409,75.8851496 C121.196893,73.219256 118.684993,70.5292442 115.599415,68.437233 C109.364783,64.2102603 102.065485,61.7108818 94.4700836,61.117837 C91.2922091,60.8693859 86.9951134,61.3025234 84.000116,63.1104016 C81.0051185,61.3025234 76.7080229,60.8693859 73.5298053,61.117837 C65.9344039,61.7108818 58.6351055,64.2102603 52.4004739,68.437233 C49.3148957,70.5292442 46.8033387,73.219256 44.2694796,75.8851496 C43.2607395,76.9466834 39.4882573,81.6484223 37.6371849,80.7643064 C37.0261079,80.4725746 36.9015594,78.1697764 36.7752954,77.5496398 C36.1738255,74.5963095 35.6073527,71.6390145 35.0899445,68.6711471 C32.6072086,54.4337754 31.0337113,40.0748212 27.6091415,26 C26.6127533,26 25.7385119,44.7478165 25.6273446,46.4945731 C25.174784,53.5889755 24.6463963,60.5254529 25.3216346,67.6261326 C26.485803,79.8749043 27.6993791,95.2339402 37.032627,104.58753 C45.4659003,113.039493 57.7103052,114.806417 68.2713185,120.141327 C69.631059,120.828202 71.4347824,121.676306 73.3798667,122.37111 C75.4289129,123.934171 79.4926946,125 84.1740722,125 C89.0846465,125 93.3155222,123.827456 95.2540874,122.137856 C96.9548781,121.49261 98.5180822,120.752874 99.7285704,120.141327 C110.288776,114.805245 122.533989,113.039493 130.967262,104.58753 C140.30051,95.2339402 141.514086,79.8749043 142.678597,67.6261326 C143.353493,60.5254529 142.825105,53.5889755 142.372887,46.4945731 C142.261377,44.7478165 141.387136,26 140.39109,26 Z" id="react-path-1464275"></path></defs><mask id="react-mask-1464274" fill="white"><use xlink:href="#react-path-1464275"></use></mask><use id="Beardness" fill="#252E32" fill-rule="evenodd" xlink:href="#react-path-1464275"></use><g id="Color/Hair/Brown" mask="url(#react-mask-1464274)" fill="#724133"><g transform="translate(-32.000000, 0.000000)" id="Color"><rect x="0" y="0" width="264" height="244"></rect></g></g></g><mask id="react-mask-1464270" fill="white"><use xlink:href="#react-path-1464272"></use></mask><use id="Short-Hair" stroke="none" fill="#28354B" fill-rule="evenodd" xlink:href="#react-path-1464272"></use><g id="Skin/👶🏽-03-Brown" mask="url(#react-mask-1464270)" fill="#724133"><g transform="translate(0.000000, 0.000000) " id="Color"><rect x="0" y="0" width="264" height="280"></rect></g></g></g></g></g></g></g></g></g>` },
         error: { vb: '0 0 264 280', corpo: `<desc>Created with getavataaars.com</desc><defs><circle id="react-path-1464509" cx="120" cy="120" r="120"></circle><path d="M12,160 C12,226.27417 65.72583,280 132,280 C198.27417,280 252,226.27417 252,160 L264,160 L264,-1.42108547e-14 L-3.19744231e-14,-1.42108547e-14 L-3.19744231e-14,160 L12,160 Z" id="react-path-1464510"></path><path d="M124,144.610951 L124,163 L128,163 L128,163 C167.764502,163 200,195.235498 200,235 L200,244 L0,244 L0,235 C-4.86974701e-15,195.235498 32.235498,163 72,163 L72,163 L76,163 L76,144.610951 C58.7626345,136.422372 46.3722246,119.687011 44.3051388,99.8812385 C38.4803105,99.0577866 34,94.0521096 34,88 L34,74 C34,68.0540074 38.3245733,63.1180731 44,62.1659169 L44,56 L44,56 C44,25.072054 69.072054,5.68137151e-15 100,0 L100,0 L100,0 C130.927946,-5.68137151e-15 156,25.072054 156,56 L156,62.1659169 C161.675427,63.1180731 166,68.0540074 166,74 L166,88 C166,94.0521096 161.51969,99.0577866 155.694861,99.8812385 C153.627775,119.687011 141.237365,136.422372 124,144.610951 Z" id="react-path-1464511"></path></defs><g id="Avataaar" stroke="none" stroke-width="1" fill="none" fill-rule="evenodd"><g transform="translate(-825.000000, -1100.000000)" id="Avataaar/Circle"><g transform="translate(825.000000, 1100.000000)"><g id="Mask"></g><g id="Avataaar" stroke-width="1" fill-rule="evenodd" mask="url(#react-mask-1464513)"><g id="Body" transform="translate(32.000000, 36.000000)"><mask id="react-mask-1464514" fill="white"><use xlink:href="#react-path-1464511"></use></mask><use fill="#D0C6AC" xlink:href="#react-path-1464511"></use><g id="Skin/👶🏽-03-Brown" mask="url(#react-mask-1464514)" fill="#EDB98A"><g transform="translate(0.000000, 0.000000)" id="Color"><rect x="0" y="0" width="264" height="280"></rect></g></g><path d="M156,79 L156,102 C156,132.927946 130.927946,158 100,158 C69.072054,158 44,132.927946 44,102 L44,79 L44,94 C44,124.927946 69.072054,150 100,150 C130.927946,150 156,124.927946 156,94 L156,79 Z" id="Neck-Shadow" fill-opacity="0.100000001" fill="#000000" mask="url(#react-mask-1464514)"></path></g><g id="Clothing/Hoodie" transform="translate(0.000000, 170.000000)"><defs><path d="M108,13.0708856 C90.0813006,15.075938 76.2798424,20.5518341 76.004203,34.6449676 C50.1464329,45.5680933 32,71.1646257 32,100.999485 L32,100.999485 L32,110 L232,110 L232,100.999485 C232,71.1646257 213.853567,45.5680933 187.995797,34.6449832 C187.720158,20.5518341 173.918699,15.075938 156,13.0708856 L156,32 L156,32 C156,45.254834 145.254834,56 132,56 L132,56 C118.745166,56 108,45.254834 108,32 L108,13.0708856 Z" id="react-path-1464515"></path></defs><mask id="react-mask-1464516" fill="white"><use xlink:href="#react-path-1464515"></use></mask><use id="Hoodie" fill="#B7C1DB" fill-rule="evenodd" xlink:href="#react-path-1464515"></use><g id="Color/Palette/Gray-01" mask="url(#react-mask-1464516)" fill-rule="evenodd" fill="#D47A36"><rect id="🖍Color" x="0" y="0" width="264" height="110"></rect></g><path d="M102,61.7390531 L102,110 L95,110 L95,58.1502625 C97.2037542,59.4600576 99.5467694,60.6607878 102,61.7390531 Z M169,58.1502625 L169,98.5 C169,100.432997 167.432997,102 165.5,102 C163.567003,102 162,100.432997 162,98.5 L162,61.7390531 C164.453231,60.6607878 166.796246,59.4600576 169,58.1502625 Z" id="Straps" fill="#F4F4F4" fill-rule="evenodd" mask="url(#react-mask-1464516)"></path><path d="M90.9601329,12.7243537 C75.9093095,15.5711782 65.5,21.2428847 65.5,32.3076923 C65.5,52.0200095 98.5376807,68 132,68 C165.462319,68 198.5,52.0200095 198.5,32.3076923 C198.5,21.2428847 188.09069,15.5711782 173.039867,12.7243537 C182.124921,16.0744598 188,21.7060546 188,31.0769231 C188,51.4689754 160.178795,68 132,68 C103.821205,68 76,51.4689754 76,31.0769231 C76,21.7060546 81.8750795,16.0744598 90.9601329,12.7243537 Z" id="Shadow" fill-opacity="0.16" fill="#000000" fill-rule="evenodd" mask="url(#react-mask-1464516)"></path></g><g id="Face" transform="translate(76.000000, 82.000000)" fill="#000000"><g id="Mouth/Grimace" transform="translate(2.000000, 52.000000)"><defs><rect id="react-path-1464517" x="24" y="9" width="60" height="22" rx="11"></rect></defs><rect id="Mouth" fill-opacity="0.599999964" fill="#000000" fill-rule="evenodd" x="22" y="7" width="64" height="26" rx="13"></rect><mask id="react-mask-1464518" fill="white"><use xlink:href="#react-path-1464517"></use></mask><use id="Mouth" fill="#FFFFFF" fill-rule="evenodd" xlink:href="#react-path-1464517"></use><path d="M71,22 L62,22 L62,34 L58,34 L58,22 L49,22 L49,34 L45,34 L45,22 L36,22 L36,34 L32,34 L32,22 L24,22 L24,18 L32,18 L32,6 L36,6 L36,18 L45,18 L45,6 L49,6 L49,18 L58,18 L58,6 L62,6 L62,18 L71,18 L71,6 L75,6 L75,18 L83.8666667,18 L83.8666667,22 L75,22 L75,34 L71,34 L71,22 Z" id="Grimace-Teeth" fill="#E6E6E6" fill-rule="evenodd" mask="url(#react-mask-1464518)"></path></g><g id="Nose/Default" transform="translate(28.000000, 40.000000)" fill-opacity="0.16"><path d="M16,8 C16,12.418278 21.372583,16 28,16 L28,16 C34.627417,16 40,12.418278 40,8" id="Nose"></path></g><g id="Eyes/Cry-😢" transform="translate(0.000000, 8.000000)"><circle id="Eye" fill-opacity="0.599999964" fill="#000000" fill-rule="evenodd" cx="30" cy="22" r="6"></circle><path d="M25,27 C25,27 19,34.2706667 19,38.2706667 C19,41.5846667 21.686,44.2706667 25,44.2706667 C28.314,44.2706667 31,41.5846667 31,38.2706667 C31,34.2706667 25,27 25,27 Z" id="Drop" fill="#92D9FF" fill-rule="nonzero"></path><circle id="Eye" fill-opacity="0.599999964" fill="#000000" fill-rule="evenodd" cx="82" cy="22" r="6"></circle></g><g id="Eyebrow/Natural/Angry-Natural" fill-opacity="0.599999964"><path d="M44.8565785,12.2282877 C44.8578785,12.2192877 44.8578785,12.2192877 44.8565785,12.2282877 M17.5862288,7.89238094 C15.2441598,8.3302947 13.0866155,9.78806858 12.1523766,12.0987479 C11.8009169,12.967391 11.3917103,14.9243181 11.7083227,15.8073302 C11.8284629,16.14295 12.0332321,16.1008692 12.9555234,16.0430509 C14.643791,15.9369937 16.9330912,13.6622369 18.7484684,13.2557982 C21.2753939,12.6899315 23.9825295,13.1148447 26.4961798,13.6882381 C30.8109365,14.6725177 36.4854008,17.7875215 40.9461842,16.1699775 C41.2783949,16.0495512 45.6210294,12.9225732 44.3685187,12.2769925 C43.9238011,11.9068186 41.1370145,12.0854053 40.6216067,11.9988489 C38.2277647,11.5971998 35.7297127,10.9345131 33.373373,10.3265657 C28.2329017,9.00016592 22.9666484,6.88073171 17.5862288,7.89238094" id="Eyebrows-The-Web" transform="translate(28.094701, 12.127505) rotate(17.000000) translate(-28.094701, -12.127505) "></path><path d="M100.918293,12.2094196 C100.919593,12.2004196 100.919593,12.2004196 100.918293,12.2094196 M73.5862288,7.89238094 C71.2441598,8.3302947 69.0866155,9.78806858 68.1523766,12.0987479 C67.8009169,12.967391 67.3917103,14.9243181 67.7083227,15.8073302 C67.8284629,16.14295 68.0332321,16.1008692 68.9555234,16.0430509 C70.643791,15.9369937 72.9330912,13.6622369 74.7484684,13.2557982 C77.2753939,12.6899315 79.9825295,13.1148447 82.4961798,13.6882381 C86.8109365,14.6725177 92.4854008,17.7875215 96.9461842,16.1699775 C97.2783949,16.0495512 101.621029,12.9225732 100.368519,12.2769925 C99.9238011,11.9068186 97.1370145,12.0854053 96.6216067,11.9988489 C94.2277647,11.5971998 91.7297127,10.9345131 89.373373,10.3265657 C84.2329017,9.00016592 78.9666484,6.88073171 73.5862288,7.89238094" id="Eyebrows-The-Web" transform="translate(84.094701, 12.127505) scale(-1, 1) rotate(17.000000) translate(-84.094701, -12.127505) "></path></g></g><g id="Top" stroke-width="1" fill-rule="evenodd"><defs><rect id="react-path-1464523" x="0" y="0" width="264" height="280"></rect><path d="M94.2519269,52.0221149 C94.3749353,51.9677149 94.0696712,51.9468149 93.3361345,51.9595149 C94.2276637,51.9577149 94.5329279,51.9785149 94.2519269,52.0221149 M86.1169775,36.3015924 C86.1148422,36.2819924 86.1337548,36.4526924 86.1169775,36.3015924 M193.765056,70.7656665 C193.500946,67.448734 193.03295,64.1518864 192.246676,60.9110823 C191.622233,58.3353492 190.769007,55.8775343 189.760006,53.4200433 C189.150703,51.9353766 187.727538,49.8961062 187.560324,48.2944933 C187.395466,46.7168527 188.626521,44.969138 188.889285,43.1323368 C189.144311,41.3447761 189.100909,39.4652134 188.734183,37.6938503 C187.901144,33.6710288 185.140271,29.9300447 180.877167,28.8814158 C179.925362,28.6471994 177.913417,28.9358396 177.240862,28.3815597 C176.469729,27.7459682 175.932761,25.5806808 175.234637,24.7121687 C173.244224,22.2362125 170.13984,20.6417265 166.865887,21.1976261 C164.454917,21.606776 165.839391,22.1053363 164.032005,20.6864317 C163.027041,19.8976114 162.276095,18.6931622 161.300066,17.8392279 C159.832826,16.5563826 158.149588,15.4581893 156.408146,14.556958 C151.851325,12.19892 146.654249,10.4848961 141.564162,9.64942693 C132.278934,8.12523827 122.368926,9.45408458 113.368668,11.8688141 C108.890239,13.0703477 104.381531,14.5951842 100.222053,16.6117782 C98.4385542,17.4764029 97.4090304,18.1936301 95.5494951,18.4200717 C92.6207355,18.7767416 90.1404579,18.7589243 87.3661268,20.0009517 C78.8298269,23.8229236 74.9849256,32.6897818 78.3066539,41.1750259 C78.974835,42.8815988 79.8795374,44.3801954 81.1267416,45.7586062 C82.6474761,47.4392631 83.1975648,47.1085093 81.8877817,49.0411999 C79.9289949,51.9311653 78.2777195,55.0129095 76.9332826,58.2128958 C73.4043038,66.6145606 72.8138416,76.0771643 73.043634,85.0373203 C73.1240445,88.1741362 73.2586228,91.3495022 73.753198,94.4561907 C73.966841,95.8009106 74.0267283,98.3293468 75.0353925,99.3271154 C75.5471264,99.8331265 76.2762042,100.115288 77.0035997,99.9137903 C78.7130802,99.4401742 78.1253096,98.1787097 78.1650102,97.0076274 C78.364859,91.1240324 78.0950295,85.9191145 79.4943071,80.1064647 C80.5278683,75.8118486 82.2504702,71.9114806 84.4827873,68.0713675 C87.3213795,63.1871608 90.3857268,58.8977279 94.2895061,54.7155226 C95.2073299,53.7320079 95.4078515,53.3150832 96.6385698,53.243814 C97.5705244,53.1900382 98.9338023,53.8282213 99.8398505,54.0491558 C101.837665,54.5360539 103.83918,55.0174448 105.873331,55.3452831 C109.613261,55.9481556 113.316519,55.9886494 117.090094,55.8704074 C124.516459,55.6381346 131.974787,55.1172217 139.175061,53.2470535 C143.956964,52.00535 148.196516,49.7762443 152.776887,48.1422364 C152.858644,48.1130808 154.006596,47.2951049 154.207791,47.3284719 C154.488723,47.3747968 156.184746,49.1542588 156.471061,49.3784327 C158.696649,51.1238798 161.137899,51.8566566 163.541467,53.2081794 C166.504881,54.8745825 163.634999,52.4899804 165.269452,54.5668292 C165.745859,55.1716454 165.989782,56.2931632 166.371984,56.9783192 C167.587899,59.1610999 169.279548,61.0795367 171.302932,62.6017816 C173.258018,64.0725184 176.196198,64.7829426 177.193087,66.697168 C177.961865,68.1740599 178.220929,70.1812592 178.841334,71.7579279 C180.468722,75.8931602 182.617937,79.7494709 184.767152,83.6443317 C186.498502,86.7830913 188.392354,89.5250111 188.584801,93.1117947 C188.651754,94.3603012 187.463764,101.849397 190.357534,99.5716982 C190.786502,99.2341415 191.711391,95.415733 191.901483,94.7678314 C192.672616,92.135083 192.94682,89.3866841 193.29605,86.6816947 C193.990474,81.3021672 194.218584,76.1837441 193.765056,70.7656665" id="react-path-1464522"></path><filter x="-0.8%" y="-2.0%" width="101.5%" height="108.0%" filterUnits="objectBoundingBox" id="react-filter-1464519"><feOffset dx="0" dy="2" in="SourceAlpha" result="shadowOffsetOuter1"></feOffset><feColorMatrix values="0 0 0 0 0   0 0 0 0 0   0 0 0 0 0  0 0 0 0.16 0" type="matrix" in="shadowOffsetOuter1" result="shadowMatrixOuter1"></feColorMatrix><feMerge><feMergeNode in="shadowMatrixOuter1"></feMergeNode><feMergeNode in="SourceGraphic"></feMergeNode></feMerge></filter></defs><mask id="react-mask-1464521" fill="white"><use xlink:href="#react-path-1464523"></use></mask><g id="Mask"></g><g id="Top/Short-Hair/Short-Curly" mask="url(#react-mask-1464521)"><g transform="translate(-1.000000, 0.000000)"><g id="Facial-Hair/Beard-Medium" transform="translate(49.000000, 72.000000)"><defs><path d="M105.017591,94.1296214 C101.150441,99.7213834 98.257542,95.9467308 94.1374777,92.8762163 C91.6567227,91.0272796 87.9608129,88.7275108 84.5044337,88.8410391 C81.0477114,88.7275108 77.3518016,91.0272796 74.8710466,92.8762163 C70.7509822,95.9467308 67.8580835,99.7213834 63.9909333,94.1296214 C61.0884259,89.9323547 62.3028943,82.8739117 65.014944,78.9027173 C68.8738581,73.2512381 74.1088724,75.9847769 79.9622738,75.3400279 C81.5538829,75.1648137 83.1526985,74.7228407 84.5044337,74 C85.856169,74.7228407 87.4546414,75.1648137 89.0462504,75.3400279 C94.899995,75.9847769 100.134666,73.2512381 103.993923,78.9027173 C106.70563,82.8739117 107.920098,89.9323547 105.017591,94.1296214 M140.39109,26 C136.966521,40.0748212 135.393023,54.4337754 132.909944,68.6711471 C132.392536,71.6390145 131.826063,74.5963095 131.224594,77.5496398 C131.098329,78.1697764 130.973781,80.4725746 130.362704,80.7643064 C128.511632,81.6484223 124.739149,76.9466834 123.730409,75.8851496 C121.196893,73.219256 118.684993,70.5292442 115.599415,68.437233 C109.364783,64.2102603 102.065485,61.7108818 94.4700836,61.117837 C91.2922091,60.8693859 86.9951134,61.3025234 84.000116,63.1104016 C81.0051185,61.3025234 76.7080229,60.8693859 73.5298053,61.117837 C65.9344039,61.7108818 58.6351055,64.2102603 52.4004739,68.437233 C49.3148957,70.5292442 46.8033387,73.219256 44.2694796,75.8851496 C43.2607395,76.9466834 39.4882573,81.6484223 37.6371849,80.7643064 C37.0261079,80.4725746 36.9015594,78.1697764 36.7752954,77.5496398 C36.1738255,74.5963095 35.6073527,71.6390145 35.0899445,68.6711471 C32.6072086,54.4337754 31.0337113,40.0748212 27.6091415,26 C26.6127533,26 25.7385119,44.7478165 25.6273446,46.4945731 C25.174784,53.5889755 24.6463963,60.5254529 25.3216346,67.6261326 C26.485803,79.8749043 27.6993791,95.2339402 37.032627,104.58753 C45.4659003,113.039493 57.7103052,114.806417 68.2713185,120.141327 C69.631059,120.828202 71.4347824,121.676306 73.3798667,122.37111 C75.4289129,123.934171 79.4926946,125 84.1740722,125 C89.0846465,125 93.3155222,123.827456 95.2540874,122.137856 C96.9548781,121.49261 98.5180822,120.752874 99.7285704,120.141327 C110.288776,114.805245 122.533989,113.039493 130.967262,104.58753 C140.30051,95.2339402 141.514086,79.8749043 142.678597,67.6261326 C143.353493,60.5254529 142.825105,53.5889755 142.372887,46.4945731 C142.261377,44.7478165 141.387136,26 140.39109,26 Z" id="react-path-1464525"></path></defs><mask id="react-mask-1464524" fill="white"><use xlink:href="#react-path-1464525"></use></mask><use id="Beardness" fill="#252E32" fill-rule="evenodd" xlink:href="#react-path-1464525"></use><g id="Color/Hair/Brown" mask="url(#react-mask-1464524)" fill="#724133"><g transform="translate(-32.000000, 0.000000)" id="Color"><rect x="0" y="0" width="264" height="244"></rect></g></g></g><mask id="react-mask-1464520" fill="white"><use xlink:href="#react-path-1464522"></use></mask><use id="Short-Hair" stroke="none" fill="#28354B" fill-rule="evenodd" xlink:href="#react-path-1464522"></use><g id="Skin/👶🏽-03-Brown" mask="url(#react-mask-1464520)" fill="#724133"><g transform="translate(0.000000, 0.000000) " id="Color"><rect x="0" y="0" width="264" height="280"></rect></g></g></g></g></g></g></g></g></g>` },
         success: { vb: '0 0 264 280', corpo: `<desc>Created with getavataaars.com</desc><defs><circle id="react-path-1464448" cx="120" cy="120" r="120"></circle><path d="M12,160 C12,226.27417 65.72583,280 132,280 C198.27417,280 252,226.27417 252,160 L264,160 L264,-1.42108547e-14 L-3.19744231e-14,-1.42108547e-14 L-3.19744231e-14,160 L12,160 Z" id="react-path-1464449"></path><path d="M124,144.610951 L124,163 L128,163 L128,163 C167.764502,163 200,195.235498 200,235 L200,244 L0,244 L0,235 C-4.86974701e-15,195.235498 32.235498,163 72,163 L72,163 L76,163 L76,144.610951 C58.7626345,136.422372 46.3722246,119.687011 44.3051388,99.8812385 C38.4803105,99.0577866 34,94.0521096 34,88 L34,74 C34,68.0540074 38.3245733,63.1180731 44,62.1659169 L44,56 L44,56 C44,25.072054 69.072054,5.68137151e-15 100,0 L100,0 L100,0 C130.927946,-5.68137151e-15 156,25.072054 156,56 L156,62.1659169 C161.675427,63.1180731 166,68.0540074 166,74 L166,88 C166,94.0521096 161.51969,99.0577866 155.694861,99.8812385 C153.627775,119.687011 141.237365,136.422372 124,144.610951 Z" id="react-path-1464450"></path></defs><g id="Avataaar" stroke="none" stroke-width="1" fill="none" fill-rule="evenodd"><g transform="translate(-825.000000, -1100.000000)" id="Avataaar/Circle"><g transform="translate(825.000000, 1100.000000)"><g id="Mask"></g><g id="Avataaar" stroke-width="1" fill-rule="evenodd" mask="url(#react-mask-1464452)"><g id="Body" transform="translate(32.000000, 36.000000)"><mask id="react-mask-1464453" fill="white"><use xlink:href="#react-path-1464450"></use></mask><use fill="#D0C6AC" xlink:href="#react-path-1464450"></use><g id="Skin/👶🏽-03-Brown" mask="url(#react-mask-1464453)" fill="#EDB98A"><g transform="translate(0.000000, 0.000000)" id="Color"><rect x="0" y="0" width="264" height="280"></rect></g></g><path d="M156,79 L156,102 C156,132.927946 130.927946,158 100,158 C69.072054,158 44,132.927946 44,102 L44,79 L44,94 C44,124.927946 69.072054,150 100,150 C130.927946,150 156,124.927946 156,94 L156,79 Z" id="Neck-Shadow" fill-opacity="0.100000001" fill="#000000" mask="url(#react-mask-1464453)"></path></g><g id="Clothing/Hoodie" transform="translate(0.000000, 170.000000)"><defs><path d="M108,13.0708856 C90.0813006,15.075938 76.2798424,20.5518341 76.004203,34.6449676 C50.1464329,45.5680933 32,71.1646257 32,100.999485 L32,100.999485 L32,110 L232,110 L232,100.999485 C232,71.1646257 213.853567,45.5680933 187.995797,34.6449832 C187.720158,20.5518341 173.918699,15.075938 156,13.0708856 L156,32 L156,32 C156,45.254834 145.254834,56 132,56 L132,56 C118.745166,56 108,45.254834 108,32 L108,13.0708856 Z" id="react-path-1464454"></path></defs><mask id="react-mask-1464455" fill="white"><use xlink:href="#react-path-1464454"></use></mask><use id="Hoodie" fill="#B7C1DB" fill-rule="evenodd" xlink:href="#react-path-1464454"></use><g id="Color/Palette/Gray-01" mask="url(#react-mask-1464455)" fill-rule="evenodd" fill="#D47A36"><rect id="🖍Color" x="0" y="0" width="264" height="110"></rect></g><path d="M102,61.7390531 L102,110 L95,110 L95,58.1502625 C97.2037542,59.4600576 99.5467694,60.6607878 102,61.7390531 Z M169,58.1502625 L169,98.5 C169,100.432997 167.432997,102 165.5,102 C163.567003,102 162,100.432997 162,98.5 L162,61.7390531 C164.453231,60.6607878 166.796246,59.4600576 169,58.1502625 Z" id="Straps" fill="#F4F4F4" fill-rule="evenodd" mask="url(#react-mask-1464455)"></path><path d="M90.9601329,12.7243537 C75.9093095,15.5711782 65.5,21.2428847 65.5,32.3076923 C65.5,52.0200095 98.5376807,68 132,68 C165.462319,68 198.5,52.0200095 198.5,32.3076923 C198.5,21.2428847 188.09069,15.5711782 173.039867,12.7243537 C182.124921,16.0744598 188,21.7060546 188,31.0769231 C188,51.4689754 160.178795,68 132,68 C103.821205,68 76,51.4689754 76,31.0769231 C76,21.7060546 81.8750795,16.0744598 90.9601329,12.7243537 Z" id="Shadow" fill-opacity="0.16" fill="#000000" fill-rule="evenodd" mask="url(#react-mask-1464455)"></path></g><g id="Face" transform="translate(76.000000, 82.000000)" fill="#000000"><g id="Mouth/Smile" transform="translate(2.000000, 52.000000)"><defs><path d="M35.117844,15.1280772 C36.1757121,24.6198025 44.2259873,32 54,32 C63.8042055,32 71.8740075,24.574136 72.8917593,15.0400546 C72.9736685,14.272746 72.1167429,13 71.042767,13 C56.1487536,13 44.7379213,13 37.0868244,13 C36.0066168,13 35.0120058,14.1784435 35.117844,15.1280772 Z" id="react-path-1464456"></path></defs><mask id="react-mask-1464457" fill="white"><use xlink:href="#react-path-1464456"></use></mask><use id="Mouth" fill-opacity="0.699999988" fill="#000000" fill-rule="evenodd" xlink:href="#react-path-1464456"></use><rect id="Teeth" fill="#FFFFFF" fill-rule="evenodd" mask="url(#react-mask-1464457)" x="39" y="2" width="31" height="16" rx="5"></rect><g id="Tongue" stroke-width="1" fill-rule="evenodd" mask="url(#react-mask-1464457)" fill="#FF4F6D"><g transform="translate(38.000000, 24.000000)"><circle cx="11" cy="11" r="11"></circle><circle cx="21" cy="11" r="11"></circle></g></g></g><g id="Nose/Default" transform="translate(28.000000, 40.000000)" fill-opacity="0.16"><path d="M16,8 C16,12.418278 21.372583,16 28,16 L28,16 C34.627417,16 40,12.418278 40,8" id="Nose"></path></g><g id="Eyes/Happy-😁" transform="translate(0.000000, 8.000000)" fill-opacity="0.599999964"><path d="M16.1601674,22.4473116 C18.006676,18.648508 22.1644225,16 26.9975803,16 C31.8136766,16 35.9591217,18.629842 37.8153518,22.4071242 C38.3667605,23.5291977 37.5821037,24.4474817 36.790607,23.7670228 C34.3395063,21.6597833 30.8587163,20.3437884 26.9975803,20.3437884 C23.2572061,20.3437884 19.8737584,21.5787519 17.4375392,23.5716412 C16.5467928,24.3002944 15.6201012,23.5583844 16.1601674,22.4473116 Z" id="Squint"></path><path d="M74.1601674,22.4473116 C76.006676,18.648508 80.1644225,16 84.9975803,16 C89.8136766,16 93.9591217,18.629842 95.8153518,22.4071242 C96.3667605,23.5291977 95.5821037,24.4474817 94.790607,23.7670228 C92.3395063,21.6597833 88.8587163,20.3437884 84.9975803,20.3437884 C81.2572061,20.3437884 77.8737584,21.5787519 75.4375392,23.5716412 C74.5467928,24.3002944 73.6201012,23.5583844 74.1601674,22.4473116 Z" id="Squint"></path></g><g id="Eyebrow/Natural/Raised-Excited-Natural" fill-opacity="0.599999964"><path d="M22.7663531,1.57844898 L23.6772984,1.17582144 C28.9190996,-0.905265751 36.8645466,-0.0328729562 41.7227321,2.29911638 C42.2897848,2.57148957 41.9021563,3.4519421 41.3211012,3.40711006 C26.4021788,2.25602197 16.3582869,11.5525942 12.9460869,17.8470939 C12.8449215,18.0337142 12.5391523,18.05489 12.4635344,17.8808353 C10.156283,12.5620676 16.9134476,3.89614725 22.7663531,1.57844898 Z" id="Eye-Browse-Reddit"></path><path d="M80.7663531,1.57844898 L81.6772984,1.17582144 C86.9190996,-0.905265751 94.8645466,-0.0328729562 99.7227321,2.29911638 C100.289785,2.57148957 99.9021563,3.4519421 99.3211012,3.40711006 C84.4021788,2.25602197 74.3582869,11.5525942 70.9460869,17.8470939 C70.8449215,18.0337142 70.5391523,18.05489 70.4635344,17.8808353 C68.156283,12.5620676 74.9134476,3.89614725 80.7663531,1.57844898 Z" id="Eye-Browse-Reddit" transform="translate(85.000000, 9.000000) scale(-1, 1) translate(-85.000000, -9.000000) "></path></g></g><g id="Top" stroke-width="1" fill-rule="evenodd"><defs><rect id="react-path-1464462" x="0" y="0" width="264" height="280"></rect><path d="M94.2519269,52.0221149 C94.3749353,51.9677149 94.0696712,51.9468149 93.3361345,51.9595149 C94.2276637,51.9577149 94.5329279,51.9785149 94.2519269,52.0221149 M86.1169775,36.3015924 C86.1148422,36.2819924 86.1337548,36.4526924 86.1169775,36.3015924 M193.765056,70.7656665 C193.500946,67.448734 193.03295,64.1518864 192.246676,60.9110823 C191.622233,58.3353492 190.769007,55.8775343 189.760006,53.4200433 C189.150703,51.9353766 187.727538,49.8961062 187.560324,48.2944933 C187.395466,46.7168527 188.626521,44.969138 188.889285,43.1323368 C189.144311,41.3447761 189.100909,39.4652134 188.734183,37.6938503 C187.901144,33.6710288 185.140271,29.9300447 180.877167,28.8814158 C179.925362,28.6471994 177.913417,28.9358396 177.240862,28.3815597 C176.469729,27.7459682 175.932761,25.5806808 175.234637,24.7121687 C173.244224,22.2362125 170.13984,20.6417265 166.865887,21.1976261 C164.454917,21.606776 165.839391,22.1053363 164.032005,20.6864317 C163.027041,19.8976114 162.276095,18.6931622 161.300066,17.8392279 C159.832826,16.5563826 158.149588,15.4581893 156.408146,14.556958 C151.851325,12.19892 146.654249,10.4848961 141.564162,9.64942693 C132.278934,8.12523827 122.368926,9.45408458 113.368668,11.8688141 C108.890239,13.0703477 104.381531,14.5951842 100.222053,16.6117782 C98.4385542,17.4764029 97.4090304,18.1936301 95.5494951,18.4200717 C92.6207355,18.7767416 90.1404579,18.7589243 87.3661268,20.0009517 C78.8298269,23.8229236 74.9849256,32.6897818 78.3066539,41.1750259 C78.974835,42.8815988 79.8795374,44.3801954 81.1267416,45.7586062 C82.6474761,47.4392631 83.1975648,47.1085093 81.8877817,49.0411999 C79.9289949,51.9311653 78.2777195,55.0129095 76.9332826,58.2128958 C73.4043038,66.6145606 72.8138416,76.0771643 73.043634,85.0373203 C73.1240445,88.1741362 73.2586228,91.3495022 73.753198,94.4561907 C73.966841,95.8009106 74.0267283,98.3293468 75.0353925,99.3271154 C75.5471264,99.8331265 76.2762042,100.115288 77.0035997,99.9137903 C78.7130802,99.4401742 78.1253096,98.1787097 78.1650102,97.0076274 C78.364859,91.1240324 78.0950295,85.9191145 79.4943071,80.1064647 C80.5278683,75.8118486 82.2504702,71.9114806 84.4827873,68.0713675 C87.3213795,63.1871608 90.3857268,58.8977279 94.2895061,54.7155226 C95.2073299,53.7320079 95.4078515,53.3150832 96.6385698,53.243814 C97.5705244,53.1900382 98.9338023,53.8282213 99.8398505,54.0491558 C101.837665,54.5360539 103.83918,55.0174448 105.873331,55.3452831 C109.613261,55.9481556 113.316519,55.9886494 117.090094,55.8704074 C124.516459,55.6381346 131.974787,55.1172217 139.175061,53.2470535 C143.956964,52.00535 148.196516,49.7762443 152.776887,48.1422364 C152.858644,48.1130808 154.006596,47.2951049 154.207791,47.3284719 C154.488723,47.3747968 156.184746,49.1542588 156.471061,49.3784327 C158.696649,51.1238798 161.137899,51.8566566 163.541467,53.2081794 C166.504881,54.8745825 163.634999,52.4899804 165.269452,54.5668292 C165.745859,55.1716454 165.989782,56.2931632 166.371984,56.9783192 C167.587899,59.1610999 169.279548,61.0795367 171.302932,62.6017816 C173.258018,64.0725184 176.196198,64.7829426 177.193087,66.697168 C177.961865,68.1740599 178.220929,70.1812592 178.841334,71.7579279 C180.468722,75.8931602 182.617937,79.7494709 184.767152,83.6443317 C186.498502,86.7830913 188.392354,89.5250111 188.584801,93.1117947 C188.651754,94.3603012 187.463764,101.849397 190.357534,99.5716982 C190.786502,99.2341415 191.711391,95.415733 191.901483,94.7678314 C192.672616,92.135083 192.94682,89.3866841 193.29605,86.6816947 C193.990474,81.3021672 194.218584,76.1837441 193.765056,70.7656665" id="react-path-1464461"></path><filter x="-0.8%" y="-2.0%" width="101.5%" height="108.0%" filterUnits="objectBoundingBox" id="react-filter-1464458"><feOffset dx="0" dy="2" in="SourceAlpha" result="shadowOffsetOuter1"></feOffset><feColorMatrix values="0 0 0 0 0   0 0 0 0 0   0 0 0 0 0  0 0 0 0.16 0" type="matrix" in="shadowOffsetOuter1" result="shadowMatrixOuter1"></feColorMatrix><feMerge><feMergeNode in="shadowMatrixOuter1"></feMergeNode><feMergeNode in="SourceGraphic"></feMergeNode></feMerge></filter></defs><mask id="react-mask-1464460" fill="white"><use xlink:href="#react-path-1464462"></use></mask><g id="Mask"></g><g id="Top/Short-Hair/Short-Curly" mask="url(#react-mask-1464460)"><g transform="translate(-1.000000, 0.000000)"><g id="Facial-Hair/Beard-Medium" transform="translate(49.000000, 72.000000)"><defs><path d="M105.017591,94.1296214 C101.150441,99.7213834 98.257542,95.9467308 94.1374777,92.8762163 C91.6567227,91.0272796 87.9608129,88.7275108 84.5044337,88.8410391 C81.0477114,88.7275108 77.3518016,91.0272796 74.8710466,92.8762163 C70.7509822,95.9467308 67.8580835,99.7213834 63.9909333,94.1296214 C61.0884259,89.9323547 62.3028943,82.8739117 65.014944,78.9027173 C68.8738581,73.2512381 74.1088724,75.9847769 79.9622738,75.3400279 C81.5538829,75.1648137 83.1526985,74.7228407 84.5044337,74 C85.856169,74.7228407 87.4546414,75.1648137 89.0462504,75.3400279 C94.899995,75.9847769 100.134666,73.2512381 103.993923,78.9027173 C106.70563,82.8739117 107.920098,89.9323547 105.017591,94.1296214 M140.39109,26 C136.966521,40.0748212 135.393023,54.4337754 132.909944,68.6711471 C132.392536,71.6390145 131.826063,74.5963095 131.224594,77.5496398 C131.098329,78.1697764 130.973781,80.4725746 130.362704,80.7643064 C128.511632,81.6484223 124.739149,76.9466834 123.730409,75.8851496 C121.196893,73.219256 118.684993,70.5292442 115.599415,68.437233 C109.364783,64.2102603 102.065485,61.7108818 94.4700836,61.117837 C91.2922091,60.8693859 86.9951134,61.3025234 84.000116,63.1104016 C81.0051185,61.3025234 76.7080229,60.8693859 73.5298053,61.117837 C65.9344039,61.7108818 58.6351055,64.2102603 52.4004739,68.437233 C49.3148957,70.5292442 46.8033387,73.219256 44.2694796,75.8851496 C43.2607395,76.9466834 39.4882573,81.6484223 37.6371849,80.7643064 C37.0261079,80.4725746 36.9015594,78.1697764 36.7752954,77.5496398 C36.1738255,74.5963095 35.6073527,71.6390145 35.0899445,68.6711471 C32.6072086,54.4337754 31.0337113,40.0748212 27.6091415,26 C26.6127533,26 25.7385119,44.7478165 25.6273446,46.4945731 C25.174784,53.5889755 24.6463963,60.5254529 25.3216346,67.6261326 C26.485803,79.8749043 27.6993791,95.2339402 37.032627,104.58753 C45.4659003,113.039493 57.7103052,114.806417 68.2713185,120.141327 C69.631059,120.828202 71.4347824,121.676306 73.3798667,122.37111 C75.4289129,123.934171 79.4926946,125 84.1740722,125 C89.0846465,125 93.3155222,123.827456 95.2540874,122.137856 C96.9548781,121.49261 98.5180822,120.752874 99.7285704,120.141327 C110.288776,114.805245 122.533989,113.039493 130.967262,104.58753 C140.30051,95.2339402 141.514086,79.8749043 142.678597,67.6261326 C143.353493,60.5254529 142.825105,53.5889755 142.372887,46.4945731 C142.261377,44.7478165 141.387136,26 140.39109,26 Z" id="react-path-1464464"></path></defs><mask id="react-mask-1464463" fill="white"><use xlink:href="#react-path-1464464"></use></mask><use id="Beardness" fill="#252E32" fill-rule="evenodd" xlink:href="#react-path-1464464"></use><g id="Color/Hair/Brown" mask="url(#react-mask-1464463)" fill="#724133"><g transform="translate(-32.000000, 0.000000)" id="Color"><rect x="0" y="0" width="264" height="244"></rect></g></g></g><mask id="react-mask-1464459" fill="white"><use xlink:href="#react-path-1464461"></use></mask><use id="Short-Hair" stroke="none" fill="#28354B" fill-rule="evenodd" xlink:href="#react-path-1464461"></use><g id="Skin/👶🏽-03-Brown" mask="url(#react-mask-1464459)" fill="#724133"><g transform="translate(0.000000, 0.000000) " id="Color"><rect x="0" y="0" width="264" height="280"></rect></g></g></g></g></g></g></g></g></g>` },
+        sleeping: { vb: '0 0 264 280', corpo: `<desc>Created with getavataaars.com</desc><defs><circle id="react-path-3783726" cx="120" cy="120" r="120"></circle><path d="M12,160 C12,226.27417 65.72583,280 132,280 C198.27417,280 252,226.27417 252,160 L264,160 L264,-1.42108547e-14 L-3.19744231e-14,-1.42108547e-14 L-3.19744231e-14,160 L12,160 Z" id="react-path-3783727"></path><path d="M124,144.610951 L124,163 L128,163 L128,163 C167.764502,163 200,195.235498 200,235 L200,244 L0,244 L0,235 C-4.86974701e-15,195.235498 32.235498,163 72,163 L72,163 L76,163 L76,144.610951 C58.7626345,136.422372 46.3722246,119.687011 44.3051388,99.8812385 C38.4803105,99.0577866 34,94.0521096 34,88 L34,74 C34,68.0540074 38.3245733,63.1180731 44,62.1659169 L44,56 L44,56 C44,25.072054 69.072054,5.68137151e-15 100,0 L100,0 L100,0 C130.927946,-5.68137151e-15 156,25.072054 156,56 L156,62.1659169 C161.675427,63.1180731 166,68.0540074 166,74 L166,88 C166,94.0521096 161.51969,99.0577866 155.694861,99.8812385 C153.627775,119.687011 141.237365,136.422372 124,144.610951 Z" id="react-path-3783728"></path></defs><g id="Avataaar" stroke="none" stroke-width="1" fill="none" fill-rule="evenodd"><g transform="translate(-825.000000, -1100.000000)" id="Avataaar/Circle"><g transform="translate(825.000000, 1100.000000)"><g id="Mask"></g><g id="Avataaar" stroke-width="1" fill-rule="evenodd" mask="url(#react-mask-3783730)"><g id="Body" transform="translate(32.000000, 36.000000)"><mask id="react-mask-3783731" fill="white"><use xlink:href="#react-path-3783728"></use></mask><use fill="#D0C6AC" xlink:href="#react-path-3783728"></use><g id="Skin/👶🏽-03-Brown" mask="url(#react-mask-3783731)" fill="#EDB98A"><g transform="translate(0.000000, 0.000000)" id="Color"><rect x="0" y="0" width="264" height="280"></rect></g></g><path d="M156,79 L156,102 C156,132.927946 130.927946,158 100,158 C69.072054,158 44,132.927946 44,102 L44,79 L44,94 C44,124.927946 69.072054,150 100,150 C130.927946,150 156,124.927946 156,94 L156,79 Z" id="Neck-Shadow" fill-opacity="0.100000001" fill="#000000" mask="url(#react-mask-3783731)"></path></g><g id="Clothing/Hoodie" transform="translate(0.000000, 170.000000)"><defs><path d="M108,13.0708856 C90.0813006,15.075938 76.2798424,20.5518341 76.004203,34.6449676 C50.1464329,45.5680933 32,71.1646257 32,100.999485 L32,100.999485 L32,110 L232,110 L232,100.999485 C232,71.1646257 213.853567,45.5680933 187.995797,34.6449832 C187.720158,20.5518341 173.918699,15.075938 156,13.0708856 L156,32 L156,32 C156,45.254834 145.254834,56 132,56 L132,56 C118.745166,56 108,45.254834 108,32 L108,13.0708856 Z" id="react-path-3783732"></path></defs><mask id="react-mask-3783733" fill="white"><use xlink:href="#react-path-3783732"></use></mask><use id="Hoodie" fill="#B7C1DB" fill-rule="evenodd" xlink:href="#react-path-3783732"></use><g id="Color/Palette/Gray-01" mask="url(#react-mask-3783733)" fill-rule="evenodd" fill="#D47A36"><rect id="🖍Color" x="0" y="0" width="264" height="110"></rect></g><path d="M102,61.7390531 L102,110 L95,110 L95,58.1502625 C97.2037542,59.4600576 99.5467694,60.6607878 102,61.7390531 Z M169,58.1502625 L169,98.5 C169,100.432997 167.432997,102 165.5,102 C163.567003,102 162,100.432997 162,98.5 L162,61.7390531 C164.453231,60.6607878 166.796246,59.4600576 169,58.1502625 Z" id="Straps" fill="#F4F4F4" fill-rule="evenodd" mask="url(#react-mask-3783733)"></path><path d="M90.9601329,12.7243537 C75.9093095,15.5711782 65.5,21.2428847 65.5,32.3076923 C65.5,52.0200095 98.5376807,68 132,68 C165.462319,68 198.5,52.0200095 198.5,32.3076923 C198.5,21.2428847 188.09069,15.5711782 173.039867,12.7243537 C182.124921,16.0744598 188,21.7060546 188,31.0769231 C188,51.4689754 160.178795,68 132,68 C103.821205,68 76,51.4689754 76,31.0769231 C76,21.7060546 81.8750795,16.0744598 90.9601329,12.7243537 Z" id="Shadow" fill-opacity="0.16" fill="#000000" fill-rule="evenodd" mask="url(#react-mask-3783733)"></path></g><g id="Face" transform="translate(76.000000, 82.000000)" fill="#000000"><g id="Mouth/Serious" transform="translate(2.000000, 52.000000)" fill="#000000" fill-opacity="0.699999988"><rect id="Why-so-serious?" x="42" y="18" width="24" height="6" rx="3"></rect></g><g id="Nose/Default" transform="translate(28.000000, 40.000000)" fill-opacity="0.16"><path d="M16,8 C16,12.418278 21.372583,16 28,16 L28,16 C34.627417,16 40,12.418278 40,8" id="Nose"></path></g><g id="Eyes/Closed-😌" transform="translate(0.000000, 8.000000)" fill-opacity="0.599999964"><path d="M16.1601674,32.4473116 C18.006676,28.648508 22.1644225,26 26.9975803,26 C31.8136766,26 35.9591217,28.629842 37.8153518,32.4071242 C38.3667605,33.5291977 37.5821037,34.4474817 36.790607,33.7670228 C34.3395063,31.6597833 30.8587163,30.3437884 26.9975803,30.3437884 C23.2572061,30.3437884 19.8737584,31.5787519 17.4375392,33.5716412 C16.5467928,34.3002944 15.6201012,33.5583844 16.1601674,32.4473116 Z" id="Closed-Eye" transform="translate(27.000000, 30.000000) scale(1, -1) translate(-27.000000, -30.000000) "></path><path d="M74.1601674,32.4473116 C76.006676,28.648508 80.1644225,26 84.9975803,26 C89.8136766,26 93.9591217,28.629842 95.8153518,32.4071242 C96.3667605,33.5291977 95.5821037,34.4474817 94.790607,33.7670228 C92.3395063,31.6597833 88.8587163,30.3437884 84.9975803,30.3437884 C81.2572061,30.3437884 77.8737584,31.5787519 75.4375392,33.5716412 C74.5467928,34.3002944 73.6201012,33.5583844 74.1601674,32.4473116 Z" id="Closed-Eye" transform="translate(85.000000, 30.000000) scale(1, -1) translate(-85.000000, -30.000000) "></path></g><g id="Eyebrow/Natural/Default-Natural" fill-opacity="0.599999964"><path d="M26.0390934,6.21012364 C20.2775554,6.98346216 11.2929313,12.0052479 12.04426,17.8178111 C12.0689481,18.0080543 12.3567302,18.0673468 12.4809077,17.9084937 C14.9674041,14.7203351 34.1927973,10.0365481 41.1942673,11.0147151 C41.8350523,11.1044465 42.2580662,10.4430343 41.8210501,10.0302067 C38.0765663,6.49485426 31.2003792,5.51224825 26.0390934,6.21012364" id="Eyebrow" transform="translate(27.000000, 12.000000) rotate(5.000000) translate(-27.000000, -12.000000) "></path><path d="M85.0390934,6.21012364 C79.2775554,6.98346216 70.2929313,12.0052479 71.04426,17.8178111 C71.0689481,18.0080543 71.3567302,18.0673468 71.4809077,17.9084937 C73.9674041,14.7203351 93.1927973,10.0365481 100.194267,11.0147151 C100.835052,11.1044465 101.258066,10.4430343 100.82105,10.0302067 C97.0765663,6.49485426 90.2003792,5.51224825 85.0390934,6.21012364" id="Eyebrow" transform="translate(86.000000, 12.000000) scale(-1, 1) rotate(5.000000) translate(-86.000000, -12.000000) "></path></g></g><g id="Top" stroke-width="1" fill-rule="evenodd"><defs><rect id="react-path-3783738" x="0" y="0" width="264" height="280"></rect><path d="M94.2519269,52.0221149 C94.3749353,51.9677149 94.0696712,51.9468149 93.3361345,51.9595149 C94.2276637,51.9577149 94.5329279,51.9785149 94.2519269,52.0221149 M86.1169775,36.3015924 C86.1148422,36.2819924 86.1337548,36.4526924 86.1169775,36.3015924 M193.765056,70.7656665 C193.500946,67.448734 193.03295,64.1518864 192.246676,60.9110823 C191.622233,58.3353492 190.769007,55.8775343 189.760006,53.4200433 C189.150703,51.9353766 187.727538,49.8961062 187.560324,48.2944933 C187.395466,46.7168527 188.626521,44.969138 188.889285,43.1323368 C189.144311,41.3447761 189.100909,39.4652134 188.734183,37.6938503 C187.901144,33.6710288 185.140271,29.9300447 180.877167,28.8814158 C179.925362,28.6471994 177.913417,28.9358396 177.240862,28.3815597 C176.469729,27.7459682 175.932761,25.5806808 175.234637,24.7121687 C173.244224,22.2362125 170.13984,20.6417265 166.865887,21.1976261 C164.454917,21.606776 165.839391,22.1053363 164.032005,20.6864317 C163.027041,19.8976114 162.276095,18.6931622 161.300066,17.8392279 C159.832826,16.5563826 158.149588,15.4581893 156.408146,14.556958 C151.851325,12.19892 146.654249,10.4848961 141.564162,9.64942693 C132.278934,8.12523827 122.368926,9.45408458 113.368668,11.8688141 C108.890239,13.0703477 104.381531,14.5951842 100.222053,16.6117782 C98.4385542,17.4764029 97.4090304,18.1936301 95.5494951,18.4200717 C92.6207355,18.7767416 90.1404579,18.7589243 87.3661268,20.0009517 C78.8298269,23.8229236 74.9849256,32.6897818 78.3066539,41.1750259 C78.974835,42.8815988 79.8795374,44.3801954 81.1267416,45.7586062 C82.6474761,47.4392631 83.1975648,47.1085093 81.8877817,49.0411999 C79.9289949,51.9311653 78.2777195,55.0129095 76.9332826,58.2128958 C73.4043038,66.6145606 72.8138416,76.0771643 73.043634,85.0373203 C73.1240445,88.1741362 73.2586228,91.3495022 73.753198,94.4561907 C73.966841,95.8009106 74.0267283,98.3293468 75.0353925,99.3271154 C75.5471264,99.8331265 76.2762042,100.115288 77.0035997,99.9137903 C78.7130802,99.4401742 78.1253096,98.1787097 78.1650102,97.0076274 C78.364859,91.1240324 78.0950295,85.9191145 79.4943071,80.1064647 C80.5278683,75.8118486 82.2504702,71.9114806 84.4827873,68.0713675 C87.3213795,63.1871608 90.3857268,58.8977279 94.2895061,54.7155226 C95.2073299,53.7320079 95.4078515,53.3150832 96.6385698,53.243814 C97.5705244,53.1900382 98.9338023,53.8282213 99.8398505,54.0491558 C101.837665,54.5360539 103.83918,55.0174448 105.873331,55.3452831 C109.613261,55.9481556 113.316519,55.9886494 117.090094,55.8704074 C124.516459,55.6381346 131.974787,55.1172217 139.175061,53.2470535 C143.956964,52.00535 148.196516,49.7762443 152.776887,48.1422364 C152.858644,48.1130808 154.006596,47.2951049 154.207791,47.3284719 C154.488723,47.3747968 156.184746,49.1542588 156.471061,49.3784327 C158.696649,51.1238798 161.137899,51.8566566 163.541467,53.2081794 C166.504881,54.8745825 163.634999,52.4899804 165.269452,54.5668292 C165.745859,55.1716454 165.989782,56.2931632 166.371984,56.9783192 C167.587899,59.1610999 169.279548,61.0795367 171.302932,62.6017816 C173.258018,64.0725184 176.196198,64.7829426 177.193087,66.697168 C177.961865,68.1740599 178.220929,70.1812592 178.841334,71.7579279 C180.468722,75.8931602 182.617937,79.7494709 184.767152,83.6443317 C186.498502,86.7830913 188.392354,89.5250111 188.584801,93.1117947 C188.651754,94.3603012 187.463764,101.849397 190.357534,99.5716982 C190.786502,99.2341415 191.711391,95.415733 191.901483,94.7678314 C192.672616,92.135083 192.94682,89.3866841 193.29605,86.6816947 C193.990474,81.3021672 194.218584,76.1837441 193.765056,70.7656665" id="react-path-3783737"></path><filter x="-0.8%" y="-2.0%" width="101.5%" height="108.0%" filterUnits="objectBoundingBox" id="react-filter-3783734"><feOffset dx="0" dy="2" in="SourceAlpha" result="shadowOffsetOuter1"></feOffset><feColorMatrix values="0 0 0 0 0   0 0 0 0 0   0 0 0 0 0  0 0 0 0.16 0" type="matrix" in="shadowOffsetOuter1" result="shadowMatrixOuter1"></feColorMatrix><feMerge><feMergeNode in="shadowMatrixOuter1"></feMergeNode><feMergeNode in="SourceGraphic"></feMergeNode></feMerge></filter></defs><mask id="react-mask-3783736" fill="white"><use xlink:href="#react-path-3783738"></use></mask><g id="Mask"></g><g id="Top/Short-Hair/Short-Curly" mask="url(#react-mask-3783736)"><g transform="translate(-1.000000, 0.000000)"><g id="Facial-Hair/Beard-Medium" transform="translate(49.000000, 72.000000)"><defs><path d="M105.017591,94.1296214 C101.150441,99.7213834 98.257542,95.9467308 94.1374777,92.8762163 C91.6567227,91.0272796 87.9608129,88.7275108 84.5044337,88.8410391 C81.0477114,88.7275108 77.3518016,91.0272796 74.8710466,92.8762163 C70.7509822,95.9467308 67.8580835,99.7213834 63.9909333,94.1296214 C61.0884259,89.9323547 62.3028943,82.8739117 65.014944,78.9027173 C68.8738581,73.2512381 74.1088724,75.9847769 79.9622738,75.3400279 C81.5538829,75.1648137 83.1526985,74.7228407 84.5044337,74 C85.856169,74.7228407 87.4546414,75.1648137 89.0462504,75.3400279 C94.899995,75.9847769 100.134666,73.2512381 103.993923,78.9027173 C106.70563,82.8739117 107.920098,89.9323547 105.017591,94.1296214 M140.39109,26 C136.966521,40.0748212 135.393023,54.4337754 132.909944,68.6711471 C132.392536,71.6390145 131.826063,74.5963095 131.224594,77.5496398 C131.098329,78.1697764 130.973781,80.4725746 130.362704,80.7643064 C128.511632,81.6484223 124.739149,76.9466834 123.730409,75.8851496 C121.196893,73.219256 118.684993,70.5292442 115.599415,68.437233 C109.364783,64.2102603 102.065485,61.7108818 94.4700836,61.117837 C91.2922091,60.8693859 86.9951134,61.3025234 84.000116,63.1104016 C81.0051185,61.3025234 76.7080229,60.8693859 73.5298053,61.117837 C65.9344039,61.7108818 58.6351055,64.2102603 52.4004739,68.437233 C49.3148957,70.5292442 46.8033387,73.219256 44.2694796,75.8851496 C43.2607395,76.9466834 39.4882573,81.6484223 37.6371849,80.7643064 C37.0261079,80.4725746 36.9015594,78.1697764 36.7752954,77.5496398 C36.1738255,74.5963095 35.6073527,71.6390145 35.0899445,68.6711471 C32.6072086,54.4337754 31.0337113,40.0748212 27.6091415,26 C26.6127533,26 25.7385119,44.7478165 25.6273446,46.4945731 C25.174784,53.5889755 24.6463963,60.5254529 25.3216346,67.6261326 C26.485803,79.8749043 27.6993791,95.2339402 37.032627,104.58753 C45.4659003,113.039493 57.7103052,114.806417 68.2713185,120.141327 C69.631059,120.828202 71.4347824,121.676306 73.3798667,122.37111 C75.4289129,123.934171 79.4926946,125 84.1740722,125 C89.0846465,125 93.3155222,123.827456 95.2540874,122.137856 C96.9548781,121.49261 98.5180822,120.752874 99.7285704,120.141327 C110.288776,114.805245 122.533989,113.039493 130.967262,104.58753 C140.30051,95.2339402 141.514086,79.8749043 142.678597,67.6261326 C143.353493,60.5254529 142.825105,53.5889755 142.372887,46.4945731 C142.261377,44.7478165 141.387136,26 140.39109,26 Z" id="react-path-3783740"></path></defs><mask id="react-mask-3783739" fill="white"><use xlink:href="#react-path-3783740"></use></mask><use id="Beardness" fill="#252E32" fill-rule="evenodd" xlink:href="#react-path-3783740"></use><g id="Color/Hair/Brown" mask="url(#react-mask-3783739)" fill="#724133"><g transform="translate(-32.000000, 0.000000)" id="Color"><rect x="0" y="0" width="264" height="244"></rect></g></g></g><mask id="react-mask-3783735" fill="white"><use xlink:href="#react-path-3783737"></use></mask><use id="Short-Hair" stroke="none" fill="#28354B" fill-rule="evenodd" xlink:href="#react-path-3783737"></use><g id="Skin/👶🏽-03-Brown" mask="url(#react-mask-3783735)" fill="#724133"><g transform="translate(0.000000, 0.000000) " id="Color"><rect x="0" y="0" width="264" height="280"></rect></g></g></g></g></g></g></g></g></g>` },
       },
       testes: {
         idle: { vb: '0 0 264 280', corpo: `<desc>Created with getavataaars.com</desc><defs><circle id="react-path-1060434" cx="120" cy="120" r="120"></circle><path d="M12,160 C12,226.27417 65.72583,280 132,280 C198.27417,280 252,226.27417 252,160 L264,160 L264,-1.42108547e-14 L-3.19744231e-14,-1.42108547e-14 L-3.19744231e-14,160 L12,160 Z" id="react-path-1060435"></path><path d="M124,144.610951 L124,163 L128,163 L128,163 C167.764502,163 200,195.235498 200,235 L200,244 L0,244 L0,235 C-4.86974701e-15,195.235498 32.235498,163 72,163 L72,163 L76,163 L76,144.610951 C58.7626345,136.422372 46.3722246,119.687011 44.3051388,99.8812385 C38.4803105,99.0577866 34,94.0521096 34,88 L34,74 C34,68.0540074 38.3245733,63.1180731 44,62.1659169 L44,56 L44,56 C44,25.072054 69.072054,5.68137151e-15 100,0 L100,0 L100,0 C130.927946,-5.68137151e-15 156,25.072054 156,56 L156,62.1659169 C161.675427,63.1180731 166,68.0540074 166,74 L166,88 C166,94.0521096 161.51969,99.0577866 155.694861,99.8812385 C153.627775,119.687011 141.237365,136.422372 124,144.610951 Z" id="react-path-1060436"></path></defs><g id="Avataaar" stroke="none" stroke-width="1" fill="none" fill-rule="evenodd"><g transform="translate(-825.000000, -1100.000000)" id="Avataaar/Circle"><g transform="translate(825.000000, 1100.000000)"><g id="Mask"></g><g id="Avataaar" stroke-width="1" fill-rule="evenodd" mask="url(#react-mask-1060438)"><g id="Body" transform="translate(32.000000, 36.000000)"><mask id="react-mask-1060439" fill="white"><use xlink:href="#react-path-1060436"></use></mask><use fill="#D0C6AC" xlink:href="#react-path-1060436"></use><g id="Skin/👶🏽-03-Brown" mask="url(#react-mask-1060439)" fill="#EDB98A"><g transform="translate(0.000000, 0.000000)" id="Color"><rect x="0" y="0" width="264" height="280"></rect></g></g><path d="M156,79 L156,102 C156,132.927946 130.927946,158 100,158 C69.072054,158 44,132.927946 44,102 L44,79 L44,94 C44,124.927946 69.072054,150 100,150 C130.927946,150 156,124.927946 156,94 L156,79 Z" id="Neck-Shadow" fill-opacity="0.100000001" fill="#000000" mask="url(#react-mask-1060439)"></path></g><g id="Clothing/Shirt-Crew-Neck" transform="translate(0.000000, 170.000000)"><defs><path d="M165.960472,29.2949161 C202.936473,32.3249982 232,63.2942856 232,101.051724 L232,110 L32,110 L32,101.051724 C32,62.9525631 61.591985,31.7649812 99.0454063,29.2195264 C99.0152598,29.5931145 99,29.9692272 99,30.3476251 C99,42.2107177 113.998461,51.8276544 132.5,51.8276544 C151.001539,51.8276544 166,42.2107177 166,30.3476251 C166,29.9946691 165.986723,29.6437014 165.960472,29.2949161 Z" id="react-path-1060440"></path></defs><mask id="react-mask-1060441" fill="white"><use xlink:href="#react-path-1060440"></use></mask><use id="Clothes" fill="#E6E6E6" fill-rule="evenodd" xlink:href="#react-path-1060440"></use><g id="Color/Palette/Gray-01" mask="url(#react-mask-1060441)" fill-rule="evenodd" fill="#FF488E"><rect id="🖍Color" x="0" y="0" width="264" height="110"></rect></g><g id="Shadowy" opacity="0.599999964" stroke-width="1" fill-rule="evenodd" mask="url(#react-mask-1060441)" fill-opacity="0.16" fill="#000000"><g transform="translate(92.000000, 4.000000)" id="Hola-👋🏼"><ellipse cx="40.5" cy="27.8476251" rx="39.6351047" ry="26.9138272"></ellipse></g></g></g><g id="Face" transform="translate(76.000000, 82.000000)" fill="#000000"><g id="Mouth/Smile" transform="translate(2.000000, 52.000000)"><defs><path d="M35.117844,15.1280772 C36.1757121,24.6198025 44.2259873,32 54,32 C63.8042055,32 71.8740075,24.574136 72.8917593,15.0400546 C72.9736685,14.272746 72.1167429,13 71.042767,13 C56.1487536,13 44.7379213,13 37.0868244,13 C36.0066168,13 35.0120058,14.1784435 35.117844,15.1280772 Z" id="react-path-1060442"></path></defs><mask id="react-mask-1060443" fill="white"><use xlink:href="#react-path-1060442"></use></mask><use id="Mouth" fill-opacity="0.699999988" fill="#000000" fill-rule="evenodd" xlink:href="#react-path-1060442"></use><rect id="Teeth" fill="#FFFFFF" fill-rule="evenodd" mask="url(#react-mask-1060443)" x="39" y="2" width="31" height="16" rx="5"></rect><g id="Tongue" stroke-width="1" fill-rule="evenodd" mask="url(#react-mask-1060443)" fill="#FF4F6D"><g transform="translate(38.000000, 24.000000)"><circle cx="11" cy="11" r="11"></circle><circle cx="21" cy="11" r="11"></circle></g></g></g><g id="Nose/Default" transform="translate(28.000000, 40.000000)" fill-opacity="0.16"><path d="M16,8 C16,12.418278 21.372583,16 28,16 L28,16 C34.627417,16 40,12.418278 40,8" id="Nose"></path></g><g id="Eyes/Default-😀" transform="translate(0.000000, 8.000000)" fill-opacity="0.599999964"><circle id="Eye" cx="30" cy="22" r="6"></circle><circle id="Eye" cx="82" cy="22" r="6"></circle></g><g id="Eyebrow/Natural/Default-Natural" fill-opacity="0.599999964"><path d="M26.0390934,6.21012364 C20.2775554,6.98346216 11.2929313,12.0052479 12.04426,17.8178111 C12.0689481,18.0080543 12.3567302,18.0673468 12.4809077,17.9084937 C14.9674041,14.7203351 34.1927973,10.0365481 41.1942673,11.0147151 C41.8350523,11.1044465 42.2580662,10.4430343 41.8210501,10.0302067 C38.0765663,6.49485426 31.2003792,5.51224825 26.0390934,6.21012364" id="Eyebrow" transform="translate(27.000000, 12.000000) rotate(5.000000) translate(-27.000000, -12.000000) "></path><path d="M85.0390934,6.21012364 C79.2775554,6.98346216 70.2929313,12.0052479 71.04426,17.8178111 C71.0689481,18.0080543 71.3567302,18.0673468 71.4809077,17.9084937 C73.9674041,14.7203351 93.1927973,10.0365481 100.194267,11.0147151 C100.835052,11.1044465 101.258066,10.4430343 100.82105,10.0302067 C97.0765663,6.49485426 90.2003792,5.51224825 85.0390934,6.21012364" id="Eyebrow" transform="translate(86.000000, 12.000000) scale(-1, 1) rotate(5.000000) translate(-86.000000, -12.000000) "></path></g></g><g id="Top" stroke-width="1" fill-rule="evenodd"><defs><rect id="react-path-1060446" x="0" y="0" width="264" height="280"></rect><path d="M21,157.540812 L21,69.046252 C21,65.5140485 21.3981158,62.0748299 22.1519234,58.7710202 C25.205041,38.7314193 36.7752683,22.8108863 50,13 C69.9046441,-1.75961713 103.441939,-6.01828252 115.047069,11.5221046 C123.698343,7.68103538 136.519049,11.1821114 146,20 C155.565156,29.4150438 163.19967,50.1973768 158.657409,67.2035172 C158.762104,68.4691962 158.815476,69.7490355 158.815476,71.0408963 L158.815476,92.8921195 C157.934142,87.9183006 153.988995,84.0029116 149,83.1659169 L149,83 C142.963851,61.4642087 125.229516,51.5800472 114.429684,41.777113 C97.5353566,60.6732583 44.8226408,60.7398069 27,98 L27,108 C27,114.018625 31.4308707,119.002364 37.2085808,119.867187 C38.9518066,140.114792 51.4692178,157.282984 69,165.610951 L69,166 C71.9303712,209.855112 62.358462,264.797432 0,248 C13.6057325,240.037752 20.8081123,189.055563 21,157.540812 Z M117,165.610951 C134.530782,157.282984 147.048193,140.114792 148.791419,119.867187 C153.87876,119.105701 157.921895,115.150816 158.815476,110.107881 L158.815476,111.47039 L158.815476,111.47039 C158.815476,127.298552 162.572711,142.900645 169.7782,156.993609 L196.726668,209.701177 C203.689761,223.320048 201.645562,239.173573 192.790715,250.468968 C189.966212,213.288807 158.90349,184 121,184 L121,184 L117,184 L117,165.610951 Z" id="react-path-1060447"></path><path d="M65.1802189,77.7372986 C67.3631845,76.1045334 80.4065113,75.4786511 82.757829,74.0894494 C83.4916461,73.6553857 84.0610723,73.215719 84.4997781,72.7800074 C84.938814,73.215719 85.5085703,73.6553857 86.2423874,74.0894494 C88.593375,75.4786511 101.636702,76.1045334 103.819667,77.7372986 C106.030032,79.3908276 107.643571,83.1846831 107.466966,86.15095 C107.255041,89.7101408 103.361486,98.2028927 93.6723269,99.1811016 C91.5576925,96.8281927 88.2368647,95.3104528 84.4997781,95.3104528 C80.7633517,95.3104528 77.4421938,96.8281927 75.3275594,99.1811016 C65.6387308,98.2028927 61.7451757,89.7101408 61.5332501,86.15095 C61.3566455,83.1846831 62.9701849,79.3908276 65.1802189,77.7372986 M103.141638,94.9063813 C103.142958,94.9057221 103.144609,94.905063 103.145929,94.9047334 C103.144278,94.905063 103.142958,94.9057221 103.141638,94.9063813 M65.8453747,94.9014375 C65.8493359,94.9030855 65.8565982,94.9057221 65.8618798,94.9076997 C65.8565982,94.9057221 65.8509864,94.9034151 65.8453747,94.9014375 M144.86259,55.9853335 C144.47439,50.0303878 143.277769,44.1519058 142.233986,38.2862777 C141.952739,36.7072349 140.423706,26 139.734783,26 C139.502391,35.1094058 138.701893,44.0803858 137.669664,53.1393651 C137.361018,55.8475668 137.037848,58.5564277 136.825262,61.2741874 C136.653609,63.4695546 136.959614,66.1220564 136.427819,68.2455739 C135.749129,70.9524573 132.348087,73.4783984 129.702978,74.410795 C123.102915,76.7373371 117.597802,67.1077689 111.960977,64.2911336 C104.643272,60.6347152 92.0637391,59.7639895 84.5816434,64.5297918 C76.9361472,59.7639895 64.356614,60.6347152 57.0389092,64.2911336 C51.4024147,67.1077689 45.8969708,76.7373371 39.2972383,74.410795 C36.6521296,73.4783984 33.2504268,70.9524573 32.572397,68.2455739 C32.0402723,66.1220564 32.346277,63.4695546 32.174954,61.2741874 C31.9623682,58.5564277 31.6388681,55.8475668 31.3302226,53.1393651 C30.2983232,44.0803858 29.4974953,35.1094058 29.2654335,26 C28.5761802,26 27.0468169,36.7072349 26.7658999,38.2862777 C25.7221169,44.1519058 24.5258266,50.0303878 24.1376265,55.9853335 C23.738533,62.1047422 24.2148704,68.1674622 25.4695887,74.1632765 C26.0687242,77.0277016 26.7685407,79.8756475 27.518863,82.7041478 C28.352701,85.8467429 27.198994,91.9661516 27.5723395,95.1921317 C28.2787581,101.29572 31.1542781,113.199679 34.3833375,118.45096 C35.9440605,120.989096 37.7734867,122.573742 39.816489,124.619148 C41.7825775,126.58809 42.6038717,129.640049 44.7260985,131.73687 C48.6820428,135.645092 54.4456266,137.971304 60.3656788,138.543134 C65.6773527,143.050212 74.505605,146 84.4997781,146 C94.4946114,146 103.322534,143.050212 108.634538,138.543134 C114.55393,137.971304 120.317843,135.645092 124.274118,131.73687 C126.396015,129.640049 127.217309,126.58809 129.183727,124.619148 C131.2264,122.573742 133.055826,120.989096 134.616879,118.45096 C137.845608,113.199679 140.721458,101.29572 141.427547,95.1921317 C141.800892,91.9661516 140.647185,85.8467429 141.481353,82.7041478 C142.231676,79.8756475 142.931162,77.0277016 143.530628,74.1632765 C144.784686,68.1674622 145.261353,62.1047422 144.86259,55.9853335 Z" id="react-path-1060448"></path></defs><mask id="react-mask-1060444" fill="white"><use xlink:href="#react-path-1060446"></use></mask><g id="Mask"></g><g id="Top/Long-Hair/Straight" mask="url(#react-mask-1060444)"><g transform="translate(-1.000000, 0.000000)"><g id="Hair" stroke-width="1" fill="none" fill-rule="evenodd" transform="translate(40.000000, 15.000000)"><mask id="react-mask-1060445" fill="white"><use xlink:href="#react-path-1060447"></use></mask><use fill="#272C2E" xlink:href="#react-path-1060447"></use><g id="Skin/👶🏽-03-Brown" mask="url(#react-mask-1060445)" fill="#B58143"><g transform="translate(0.000000, 0.000000) " id="Color"><rect x="0" y="0" width="264" height="280"></rect></g></g></g><path d="M67,113 C84.8226408,80.6646674 137.535357,80.6069148 154.429684,64.2083647 C165.207546,72.6982916 182.891727,79.2665518 188.963018,97.8687161 C182.891727,76.423995 165.207546,66.5601054 154.429684,56.777113 C137.535357,75.6732583 84.8226408,75.7398069 67,113 Z" id="Shadow" fill-opacity="0.16" fill="#000000" fill-rule="evenodd"></path></g></g></g></g></g></g></g>` },
@@ -1238,6 +1603,7 @@ window.__ModuleLoader__.load({
         waiting: { vb: '0 0 264 280', corpo: `<desc>Created with getavataaars.com</desc><defs><circle id="react-path-1464691" cx="120" cy="120" r="120"></circle><path d="M12,160 C12,226.27417 65.72583,280 132,280 C198.27417,280 252,226.27417 252,160 L264,160 L264,-1.42108547e-14 L-3.19744231e-14,-1.42108547e-14 L-3.19744231e-14,160 L12,160 Z" id="react-path-1464692"></path><path d="M124,144.610951 L124,163 L128,163 L128,163 C167.764502,163 200,195.235498 200,235 L200,244 L0,244 L0,235 C-4.86974701e-15,195.235498 32.235498,163 72,163 L72,163 L76,163 L76,144.610951 C58.7626345,136.422372 46.3722246,119.687011 44.3051388,99.8812385 C38.4803105,99.0577866 34,94.0521096 34,88 L34,74 C34,68.0540074 38.3245733,63.1180731 44,62.1659169 L44,56 L44,56 C44,25.072054 69.072054,5.68137151e-15 100,0 L100,0 L100,0 C130.927946,-5.68137151e-15 156,25.072054 156,56 L156,62.1659169 C161.675427,63.1180731 166,68.0540074 166,74 L166,88 C166,94.0521096 161.51969,99.0577866 155.694861,99.8812385 C153.627775,119.687011 141.237365,136.422372 124,144.610951 Z" id="react-path-1464693"></path></defs><g id="Avataaar" stroke="none" stroke-width="1" fill="none" fill-rule="evenodd"><g transform="translate(-825.000000, -1100.000000)" id="Avataaar/Circle"><g transform="translate(825.000000, 1100.000000)"><g id="Mask"></g><g id="Avataaar" stroke-width="1" fill-rule="evenodd" mask="url(#react-mask-1464695)"><g id="Body" transform="translate(32.000000, 36.000000)"><mask id="react-mask-1464696" fill="white"><use xlink:href="#react-path-1464693"></use></mask><use fill="#D0C6AC" xlink:href="#react-path-1464693"></use><g id="Skin/👶🏽-03-Brown" mask="url(#react-mask-1464696)" fill="#EDB98A"><g transform="translate(0.000000, 0.000000)" id="Color"><rect x="0" y="0" width="264" height="280"></rect></g></g><path d="M156,79 L156,102 C156,132.927946 130.927946,158 100,158 C69.072054,158 44,132.927946 44,102 L44,79 L44,94 C44,124.927946 69.072054,150 100,150 C130.927946,150 156,124.927946 156,94 L156,79 Z" id="Neck-Shadow" fill-opacity="0.100000001" fill="#000000" mask="url(#react-mask-1464696)"></path></g><g id="Clothing/Shirt-Crew-Neck" transform="translate(0.000000, 170.000000)"><defs><path d="M165.960472,29.2949161 C202.936473,32.3249982 232,63.2942856 232,101.051724 L232,110 L32,110 L32,101.051724 C32,62.9525631 61.591985,31.7649812 99.0454063,29.2195264 C99.0152598,29.5931145 99,29.9692272 99,30.3476251 C99,42.2107177 113.998461,51.8276544 132.5,51.8276544 C151.001539,51.8276544 166,42.2107177 166,30.3476251 C166,29.9946691 165.986723,29.6437014 165.960472,29.2949161 Z" id="react-path-1464697"></path></defs><mask id="react-mask-1464698" fill="white"><use xlink:href="#react-path-1464697"></use></mask><use id="Clothes" fill="#E6E6E6" fill-rule="evenodd" xlink:href="#react-path-1464697"></use><g id="Color/Palette/Gray-01" mask="url(#react-mask-1464698)" fill-rule="evenodd" fill="#FF488E"><rect id="🖍Color" x="0" y="0" width="264" height="110"></rect></g><g id="Shadowy" opacity="0.599999964" stroke-width="1" fill-rule="evenodd" mask="url(#react-mask-1464698)" fill-opacity="0.16" fill="#000000"><g transform="translate(92.000000, 4.000000)" id="Hola-👋🏼"><ellipse cx="40.5" cy="27.8476251" rx="39.6351047" ry="26.9138272"></ellipse></g></g></g><g id="Face" transform="translate(76.000000, 82.000000)" fill="#000000"><g id="Mouth/Sad" transform="translate(2.000000, 52.000000)" fill-opacity="0.699999988" fill="#000000"><path d="M40.0582943,16.6539438 C40.7076459,23.6831146 46.7016363,28.3768187 54,28.3768187 C61.3416045,28.3768187 67.3633339,23.627332 67.9526838,16.5287605 C67.9840218,16.1513016 67.0772329,15.8529531 66.6289111,16.077395 C61.0902255,18.8502083 56.8805885,20.2366149 54,20.2366149 C51.1558456,20.2366149 47.0072148,18.8804569 41.5541074,16.168141 C41.0473376,15.9160792 40.0197139,16.2363147 40.0582943,16.6539438 Z" id="Mouth" transform="translate(54.005357, 22.188409) scale(1, -1) translate(-54.005357, -22.188409) "></path></g><g id="Nose/Default" transform="translate(28.000000, 40.000000)" fill-opacity="0.16"><path d="M16,8 C16,12.418278 21.372583,16 28,16 L28,16 C34.627417,16 40,12.418278 40,8" id="Nose"></path></g><g id="Eyes/Default-😀" transform="translate(0.000000, 8.000000)" fill-opacity="0.599999964"><circle id="Eye" cx="30" cy="22" r="6"></circle><circle id="Eye" cx="82" cy="22" r="6"></circle></g><g id="Eyebrow/Outline/Sad-Concerned" fill-opacity="0.599999964" fill-rule="nonzero"><path d="M15.9726042,19.4088529 C17.452356,11.0203704 30.0622688,5.22829657 39.2106453,8.9774793 C40.2254706,9.39337449 41.4016967,8.94600219 41.8378196,7.97824531 C42.2739426,7.01048842 41.8048116,5.88881678 40.7899862,5.47292159 C29.3457328,0.782843812 13.9550264,7.85221132 12.0280273,18.7760684 C11.84479,19.8148122 12.5792704,20.798534 13.6685352,20.9732726 C14.7578,21.1480113 15.7893668,20.4475967 15.9726042,19.4088529 Z" id="Eyebrow" transform="translate(27.000414, 12.500000) scale(-1, -1) translate(-27.000414, -12.500000) "></path><path d="M73.9726042,19.4088529 C75.452356,11.0203704 88.0622688,5.22829657 97.2106453,8.9774793 C98.2254706,9.39337449 99.4016967,8.94600219 99.8378196,7.97824531 C100.273943,7.01048842 99.8048116,5.88881678 98.7899862,5.47292159 C87.3457328,0.782843812 71.9550264,7.85221132 70.0280273,18.7760684 C69.84479,19.8148122 70.5792704,20.798534 71.6685352,20.9732726 C72.7578,21.1480113 73.7893668,20.4475967 73.9726042,19.4088529 Z" id="Eyebrow" transform="translate(85.000414, 12.500000) scale(1, -1) translate(-85.000414, -12.500000) "></path></g></g><g id="Top" stroke-width="1" fill-rule="evenodd"><defs><rect id="react-path-1464701" x="0" y="0" width="264" height="280"></rect><path d="M21,157.540812 L21,69.046252 C21,65.5140485 21.3981158,62.0748299 22.1519234,58.7710202 C25.205041,38.7314193 36.7752683,22.8108863 50,13 C69.9046441,-1.75961713 103.441939,-6.01828252 115.047069,11.5221046 C123.698343,7.68103538 136.519049,11.1821114 146,20 C155.565156,29.4150438 163.19967,50.1973768 158.657409,67.2035172 C158.762104,68.4691962 158.815476,69.7490355 158.815476,71.0408963 L158.815476,92.8921195 C157.934142,87.9183006 153.988995,84.0029116 149,83.1659169 L149,83 C142.963851,61.4642087 125.229516,51.5800472 114.429684,41.777113 C97.5353566,60.6732583 44.8226408,60.7398069 27,98 L27,108 C27,114.018625 31.4308707,119.002364 37.2085808,119.867187 C38.9518066,140.114792 51.4692178,157.282984 69,165.610951 L69,166 C71.9303712,209.855112 62.358462,264.797432 0,248 C13.6057325,240.037752 20.8081123,189.055563 21,157.540812 Z M117,165.610951 C134.530782,157.282984 147.048193,140.114792 148.791419,119.867187 C153.87876,119.105701 157.921895,115.150816 158.815476,110.107881 L158.815476,111.47039 L158.815476,111.47039 C158.815476,127.298552 162.572711,142.900645 169.7782,156.993609 L196.726668,209.701177 C203.689761,223.320048 201.645562,239.173573 192.790715,250.468968 C189.966212,213.288807 158.90349,184 121,184 L121,184 L117,184 L117,165.610951 Z" id="react-path-1464702"></path><path d="M65.1802189,77.7372986 C67.3631845,76.1045334 80.4065113,75.4786511 82.757829,74.0894494 C83.4916461,73.6553857 84.0610723,73.215719 84.4997781,72.7800074 C84.938814,73.215719 85.5085703,73.6553857 86.2423874,74.0894494 C88.593375,75.4786511 101.636702,76.1045334 103.819667,77.7372986 C106.030032,79.3908276 107.643571,83.1846831 107.466966,86.15095 C107.255041,89.7101408 103.361486,98.2028927 93.6723269,99.1811016 C91.5576925,96.8281927 88.2368647,95.3104528 84.4997781,95.3104528 C80.7633517,95.3104528 77.4421938,96.8281927 75.3275594,99.1811016 C65.6387308,98.2028927 61.7451757,89.7101408 61.5332501,86.15095 C61.3566455,83.1846831 62.9701849,79.3908276 65.1802189,77.7372986 M103.141638,94.9063813 C103.142958,94.9057221 103.144609,94.905063 103.145929,94.9047334 C103.144278,94.905063 103.142958,94.9057221 103.141638,94.9063813 M65.8453747,94.9014375 C65.8493359,94.9030855 65.8565982,94.9057221 65.8618798,94.9076997 C65.8565982,94.9057221 65.8509864,94.9034151 65.8453747,94.9014375 M144.86259,55.9853335 C144.47439,50.0303878 143.277769,44.1519058 142.233986,38.2862777 C141.952739,36.7072349 140.423706,26 139.734783,26 C139.502391,35.1094058 138.701893,44.0803858 137.669664,53.1393651 C137.361018,55.8475668 137.037848,58.5564277 136.825262,61.2741874 C136.653609,63.4695546 136.959614,66.1220564 136.427819,68.2455739 C135.749129,70.9524573 132.348087,73.4783984 129.702978,74.410795 C123.102915,76.7373371 117.597802,67.1077689 111.960977,64.2911336 C104.643272,60.6347152 92.0637391,59.7639895 84.5816434,64.5297918 C76.9361472,59.7639895 64.356614,60.6347152 57.0389092,64.2911336 C51.4024147,67.1077689 45.8969708,76.7373371 39.2972383,74.410795 C36.6521296,73.4783984 33.2504268,70.9524573 32.572397,68.2455739 C32.0402723,66.1220564 32.346277,63.4695546 32.174954,61.2741874 C31.9623682,58.5564277 31.6388681,55.8475668 31.3302226,53.1393651 C30.2983232,44.0803858 29.4974953,35.1094058 29.2654335,26 C28.5761802,26 27.0468169,36.7072349 26.7658999,38.2862777 C25.7221169,44.1519058 24.5258266,50.0303878 24.1376265,55.9853335 C23.738533,62.1047422 24.2148704,68.1674622 25.4695887,74.1632765 C26.0687242,77.0277016 26.7685407,79.8756475 27.518863,82.7041478 C28.352701,85.8467429 27.198994,91.9661516 27.5723395,95.1921317 C28.2787581,101.29572 31.1542781,113.199679 34.3833375,118.45096 C35.9440605,120.989096 37.7734867,122.573742 39.816489,124.619148 C41.7825775,126.58809 42.6038717,129.640049 44.7260985,131.73687 C48.6820428,135.645092 54.4456266,137.971304 60.3656788,138.543134 C65.6773527,143.050212 74.505605,146 84.4997781,146 C94.4946114,146 103.322534,143.050212 108.634538,138.543134 C114.55393,137.971304 120.317843,135.645092 124.274118,131.73687 C126.396015,129.640049 127.217309,126.58809 129.183727,124.619148 C131.2264,122.573742 133.055826,120.989096 134.616879,118.45096 C137.845608,113.199679 140.721458,101.29572 141.427547,95.1921317 C141.800892,91.9661516 140.647185,85.8467429 141.481353,82.7041478 C142.231676,79.8756475 142.931162,77.0277016 143.530628,74.1632765 C144.784686,68.1674622 145.261353,62.1047422 144.86259,55.9853335 Z" id="react-path-1464703"></path></defs><mask id="react-mask-1464699" fill="white"><use xlink:href="#react-path-1464701"></use></mask><g id="Mask"></g><g id="Top/Long-Hair/Straight" mask="url(#react-mask-1464699)"><g transform="translate(-1.000000, 0.000000)"><g id="Hair" stroke-width="1" fill="none" fill-rule="evenodd" transform="translate(40.000000, 15.000000)"><mask id="react-mask-1464700" fill="white"><use xlink:href="#react-path-1464702"></use></mask><use fill="#272C2E" xlink:href="#react-path-1464702"></use><g id="Skin/👶🏽-03-Brown" mask="url(#react-mask-1464700)" fill="#B58143"><g transform="translate(0.000000, 0.000000) " id="Color"><rect x="0" y="0" width="264" height="280"></rect></g></g></g><path d="M67,113 C84.8226408,80.6646674 137.535357,80.6069148 154.429684,64.2083647 C165.207546,72.6982916 182.891727,79.2665518 188.963018,97.8687161 C182.891727,76.423995 165.207546,66.5601054 154.429684,56.777113 C137.535357,75.6732583 84.8226408,75.7398069 67,113 Z" id="Shadow" fill-opacity="0.16" fill="#000000" fill-rule="evenodd"></path></g></g></g></g></g></g></g>` },
         error: { vb: '0 0 264 280', corpo: `<desc>Created with getavataaars.com</desc><defs><circle id="react-path-1464816" cx="120" cy="120" r="120"></circle><path d="M12,160 C12,226.27417 65.72583,280 132,280 C198.27417,280 252,226.27417 252,160 L264,160 L264,-1.42108547e-14 L-3.19744231e-14,-1.42108547e-14 L-3.19744231e-14,160 L12,160 Z" id="react-path-1464817"></path><path d="M124,144.610951 L124,163 L128,163 L128,163 C167.764502,163 200,195.235498 200,235 L200,244 L0,244 L0,235 C-4.86974701e-15,195.235498 32.235498,163 72,163 L72,163 L76,163 L76,144.610951 C58.7626345,136.422372 46.3722246,119.687011 44.3051388,99.8812385 C38.4803105,99.0577866 34,94.0521096 34,88 L34,74 C34,68.0540074 38.3245733,63.1180731 44,62.1659169 L44,56 L44,56 C44,25.072054 69.072054,5.68137151e-15 100,0 L100,0 L100,0 C130.927946,-5.68137151e-15 156,25.072054 156,56 L156,62.1659169 C161.675427,63.1180731 166,68.0540074 166,74 L166,88 C166,94.0521096 161.51969,99.0577866 155.694861,99.8812385 C153.627775,119.687011 141.237365,136.422372 124,144.610951 Z" id="react-path-1464818"></path></defs><g id="Avataaar" stroke="none" stroke-width="1" fill="none" fill-rule="evenodd"><g transform="translate(-825.000000, -1100.000000)" id="Avataaar/Circle"><g transform="translate(825.000000, 1100.000000)"><g id="Mask"></g><g id="Avataaar" stroke-width="1" fill-rule="evenodd" mask="url(#react-mask-1464820)"><g id="Body" transform="translate(32.000000, 36.000000)"><mask id="react-mask-1464821" fill="white"><use xlink:href="#react-path-1464818"></use></mask><use fill="#D0C6AC" xlink:href="#react-path-1464818"></use><g id="Skin/👶🏽-03-Brown" mask="url(#react-mask-1464821)" fill="#EDB98A"><g transform="translate(0.000000, 0.000000)" id="Color"><rect x="0" y="0" width="264" height="280"></rect></g></g><path d="M156,79 L156,102 C156,132.927946 130.927946,158 100,158 C69.072054,158 44,132.927946 44,102 L44,79 L44,94 C44,124.927946 69.072054,150 100,150 C130.927946,150 156,124.927946 156,94 L156,79 Z" id="Neck-Shadow" fill-opacity="0.100000001" fill="#000000" mask="url(#react-mask-1464821)"></path></g><g id="Clothing/Shirt-Crew-Neck" transform="translate(0.000000, 170.000000)"><defs><path d="M165.960472,29.2949161 C202.936473,32.3249982 232,63.2942856 232,101.051724 L232,110 L32,110 L32,101.051724 C32,62.9525631 61.591985,31.7649812 99.0454063,29.2195264 C99.0152598,29.5931145 99,29.9692272 99,30.3476251 C99,42.2107177 113.998461,51.8276544 132.5,51.8276544 C151.001539,51.8276544 166,42.2107177 166,30.3476251 C166,29.9946691 165.986723,29.6437014 165.960472,29.2949161 Z" id="react-path-1464822"></path></defs><mask id="react-mask-1464823" fill="white"><use xlink:href="#react-path-1464822"></use></mask><use id="Clothes" fill="#E6E6E6" fill-rule="evenodd" xlink:href="#react-path-1464822"></use><g id="Color/Palette/Gray-01" mask="url(#react-mask-1464823)" fill-rule="evenodd" fill="#FF488E"><rect id="🖍Color" x="0" y="0" width="264" height="110"></rect></g><g id="Shadowy" opacity="0.599999964" stroke-width="1" fill-rule="evenodd" mask="url(#react-mask-1464823)" fill-opacity="0.16" fill="#000000"><g transform="translate(92.000000, 4.000000)" id="Hola-👋🏼"><ellipse cx="40.5" cy="27.8476251" rx="39.6351047" ry="26.9138272"></ellipse></g></g></g><g id="Face" transform="translate(76.000000, 82.000000)" fill="#000000"><g id="Mouth/Grimace" transform="translate(2.000000, 52.000000)"><defs><rect id="react-path-1464824" x="24" y="9" width="60" height="22" rx="11"></rect></defs><rect id="Mouth" fill-opacity="0.599999964" fill="#000000" fill-rule="evenodd" x="22" y="7" width="64" height="26" rx="13"></rect><mask id="react-mask-1464825" fill="white"><use xlink:href="#react-path-1464824"></use></mask><use id="Mouth" fill="#FFFFFF" fill-rule="evenodd" xlink:href="#react-path-1464824"></use><path d="M71,22 L62,22 L62,34 L58,34 L58,22 L49,22 L49,34 L45,34 L45,22 L36,22 L36,34 L32,34 L32,22 L24,22 L24,18 L32,18 L32,6 L36,6 L36,18 L45,18 L45,6 L49,6 L49,18 L58,18 L58,6 L62,6 L62,18 L71,18 L71,6 L75,6 L75,18 L83.8666667,18 L83.8666667,22 L75,22 L75,34 L71,34 L71,22 Z" id="Grimace-Teeth" fill="#E6E6E6" fill-rule="evenodd" mask="url(#react-mask-1464825)"></path></g><g id="Nose/Default" transform="translate(28.000000, 40.000000)" fill-opacity="0.16"><path d="M16,8 C16,12.418278 21.372583,16 28,16 L28,16 C34.627417,16 40,12.418278 40,8" id="Nose"></path></g><g id="Eyes/Cry-😢" transform="translate(0.000000, 8.000000)"><circle id="Eye" fill-opacity="0.599999964" fill="#000000" fill-rule="evenodd" cx="30" cy="22" r="6"></circle><path d="M25,27 C25,27 19,34.2706667 19,38.2706667 C19,41.5846667 21.686,44.2706667 25,44.2706667 C28.314,44.2706667 31,41.5846667 31,38.2706667 C31,34.2706667 25,27 25,27 Z" id="Drop" fill="#92D9FF" fill-rule="nonzero"></path><circle id="Eye" fill-opacity="0.599999964" fill="#000000" fill-rule="evenodd" cx="82" cy="22" r="6"></circle></g><g id="Eyebrow/Natural/Angry-Natural" fill-opacity="0.599999964"><path d="M44.8565785,12.2282877 C44.8578785,12.2192877 44.8578785,12.2192877 44.8565785,12.2282877 M17.5862288,7.89238094 C15.2441598,8.3302947 13.0866155,9.78806858 12.1523766,12.0987479 C11.8009169,12.967391 11.3917103,14.9243181 11.7083227,15.8073302 C11.8284629,16.14295 12.0332321,16.1008692 12.9555234,16.0430509 C14.643791,15.9369937 16.9330912,13.6622369 18.7484684,13.2557982 C21.2753939,12.6899315 23.9825295,13.1148447 26.4961798,13.6882381 C30.8109365,14.6725177 36.4854008,17.7875215 40.9461842,16.1699775 C41.2783949,16.0495512 45.6210294,12.9225732 44.3685187,12.2769925 C43.9238011,11.9068186 41.1370145,12.0854053 40.6216067,11.9988489 C38.2277647,11.5971998 35.7297127,10.9345131 33.373373,10.3265657 C28.2329017,9.00016592 22.9666484,6.88073171 17.5862288,7.89238094" id="Eyebrows-The-Web" transform="translate(28.094701, 12.127505) rotate(17.000000) translate(-28.094701, -12.127505) "></path><path d="M100.918293,12.2094196 C100.919593,12.2004196 100.919593,12.2004196 100.918293,12.2094196 M73.5862288,7.89238094 C71.2441598,8.3302947 69.0866155,9.78806858 68.1523766,12.0987479 C67.8009169,12.967391 67.3917103,14.9243181 67.7083227,15.8073302 C67.8284629,16.14295 68.0332321,16.1008692 68.9555234,16.0430509 C70.643791,15.9369937 72.9330912,13.6622369 74.7484684,13.2557982 C77.2753939,12.6899315 79.9825295,13.1148447 82.4961798,13.6882381 C86.8109365,14.6725177 92.4854008,17.7875215 96.9461842,16.1699775 C97.2783949,16.0495512 101.621029,12.9225732 100.368519,12.2769925 C99.9238011,11.9068186 97.1370145,12.0854053 96.6216067,11.9988489 C94.2277647,11.5971998 91.7297127,10.9345131 89.373373,10.3265657 C84.2329017,9.00016592 78.9666484,6.88073171 73.5862288,7.89238094" id="Eyebrows-The-Web" transform="translate(84.094701, 12.127505) scale(-1, 1) rotate(17.000000) translate(-84.094701, -12.127505) "></path></g></g><g id="Top" stroke-width="1" fill-rule="evenodd"><defs><rect id="react-path-1464828" x="0" y="0" width="264" height="280"></rect><path d="M21,157.540812 L21,69.046252 C21,65.5140485 21.3981158,62.0748299 22.1519234,58.7710202 C25.205041,38.7314193 36.7752683,22.8108863 50,13 C69.9046441,-1.75961713 103.441939,-6.01828252 115.047069,11.5221046 C123.698343,7.68103538 136.519049,11.1821114 146,20 C155.565156,29.4150438 163.19967,50.1973768 158.657409,67.2035172 C158.762104,68.4691962 158.815476,69.7490355 158.815476,71.0408963 L158.815476,92.8921195 C157.934142,87.9183006 153.988995,84.0029116 149,83.1659169 L149,83 C142.963851,61.4642087 125.229516,51.5800472 114.429684,41.777113 C97.5353566,60.6732583 44.8226408,60.7398069 27,98 L27,108 C27,114.018625 31.4308707,119.002364 37.2085808,119.867187 C38.9518066,140.114792 51.4692178,157.282984 69,165.610951 L69,166 C71.9303712,209.855112 62.358462,264.797432 0,248 C13.6057325,240.037752 20.8081123,189.055563 21,157.540812 Z M117,165.610951 C134.530782,157.282984 147.048193,140.114792 148.791419,119.867187 C153.87876,119.105701 157.921895,115.150816 158.815476,110.107881 L158.815476,111.47039 L158.815476,111.47039 C158.815476,127.298552 162.572711,142.900645 169.7782,156.993609 L196.726668,209.701177 C203.689761,223.320048 201.645562,239.173573 192.790715,250.468968 C189.966212,213.288807 158.90349,184 121,184 L121,184 L117,184 L117,165.610951 Z" id="react-path-1464829"></path><path d="M65.1802189,77.7372986 C67.3631845,76.1045334 80.4065113,75.4786511 82.757829,74.0894494 C83.4916461,73.6553857 84.0610723,73.215719 84.4997781,72.7800074 C84.938814,73.215719 85.5085703,73.6553857 86.2423874,74.0894494 C88.593375,75.4786511 101.636702,76.1045334 103.819667,77.7372986 C106.030032,79.3908276 107.643571,83.1846831 107.466966,86.15095 C107.255041,89.7101408 103.361486,98.2028927 93.6723269,99.1811016 C91.5576925,96.8281927 88.2368647,95.3104528 84.4997781,95.3104528 C80.7633517,95.3104528 77.4421938,96.8281927 75.3275594,99.1811016 C65.6387308,98.2028927 61.7451757,89.7101408 61.5332501,86.15095 C61.3566455,83.1846831 62.9701849,79.3908276 65.1802189,77.7372986 M103.141638,94.9063813 C103.142958,94.9057221 103.144609,94.905063 103.145929,94.9047334 C103.144278,94.905063 103.142958,94.9057221 103.141638,94.9063813 M65.8453747,94.9014375 C65.8493359,94.9030855 65.8565982,94.9057221 65.8618798,94.9076997 C65.8565982,94.9057221 65.8509864,94.9034151 65.8453747,94.9014375 M144.86259,55.9853335 C144.47439,50.0303878 143.277769,44.1519058 142.233986,38.2862777 C141.952739,36.7072349 140.423706,26 139.734783,26 C139.502391,35.1094058 138.701893,44.0803858 137.669664,53.1393651 C137.361018,55.8475668 137.037848,58.5564277 136.825262,61.2741874 C136.653609,63.4695546 136.959614,66.1220564 136.427819,68.2455739 C135.749129,70.9524573 132.348087,73.4783984 129.702978,74.410795 C123.102915,76.7373371 117.597802,67.1077689 111.960977,64.2911336 C104.643272,60.6347152 92.0637391,59.7639895 84.5816434,64.5297918 C76.9361472,59.7639895 64.356614,60.6347152 57.0389092,64.2911336 C51.4024147,67.1077689 45.8969708,76.7373371 39.2972383,74.410795 C36.6521296,73.4783984 33.2504268,70.9524573 32.572397,68.2455739 C32.0402723,66.1220564 32.346277,63.4695546 32.174954,61.2741874 C31.9623682,58.5564277 31.6388681,55.8475668 31.3302226,53.1393651 C30.2983232,44.0803858 29.4974953,35.1094058 29.2654335,26 C28.5761802,26 27.0468169,36.7072349 26.7658999,38.2862777 C25.7221169,44.1519058 24.5258266,50.0303878 24.1376265,55.9853335 C23.738533,62.1047422 24.2148704,68.1674622 25.4695887,74.1632765 C26.0687242,77.0277016 26.7685407,79.8756475 27.518863,82.7041478 C28.352701,85.8467429 27.198994,91.9661516 27.5723395,95.1921317 C28.2787581,101.29572 31.1542781,113.199679 34.3833375,118.45096 C35.9440605,120.989096 37.7734867,122.573742 39.816489,124.619148 C41.7825775,126.58809 42.6038717,129.640049 44.7260985,131.73687 C48.6820428,135.645092 54.4456266,137.971304 60.3656788,138.543134 C65.6773527,143.050212 74.505605,146 84.4997781,146 C94.4946114,146 103.322534,143.050212 108.634538,138.543134 C114.55393,137.971304 120.317843,135.645092 124.274118,131.73687 C126.396015,129.640049 127.217309,126.58809 129.183727,124.619148 C131.2264,122.573742 133.055826,120.989096 134.616879,118.45096 C137.845608,113.199679 140.721458,101.29572 141.427547,95.1921317 C141.800892,91.9661516 140.647185,85.8467429 141.481353,82.7041478 C142.231676,79.8756475 142.931162,77.0277016 143.530628,74.1632765 C144.784686,68.1674622 145.261353,62.1047422 144.86259,55.9853335 Z" id="react-path-1464830"></path></defs><mask id="react-mask-1464826" fill="white"><use xlink:href="#react-path-1464828"></use></mask><g id="Mask"></g><g id="Top/Long-Hair/Straight" mask="url(#react-mask-1464826)"><g transform="translate(-1.000000, 0.000000)"><g id="Hair" stroke-width="1" fill="none" fill-rule="evenodd" transform="translate(40.000000, 15.000000)"><mask id="react-mask-1464827" fill="white"><use xlink:href="#react-path-1464829"></use></mask><use fill="#272C2E" xlink:href="#react-path-1464829"></use><g id="Skin/👶🏽-03-Brown" mask="url(#react-mask-1464827)" fill="#B58143"><g transform="translate(0.000000, 0.000000) " id="Color"><rect x="0" y="0" width="264" height="280"></rect></g></g></g><path d="M67,113 C84.8226408,80.6646674 137.535357,80.6069148 154.429684,64.2083647 C165.207546,72.6982916 182.891727,79.2665518 188.963018,97.8687161 C182.891727,76.423995 165.207546,66.5601054 154.429684,56.777113 C137.535357,75.6732583 84.8226408,75.7398069 67,113 Z" id="Shadow" fill-opacity="0.16" fill="#000000" fill-rule="evenodd"></path></g></g></g></g></g></g></g>` },
         success: { vb: '0 0 264 280', corpo: `<desc>Created with getavataaars.com</desc><defs><circle id="react-path-1464735" cx="120" cy="120" r="120"></circle><path d="M12,160 C12,226.27417 65.72583,280 132,280 C198.27417,280 252,226.27417 252,160 L264,160 L264,-1.42108547e-14 L-3.19744231e-14,-1.42108547e-14 L-3.19744231e-14,160 L12,160 Z" id="react-path-1464736"></path><path d="M124,144.610951 L124,163 L128,163 L128,163 C167.764502,163 200,195.235498 200,235 L200,244 L0,244 L0,235 C-4.86974701e-15,195.235498 32.235498,163 72,163 L72,163 L76,163 L76,144.610951 C58.7626345,136.422372 46.3722246,119.687011 44.3051388,99.8812385 C38.4803105,99.0577866 34,94.0521096 34,88 L34,74 C34,68.0540074 38.3245733,63.1180731 44,62.1659169 L44,56 L44,56 C44,25.072054 69.072054,5.68137151e-15 100,0 L100,0 L100,0 C130.927946,-5.68137151e-15 156,25.072054 156,56 L156,62.1659169 C161.675427,63.1180731 166,68.0540074 166,74 L166,88 C166,94.0521096 161.51969,99.0577866 155.694861,99.8812385 C153.627775,119.687011 141.237365,136.422372 124,144.610951 Z" id="react-path-1464737"></path></defs><g id="Avataaar" stroke="none" stroke-width="1" fill="none" fill-rule="evenodd"><g transform="translate(-825.000000, -1100.000000)" id="Avataaar/Circle"><g transform="translate(825.000000, 1100.000000)"><g id="Mask"></g><g id="Avataaar" stroke-width="1" fill-rule="evenodd" mask="url(#react-mask-1464739)"><g id="Body" transform="translate(32.000000, 36.000000)"><mask id="react-mask-1464740" fill="white"><use xlink:href="#react-path-1464737"></use></mask><use fill="#D0C6AC" xlink:href="#react-path-1464737"></use><g id="Skin/👶🏽-03-Brown" mask="url(#react-mask-1464740)" fill="#EDB98A"><g transform="translate(0.000000, 0.000000)" id="Color"><rect x="0" y="0" width="264" height="280"></rect></g></g><path d="M156,79 L156,102 C156,132.927946 130.927946,158 100,158 C69.072054,158 44,132.927946 44,102 L44,79 L44,94 C44,124.927946 69.072054,150 100,150 C130.927946,150 156,124.927946 156,94 L156,79 Z" id="Neck-Shadow" fill-opacity="0.100000001" fill="#000000" mask="url(#react-mask-1464740)"></path></g><g id="Clothing/Shirt-Crew-Neck" transform="translate(0.000000, 170.000000)"><defs><path d="M165.960472,29.2949161 C202.936473,32.3249982 232,63.2942856 232,101.051724 L232,110 L32,110 L32,101.051724 C32,62.9525631 61.591985,31.7649812 99.0454063,29.2195264 C99.0152598,29.5931145 99,29.9692272 99,30.3476251 C99,42.2107177 113.998461,51.8276544 132.5,51.8276544 C151.001539,51.8276544 166,42.2107177 166,30.3476251 C166,29.9946691 165.986723,29.6437014 165.960472,29.2949161 Z" id="react-path-1464741"></path></defs><mask id="react-mask-1464742" fill="white"><use xlink:href="#react-path-1464741"></use></mask><use id="Clothes" fill="#E6E6E6" fill-rule="evenodd" xlink:href="#react-path-1464741"></use><g id="Color/Palette/Gray-01" mask="url(#react-mask-1464742)" fill-rule="evenodd" fill="#FF488E"><rect id="🖍Color" x="0" y="0" width="264" height="110"></rect></g><g id="Shadowy" opacity="0.599999964" stroke-width="1" fill-rule="evenodd" mask="url(#react-mask-1464742)" fill-opacity="0.16" fill="#000000"><g transform="translate(92.000000, 4.000000)" id="Hola-👋🏼"><ellipse cx="40.5" cy="27.8476251" rx="39.6351047" ry="26.9138272"></ellipse></g></g></g><g id="Face" transform="translate(76.000000, 82.000000)" fill="#000000"><g id="Mouth/Smile" transform="translate(2.000000, 52.000000)"><defs><path d="M35.117844,15.1280772 C36.1757121,24.6198025 44.2259873,32 54,32 C63.8042055,32 71.8740075,24.574136 72.8917593,15.0400546 C72.9736685,14.272746 72.1167429,13 71.042767,13 C56.1487536,13 44.7379213,13 37.0868244,13 C36.0066168,13 35.0120058,14.1784435 35.117844,15.1280772 Z" id="react-path-1464743"></path></defs><mask id="react-mask-1464744" fill="white"><use xlink:href="#react-path-1464743"></use></mask><use id="Mouth" fill-opacity="0.699999988" fill="#000000" fill-rule="evenodd" xlink:href="#react-path-1464743"></use><rect id="Teeth" fill="#FFFFFF" fill-rule="evenodd" mask="url(#react-mask-1464744)" x="39" y="2" width="31" height="16" rx="5"></rect><g id="Tongue" stroke-width="1" fill-rule="evenodd" mask="url(#react-mask-1464744)" fill="#FF4F6D"><g transform="translate(38.000000, 24.000000)"><circle cx="11" cy="11" r="11"></circle><circle cx="21" cy="11" r="11"></circle></g></g></g><g id="Nose/Default" transform="translate(28.000000, 40.000000)" fill-opacity="0.16"><path d="M16,8 C16,12.418278 21.372583,16 28,16 L28,16 C34.627417,16 40,12.418278 40,8" id="Nose"></path></g><g id="Eyes/Happy-😁" transform="translate(0.000000, 8.000000)" fill-opacity="0.599999964"><path d="M16.1601674,22.4473116 C18.006676,18.648508 22.1644225,16 26.9975803,16 C31.8136766,16 35.9591217,18.629842 37.8153518,22.4071242 C38.3667605,23.5291977 37.5821037,24.4474817 36.790607,23.7670228 C34.3395063,21.6597833 30.8587163,20.3437884 26.9975803,20.3437884 C23.2572061,20.3437884 19.8737584,21.5787519 17.4375392,23.5716412 C16.5467928,24.3002944 15.6201012,23.5583844 16.1601674,22.4473116 Z" id="Squint"></path><path d="M74.1601674,22.4473116 C76.006676,18.648508 80.1644225,16 84.9975803,16 C89.8136766,16 93.9591217,18.629842 95.8153518,22.4071242 C96.3667605,23.5291977 95.5821037,24.4474817 94.790607,23.7670228 C92.3395063,21.6597833 88.8587163,20.3437884 84.9975803,20.3437884 C81.2572061,20.3437884 77.8737584,21.5787519 75.4375392,23.5716412 C74.5467928,24.3002944 73.6201012,23.5583844 74.1601674,22.4473116 Z" id="Squint"></path></g><g id="Eyebrow/Natural/Raised-Excited-Natural" fill-opacity="0.599999964"><path d="M22.7663531,1.57844898 L23.6772984,1.17582144 C28.9190996,-0.905265751 36.8645466,-0.0328729562 41.7227321,2.29911638 C42.2897848,2.57148957 41.9021563,3.4519421 41.3211012,3.40711006 C26.4021788,2.25602197 16.3582869,11.5525942 12.9460869,17.8470939 C12.8449215,18.0337142 12.5391523,18.05489 12.4635344,17.8808353 C10.156283,12.5620676 16.9134476,3.89614725 22.7663531,1.57844898 Z" id="Eye-Browse-Reddit"></path><path d="M80.7663531,1.57844898 L81.6772984,1.17582144 C86.9190996,-0.905265751 94.8645466,-0.0328729562 99.7227321,2.29911638 C100.289785,2.57148957 99.9021563,3.4519421 99.3211012,3.40711006 C84.4021788,2.25602197 74.3582869,11.5525942 70.9460869,17.8470939 C70.8449215,18.0337142 70.5391523,18.05489 70.4635344,17.8808353 C68.156283,12.5620676 74.9134476,3.89614725 80.7663531,1.57844898 Z" id="Eye-Browse-Reddit" transform="translate(85.000000, 9.000000) scale(-1, 1) translate(-85.000000, -9.000000) "></path></g></g><g id="Top" stroke-width="1" fill-rule="evenodd"><defs><rect id="react-path-1464747" x="0" y="0" width="264" height="280"></rect><path d="M21,157.540812 L21,69.046252 C21,65.5140485 21.3981158,62.0748299 22.1519234,58.7710202 C25.205041,38.7314193 36.7752683,22.8108863 50,13 C69.9046441,-1.75961713 103.441939,-6.01828252 115.047069,11.5221046 C123.698343,7.68103538 136.519049,11.1821114 146,20 C155.565156,29.4150438 163.19967,50.1973768 158.657409,67.2035172 C158.762104,68.4691962 158.815476,69.7490355 158.815476,71.0408963 L158.815476,92.8921195 C157.934142,87.9183006 153.988995,84.0029116 149,83.1659169 L149,83 C142.963851,61.4642087 125.229516,51.5800472 114.429684,41.777113 C97.5353566,60.6732583 44.8226408,60.7398069 27,98 L27,108 C27,114.018625 31.4308707,119.002364 37.2085808,119.867187 C38.9518066,140.114792 51.4692178,157.282984 69,165.610951 L69,166 C71.9303712,209.855112 62.358462,264.797432 0,248 C13.6057325,240.037752 20.8081123,189.055563 21,157.540812 Z M117,165.610951 C134.530782,157.282984 147.048193,140.114792 148.791419,119.867187 C153.87876,119.105701 157.921895,115.150816 158.815476,110.107881 L158.815476,111.47039 L158.815476,111.47039 C158.815476,127.298552 162.572711,142.900645 169.7782,156.993609 L196.726668,209.701177 C203.689761,223.320048 201.645562,239.173573 192.790715,250.468968 C189.966212,213.288807 158.90349,184 121,184 L121,184 L117,184 L117,165.610951 Z" id="react-path-1464748"></path><path d="M65.1802189,77.7372986 C67.3631845,76.1045334 80.4065113,75.4786511 82.757829,74.0894494 C83.4916461,73.6553857 84.0610723,73.215719 84.4997781,72.7800074 C84.938814,73.215719 85.5085703,73.6553857 86.2423874,74.0894494 C88.593375,75.4786511 101.636702,76.1045334 103.819667,77.7372986 C106.030032,79.3908276 107.643571,83.1846831 107.466966,86.15095 C107.255041,89.7101408 103.361486,98.2028927 93.6723269,99.1811016 C91.5576925,96.8281927 88.2368647,95.3104528 84.4997781,95.3104528 C80.7633517,95.3104528 77.4421938,96.8281927 75.3275594,99.1811016 C65.6387308,98.2028927 61.7451757,89.7101408 61.5332501,86.15095 C61.3566455,83.1846831 62.9701849,79.3908276 65.1802189,77.7372986 M103.141638,94.9063813 C103.142958,94.9057221 103.144609,94.905063 103.145929,94.9047334 C103.144278,94.905063 103.142958,94.9057221 103.141638,94.9063813 M65.8453747,94.9014375 C65.8493359,94.9030855 65.8565982,94.9057221 65.8618798,94.9076997 C65.8565982,94.9057221 65.8509864,94.9034151 65.8453747,94.9014375 M144.86259,55.9853335 C144.47439,50.0303878 143.277769,44.1519058 142.233986,38.2862777 C141.952739,36.7072349 140.423706,26 139.734783,26 C139.502391,35.1094058 138.701893,44.0803858 137.669664,53.1393651 C137.361018,55.8475668 137.037848,58.5564277 136.825262,61.2741874 C136.653609,63.4695546 136.959614,66.1220564 136.427819,68.2455739 C135.749129,70.9524573 132.348087,73.4783984 129.702978,74.410795 C123.102915,76.7373371 117.597802,67.1077689 111.960977,64.2911336 C104.643272,60.6347152 92.0637391,59.7639895 84.5816434,64.5297918 C76.9361472,59.7639895 64.356614,60.6347152 57.0389092,64.2911336 C51.4024147,67.1077689 45.8969708,76.7373371 39.2972383,74.410795 C36.6521296,73.4783984 33.2504268,70.9524573 32.572397,68.2455739 C32.0402723,66.1220564 32.346277,63.4695546 32.174954,61.2741874 C31.9623682,58.5564277 31.6388681,55.8475668 31.3302226,53.1393651 C30.2983232,44.0803858 29.4974953,35.1094058 29.2654335,26 C28.5761802,26 27.0468169,36.7072349 26.7658999,38.2862777 C25.7221169,44.1519058 24.5258266,50.0303878 24.1376265,55.9853335 C23.738533,62.1047422 24.2148704,68.1674622 25.4695887,74.1632765 C26.0687242,77.0277016 26.7685407,79.8756475 27.518863,82.7041478 C28.352701,85.8467429 27.198994,91.9661516 27.5723395,95.1921317 C28.2787581,101.29572 31.1542781,113.199679 34.3833375,118.45096 C35.9440605,120.989096 37.7734867,122.573742 39.816489,124.619148 C41.7825775,126.58809 42.6038717,129.640049 44.7260985,131.73687 C48.6820428,135.645092 54.4456266,137.971304 60.3656788,138.543134 C65.6773527,143.050212 74.505605,146 84.4997781,146 C94.4946114,146 103.322534,143.050212 108.634538,138.543134 C114.55393,137.971304 120.317843,135.645092 124.274118,131.73687 C126.396015,129.640049 127.217309,126.58809 129.183727,124.619148 C131.2264,122.573742 133.055826,120.989096 134.616879,118.45096 C137.845608,113.199679 140.721458,101.29572 141.427547,95.1921317 C141.800892,91.9661516 140.647185,85.8467429 141.481353,82.7041478 C142.231676,79.8756475 142.931162,77.0277016 143.530628,74.1632765 C144.784686,68.1674622 145.261353,62.1047422 144.86259,55.9853335 Z" id="react-path-1464749"></path></defs><mask id="react-mask-1464745" fill="white"><use xlink:href="#react-path-1464747"></use></mask><g id="Mask"></g><g id="Top/Long-Hair/Straight" mask="url(#react-mask-1464745)"><g transform="translate(-1.000000, 0.000000)"><g id="Hair" stroke-width="1" fill="none" fill-rule="evenodd" transform="translate(40.000000, 15.000000)"><mask id="react-mask-1464746" fill="white"><use xlink:href="#react-path-1464748"></use></mask><use fill="#272C2E" xlink:href="#react-path-1464748"></use><g id="Skin/👶🏽-03-Brown" mask="url(#react-mask-1464746)" fill="#B58143"><g transform="translate(0.000000, 0.000000) " id="Color"><rect x="0" y="0" width="264" height="280"></rect></g></g></g><path d="M67,113 C84.8226408,80.6646674 137.535357,80.6069148 154.429684,64.2083647 C165.207546,72.6982916 182.891727,79.2665518 188.963018,97.8687161 C182.891727,76.423995 165.207546,66.5601054 154.429684,56.777113 C137.535357,75.6732583 84.8226408,75.7398069 67,113 Z" id="Shadow" fill-opacity="0.16" fill="#000000" fill-rule="evenodd"></path></g></g></g></g></g></g></g>` },
+        sleeping: { vb: '0 0 264 280', corpo: `<desc>Created with getavataaars.com</desc><defs><circle id="react-path-3783791" cx="120" cy="120" r="120"></circle><path d="M12,160 C12,226.27417 65.72583,280 132,280 C198.27417,280 252,226.27417 252,160 L264,160 L264,-1.42108547e-14 L-3.19744231e-14,-1.42108547e-14 L-3.19744231e-14,160 L12,160 Z" id="react-path-3783792"></path><path d="M124,144.610951 L124,163 L128,163 L128,163 C167.764502,163 200,195.235498 200,235 L200,244 L0,244 L0,235 C-4.86974701e-15,195.235498 32.235498,163 72,163 L72,163 L76,163 L76,144.610951 C58.7626345,136.422372 46.3722246,119.687011 44.3051388,99.8812385 C38.4803105,99.0577866 34,94.0521096 34,88 L34,74 C34,68.0540074 38.3245733,63.1180731 44,62.1659169 L44,56 L44,56 C44,25.072054 69.072054,5.68137151e-15 100,0 L100,0 L100,0 C130.927946,-5.68137151e-15 156,25.072054 156,56 L156,62.1659169 C161.675427,63.1180731 166,68.0540074 166,74 L166,88 C166,94.0521096 161.51969,99.0577866 155.694861,99.8812385 C153.627775,119.687011 141.237365,136.422372 124,144.610951 Z" id="react-path-3783793"></path></defs><g id="Avataaar" stroke="none" stroke-width="1" fill="none" fill-rule="evenodd"><g transform="translate(-825.000000, -1100.000000)" id="Avataaar/Circle"><g transform="translate(825.000000, 1100.000000)"><g id="Mask"></g><g id="Avataaar" stroke-width="1" fill-rule="evenodd" mask="url(#react-mask-3783795)"><g id="Body" transform="translate(32.000000, 36.000000)"><mask id="react-mask-3783796" fill="white"><use xlink:href="#react-path-3783793"></use></mask><use fill="#D0C6AC" xlink:href="#react-path-3783793"></use><g id="Skin/👶🏽-03-Brown" mask="url(#react-mask-3783796)" fill="#EDB98A"><g transform="translate(0.000000, 0.000000)" id="Color"><rect x="0" y="0" width="264" height="280"></rect></g></g><path d="M156,79 L156,102 C156,132.927946 130.927946,158 100,158 C69.072054,158 44,132.927946 44,102 L44,79 L44,94 C44,124.927946 69.072054,150 100,150 C130.927946,150 156,124.927946 156,94 L156,79 Z" id="Neck-Shadow" fill-opacity="0.100000001" fill="#000000" mask="url(#react-mask-3783796)"></path></g><g id="Clothing/Shirt-Crew-Neck" transform="translate(0.000000, 170.000000)"><defs><path d="M165.960472,29.2949161 C202.936473,32.3249982 232,63.2942856 232,101.051724 L232,110 L32,110 L32,101.051724 C32,62.9525631 61.591985,31.7649812 99.0454063,29.2195264 C99.0152598,29.5931145 99,29.9692272 99,30.3476251 C99,42.2107177 113.998461,51.8276544 132.5,51.8276544 C151.001539,51.8276544 166,42.2107177 166,30.3476251 C166,29.9946691 165.986723,29.6437014 165.960472,29.2949161 Z" id="react-path-3783797"></path></defs><mask id="react-mask-3783798" fill="white"><use xlink:href="#react-path-3783797"></use></mask><use id="Clothes" fill="#E6E6E6" fill-rule="evenodd" xlink:href="#react-path-3783797"></use><g id="Color/Palette/Gray-01" mask="url(#react-mask-3783798)" fill-rule="evenodd" fill="#FF488E"><rect id="🖍Color" x="0" y="0" width="264" height="110"></rect></g><g id="Shadowy" opacity="0.599999964" stroke-width="1" fill-rule="evenodd" mask="url(#react-mask-3783798)" fill-opacity="0.16" fill="#000000"><g transform="translate(92.000000, 4.000000)" id="Hola-👋🏼"><ellipse cx="40.5" cy="27.8476251" rx="39.6351047" ry="26.9138272"></ellipse></g></g></g><g id="Face" transform="translate(76.000000, 82.000000)" fill="#000000"><g id="Mouth/Serious" transform="translate(2.000000, 52.000000)" fill="#000000" fill-opacity="0.699999988"><rect id="Why-so-serious?" x="42" y="18" width="24" height="6" rx="3"></rect></g><g id="Nose/Default" transform="translate(28.000000, 40.000000)" fill-opacity="0.16"><path d="M16,8 C16,12.418278 21.372583,16 28,16 L28,16 C34.627417,16 40,12.418278 40,8" id="Nose"></path></g><g id="Eyes/Closed-😌" transform="translate(0.000000, 8.000000)" fill-opacity="0.599999964"><path d="M16.1601674,32.4473116 C18.006676,28.648508 22.1644225,26 26.9975803,26 C31.8136766,26 35.9591217,28.629842 37.8153518,32.4071242 C38.3667605,33.5291977 37.5821037,34.4474817 36.790607,33.7670228 C34.3395063,31.6597833 30.8587163,30.3437884 26.9975803,30.3437884 C23.2572061,30.3437884 19.8737584,31.5787519 17.4375392,33.5716412 C16.5467928,34.3002944 15.6201012,33.5583844 16.1601674,32.4473116 Z" id="Closed-Eye" transform="translate(27.000000, 30.000000) scale(1, -1) translate(-27.000000, -30.000000) "></path><path d="M74.1601674,32.4473116 C76.006676,28.648508 80.1644225,26 84.9975803,26 C89.8136766,26 93.9591217,28.629842 95.8153518,32.4071242 C96.3667605,33.5291977 95.5821037,34.4474817 94.790607,33.7670228 C92.3395063,31.6597833 88.8587163,30.3437884 84.9975803,30.3437884 C81.2572061,30.3437884 77.8737584,31.5787519 75.4375392,33.5716412 C74.5467928,34.3002944 73.6201012,33.5583844 74.1601674,32.4473116 Z" id="Closed-Eye" transform="translate(85.000000, 30.000000) scale(1, -1) translate(-85.000000, -30.000000) "></path></g><g id="Eyebrow/Natural/Default-Natural" fill-opacity="0.599999964"><path d="M26.0390934,6.21012364 C20.2775554,6.98346216 11.2929313,12.0052479 12.04426,17.8178111 C12.0689481,18.0080543 12.3567302,18.0673468 12.4809077,17.9084937 C14.9674041,14.7203351 34.1927973,10.0365481 41.1942673,11.0147151 C41.8350523,11.1044465 42.2580662,10.4430343 41.8210501,10.0302067 C38.0765663,6.49485426 31.2003792,5.51224825 26.0390934,6.21012364" id="Eyebrow" transform="translate(27.000000, 12.000000) rotate(5.000000) translate(-27.000000, -12.000000) "></path><path d="M85.0390934,6.21012364 C79.2775554,6.98346216 70.2929313,12.0052479 71.04426,17.8178111 C71.0689481,18.0080543 71.3567302,18.0673468 71.4809077,17.9084937 C73.9674041,14.7203351 93.1927973,10.0365481 100.194267,11.0147151 C100.835052,11.1044465 101.258066,10.4430343 100.82105,10.0302067 C97.0765663,6.49485426 90.2003792,5.51224825 85.0390934,6.21012364" id="Eyebrow" transform="translate(86.000000, 12.000000) scale(-1, 1) rotate(5.000000) translate(-86.000000, -12.000000) "></path></g></g><g id="Top" stroke-width="1" fill-rule="evenodd"><defs><rect id="react-path-3783801" x="0" y="0" width="264" height="280"></rect><path d="M21,157.540812 L21,69.046252 C21,65.5140485 21.3981158,62.0748299 22.1519234,58.7710202 C25.205041,38.7314193 36.7752683,22.8108863 50,13 C69.9046441,-1.75961713 103.441939,-6.01828252 115.047069,11.5221046 C123.698343,7.68103538 136.519049,11.1821114 146,20 C155.565156,29.4150438 163.19967,50.1973768 158.657409,67.2035172 C158.762104,68.4691962 158.815476,69.7490355 158.815476,71.0408963 L158.815476,92.8921195 C157.934142,87.9183006 153.988995,84.0029116 149,83.1659169 L149,83 C142.963851,61.4642087 125.229516,51.5800472 114.429684,41.777113 C97.5353566,60.6732583 44.8226408,60.7398069 27,98 L27,108 C27,114.018625 31.4308707,119.002364 37.2085808,119.867187 C38.9518066,140.114792 51.4692178,157.282984 69,165.610951 L69,166 C71.9303712,209.855112 62.358462,264.797432 0,248 C13.6057325,240.037752 20.8081123,189.055563 21,157.540812 Z M117,165.610951 C134.530782,157.282984 147.048193,140.114792 148.791419,119.867187 C153.87876,119.105701 157.921895,115.150816 158.815476,110.107881 L158.815476,111.47039 L158.815476,111.47039 C158.815476,127.298552 162.572711,142.900645 169.7782,156.993609 L196.726668,209.701177 C203.689761,223.320048 201.645562,239.173573 192.790715,250.468968 C189.966212,213.288807 158.90349,184 121,184 L121,184 L117,184 L117,165.610951 Z" id="react-path-3783802"></path><path d="M65.1802189,77.7372986 C67.3631845,76.1045334 80.4065113,75.4786511 82.757829,74.0894494 C83.4916461,73.6553857 84.0610723,73.215719 84.4997781,72.7800074 C84.938814,73.215719 85.5085703,73.6553857 86.2423874,74.0894494 C88.593375,75.4786511 101.636702,76.1045334 103.819667,77.7372986 C106.030032,79.3908276 107.643571,83.1846831 107.466966,86.15095 C107.255041,89.7101408 103.361486,98.2028927 93.6723269,99.1811016 C91.5576925,96.8281927 88.2368647,95.3104528 84.4997781,95.3104528 C80.7633517,95.3104528 77.4421938,96.8281927 75.3275594,99.1811016 C65.6387308,98.2028927 61.7451757,89.7101408 61.5332501,86.15095 C61.3566455,83.1846831 62.9701849,79.3908276 65.1802189,77.7372986 M103.141638,94.9063813 C103.142958,94.9057221 103.144609,94.905063 103.145929,94.9047334 C103.144278,94.905063 103.142958,94.9057221 103.141638,94.9063813 M65.8453747,94.9014375 C65.8493359,94.9030855 65.8565982,94.9057221 65.8618798,94.9076997 C65.8565982,94.9057221 65.8509864,94.9034151 65.8453747,94.9014375 M144.86259,55.9853335 C144.47439,50.0303878 143.277769,44.1519058 142.233986,38.2862777 C141.952739,36.7072349 140.423706,26 139.734783,26 C139.502391,35.1094058 138.701893,44.0803858 137.669664,53.1393651 C137.361018,55.8475668 137.037848,58.5564277 136.825262,61.2741874 C136.653609,63.4695546 136.959614,66.1220564 136.427819,68.2455739 C135.749129,70.9524573 132.348087,73.4783984 129.702978,74.410795 C123.102915,76.7373371 117.597802,67.1077689 111.960977,64.2911336 C104.643272,60.6347152 92.0637391,59.7639895 84.5816434,64.5297918 C76.9361472,59.7639895 64.356614,60.6347152 57.0389092,64.2911336 C51.4024147,67.1077689 45.8969708,76.7373371 39.2972383,74.410795 C36.6521296,73.4783984 33.2504268,70.9524573 32.572397,68.2455739 C32.0402723,66.1220564 32.346277,63.4695546 32.174954,61.2741874 C31.9623682,58.5564277 31.6388681,55.8475668 31.3302226,53.1393651 C30.2983232,44.0803858 29.4974953,35.1094058 29.2654335,26 C28.5761802,26 27.0468169,36.7072349 26.7658999,38.2862777 C25.7221169,44.1519058 24.5258266,50.0303878 24.1376265,55.9853335 C23.738533,62.1047422 24.2148704,68.1674622 25.4695887,74.1632765 C26.0687242,77.0277016 26.7685407,79.8756475 27.518863,82.7041478 C28.352701,85.8467429 27.198994,91.9661516 27.5723395,95.1921317 C28.2787581,101.29572 31.1542781,113.199679 34.3833375,118.45096 C35.9440605,120.989096 37.7734867,122.573742 39.816489,124.619148 C41.7825775,126.58809 42.6038717,129.640049 44.7260985,131.73687 C48.6820428,135.645092 54.4456266,137.971304 60.3656788,138.543134 C65.6773527,143.050212 74.505605,146 84.4997781,146 C94.4946114,146 103.322534,143.050212 108.634538,138.543134 C114.55393,137.971304 120.317843,135.645092 124.274118,131.73687 C126.396015,129.640049 127.217309,126.58809 129.183727,124.619148 C131.2264,122.573742 133.055826,120.989096 134.616879,118.45096 C137.845608,113.199679 140.721458,101.29572 141.427547,95.1921317 C141.800892,91.9661516 140.647185,85.8467429 141.481353,82.7041478 C142.231676,79.8756475 142.931162,77.0277016 143.530628,74.1632765 C144.784686,68.1674622 145.261353,62.1047422 144.86259,55.9853335 Z" id="react-path-3783803"></path></defs><mask id="react-mask-3783799" fill="white"><use xlink:href="#react-path-3783801"></use></mask><g id="Mask"></g><g id="Top/Long-Hair/Straight" mask="url(#react-mask-3783799)"><g transform="translate(-1.000000, 0.000000)"><g id="Hair" stroke-width="1" fill="none" fill-rule="evenodd" transform="translate(40.000000, 15.000000)"><mask id="react-mask-3783800" fill="white"><use xlink:href="#react-path-3783802"></use></mask><use fill="#272C2E" xlink:href="#react-path-3783802"></use><g id="Skin/👶🏽-03-Brown" mask="url(#react-mask-3783800)" fill="#B58143"><g transform="translate(0.000000, 0.000000) " id="Color"><rect x="0" y="0" width="264" height="280"></rect></g></g></g><path d="M67,113 C84.8226408,80.6646674 137.535357,80.6069148 154.429684,64.2083647 C165.207546,72.6982916 182.891727,79.2665518 188.963018,97.8687161 C182.891727,76.423995 165.207546,66.5601054 154.429684,56.777113 C137.535357,75.6732583 84.8226408,75.7398069 67,113 Z" id="Shadow" fill-opacity="0.16" fill="#000000" fill-rule="evenodd"></path></g></g></g></g></g></g></g>` },
       },
       alex: {
         idle: { vb: '0 0 264 280', corpo: `<desc>Created with getavataaars.com</desc><defs><circle id="react-path-1060419" cx="120" cy="120" r="120"></circle><path d="M12,160 C12,226.27417 65.72583,280 132,280 C198.27417,280 252,226.27417 252,160 L264,160 L264,-1.42108547e-14 L-3.19744231e-14,-1.42108547e-14 L-3.19744231e-14,160 L12,160 Z" id="react-path-1060420"></path><path d="M124,144.610951 L124,163 L128,163 L128,163 C167.764502,163 200,195.235498 200,235 L200,244 L0,244 L0,235 C-4.86974701e-15,195.235498 32.235498,163 72,163 L72,163 L76,163 L76,144.610951 C58.7626345,136.422372 46.3722246,119.687011 44.3051388,99.8812385 C38.4803105,99.0577866 34,94.0521096 34,88 L34,74 C34,68.0540074 38.3245733,63.1180731 44,62.1659169 L44,56 L44,56 C44,25.072054 69.072054,5.68137151e-15 100,0 L100,0 L100,0 C130.927946,-5.68137151e-15 156,25.072054 156,56 L156,62.1659169 C161.675427,63.1180731 166,68.0540074 166,74 L166,88 C166,94.0521096 161.51969,99.0577866 155.694861,99.8812385 C153.627775,119.687011 141.237365,136.422372 124,144.610951 Z" id="react-path-1060421"></path></defs><g id="Avataaar" stroke="none" stroke-width="1" fill="none" fill-rule="evenodd"><g transform="translate(-825.000000, -1100.000000)" id="Avataaar/Circle"><g transform="translate(825.000000, 1100.000000)"><g id="Mask"></g><g id="Avataaar" stroke-width="1" fill-rule="evenodd" mask="url(#react-mask-1060423)"><g id="Body" transform="translate(32.000000, 36.000000)"><mask id="react-mask-1060424" fill="white"><use xlink:href="#react-path-1060421"></use></mask><use fill="#D0C6AC" xlink:href="#react-path-1060421"></use><g id="Skin/👶🏽-03-Brown" mask="url(#react-mask-1060424)" fill="#FD9841"><g transform="translate(0.000000, 0.000000)" id="Color"><rect x="0" y="0" width="264" height="280"></rect></g></g><path d="M156,79 L156,102 C156,132.927946 130.927946,158 100,158 C69.072054,158 44,132.927946 44,102 L44,79 L44,94 C44,124.927946 69.072054,150 100,150 C130.927946,150 156,124.927946 156,94 L156,79 Z" id="Neck-Shadow" fill-opacity="0.100000001" fill="#000000" mask="url(#react-mask-1060424)"></path></g><g id="Clothing/Shirt-Crew-Neck" transform="translate(0.000000, 170.000000)"><defs><path d="M165.960472,29.2949161 C202.936473,32.3249982 232,63.2942856 232,101.051724 L232,110 L32,110 L32,101.051724 C32,62.9525631 61.591985,31.7649812 99.0454063,29.2195264 C99.0152598,29.5931145 99,29.9692272 99,30.3476251 C99,42.2107177 113.998461,51.8276544 132.5,51.8276544 C151.001539,51.8276544 166,42.2107177 166,30.3476251 C166,29.9946691 165.986723,29.6437014 165.960472,29.2949161 Z" id="react-path-1060425"></path></defs><mask id="react-mask-1060426" fill="white"><use xlink:href="#react-path-1060425"></use></mask><use id="Clothes" fill="#E6E6E6" fill-rule="evenodd" xlink:href="#react-path-1060425"></use><g id="Color/Palette/Gray-01" mask="url(#react-mask-1060426)" fill-rule="evenodd" fill="#5199E4"><rect id="🖍Color" x="0" y="0" width="264" height="110"></rect></g><g id="Shadowy" opacity="0.599999964" stroke-width="1" fill-rule="evenodd" mask="url(#react-mask-1060426)" fill-opacity="0.16" fill="#000000"><g transform="translate(92.000000, 4.000000)" id="Hola-👋🏼"><ellipse cx="40.5" cy="27.8476251" rx="39.6351047" ry="26.9138272"></ellipse></g></g></g><g id="Face" transform="translate(76.000000, 82.000000)" fill="#000000"><g id="Mouth/Smile" transform="translate(2.000000, 52.000000)"><defs><path d="M35.117844,15.1280772 C36.1757121,24.6198025 44.2259873,32 54,32 C63.8042055,32 71.8740075,24.574136 72.8917593,15.0400546 C72.9736685,14.272746 72.1167429,13 71.042767,13 C56.1487536,13 44.7379213,13 37.0868244,13 C36.0066168,13 35.0120058,14.1784435 35.117844,15.1280772 Z" id="react-path-1060427"></path></defs><mask id="react-mask-1060428" fill="white"><use xlink:href="#react-path-1060427"></use></mask><use id="Mouth" fill-opacity="0.699999988" fill="#000000" fill-rule="evenodd" xlink:href="#react-path-1060427"></use><rect id="Teeth" fill="#FFFFFF" fill-rule="evenodd" mask="url(#react-mask-1060428)" x="39" y="2" width="31" height="16" rx="5"></rect><g id="Tongue" stroke-width="1" fill-rule="evenodd" mask="url(#react-mask-1060428)" fill="#FF4F6D"><g transform="translate(38.000000, 24.000000)"><circle cx="11" cy="11" r="11"></circle><circle cx="21" cy="11" r="11"></circle></g></g></g><g id="Nose/Default" transform="translate(28.000000, 40.000000)" fill-opacity="0.16"><path d="M16,8 C16,12.418278 21.372583,16 28,16 L28,16 C34.627417,16 40,12.418278 40,8" id="Nose"></path></g><g id="Eyes/Default-😀" transform="translate(0.000000, 8.000000)" fill-opacity="0.599999964"><circle id="Eye" cx="30" cy="22" r="6"></circle><circle id="Eye" cx="82" cy="22" r="6"></circle></g><g id="Eyebrow/Natural/Default-Natural" fill-opacity="0.599999964"><path d="M26.0390934,6.21012364 C20.2775554,6.98346216 11.2929313,12.0052479 12.04426,17.8178111 C12.0689481,18.0080543 12.3567302,18.0673468 12.4809077,17.9084937 C14.9674041,14.7203351 34.1927973,10.0365481 41.1942673,11.0147151 C41.8350523,11.1044465 42.2580662,10.4430343 41.8210501,10.0302067 C38.0765663,6.49485426 31.2003792,5.51224825 26.0390934,6.21012364" id="Eyebrow" transform="translate(27.000000, 12.000000) rotate(5.000000) translate(-27.000000, -12.000000) "></path><path d="M85.0390934,6.21012364 C79.2775554,6.98346216 70.2929313,12.0052479 71.04426,17.8178111 C71.0689481,18.0080543 71.3567302,18.0673468 71.4809077,17.9084937 C73.9674041,14.7203351 93.1927973,10.0365481 100.194267,11.0147151 C100.835052,11.1044465 101.258066,10.4430343 100.82105,10.0302067 C97.0765663,6.49485426 90.2003792,5.51224825 85.0390934,6.21012364" id="Eyebrow" transform="translate(86.000000, 12.000000) scale(-1, 1) rotate(5.000000) translate(-86.000000, -12.000000) "></path></g></g><g id="Top" stroke-width="1" fill-rule="evenodd"><defs><rect id="react-path-1060433" x="0" y="0" width="264" height="280"></rect><path d="M180.14998,39.9204083 C177.390206,37.1003988 174.185913,34.7068297 171.069252,32.3065503 C170.381566,31.777442 169.682843,31.2610833 169.010544,30.7118441 C168.857687,30.5870323 167.291999,29.4657388 167.104691,29.0530544 C166.653816,28.0602634 166.915042,28.8332916 166.977255,27.6485857 C167.055857,26.150508 170.11064,21.9193194 167.831176,20.9490079 C166.828413,20.522232 165.039628,21.6579526 164.077671,22.0330592 C162.196235,22.7671676 160.291721,23.3932399 158.346734,23.9330847 C159.278588,22.0763407 161.055333,18.3594977 157.71591,19.3543018 C155.114345,20.1293431 152.690052,22.1219709 150.075777,23.0594018 C150.940735,21.6415124 154.399901,17.2479341 151.274209,17.0023366 C150.301549,16.925839 147.471201,18.7503735 146.423952,19.1395717 C143.287223,20.3054888 140.083264,21.0590571 136.789999,21.6525844 C125.59203,23.6707114 112.497238,23.0953019 102.1368,28.1934632 C94.1494796,32.1236942 86.262502,38.2220278 81.648386,45.987539 C77.2011742,53.472559 75.537818,61.6641751 74.6069673,70.2412987 C73.9239644,76.535909 73.8684412,83.0425652 74.1878671,89.3599905 C74.2922241,91.4297869 74.5250203,100.970847 77.5319724,98.0813859 C79.0300967,96.641688 79.019059,90.8282073 79.3963495,88.8604076 C80.1472513,84.9452748 80.870057,81.0126951 82.122006,77.2227096 C84.3282191,70.5439339 86.9307879,63.4296587 92.4269209,58.8297383 C95.9539853,55.8782066 98.4307906,51.8889248 101.806002,48.9112229 C103.322188,47.5738572 102.165231,47.7130963 104.602902,47.888571 C106.240504,48.006337 107.885464,48.0512961 109.52641,48.0942421 C113.322394,48.1928837 117.124399,48.16772 120.921387,48.1811407 C128.56821,48.208653 136.179243,48.316689 143.818708,47.9164188 C147.213653,47.7385955 150.617965,47.6423024 154.00388,47.3282597 C155.895349,47.152785 159.251496,45.9405668 160.808488,46.8669256 C162.233362,47.7144383 163.71309,50.4817719 164.736257,51.615144 C167.153525,54.2935659 170.035717,56.3392052 172.862385,58.5354911 C178.756547,63.114945 181.732392,68.8666908 183.522515,76.023241 C185.305949,83.1532854 184.805905,89.76815 187.013456,96.78479 C187.401784,98.0184813 188.428965,100.14498 189.695296,98.2389151 C189.930434,97.8849461 189.869559,95.9390277 189.869559,94.819339 C189.869559,90.2995934 191.014141,86.9083772 190.999758,82.3591197 C190.943566,68.5271489 190.49637,50.4908308 180.14998,39.9204083 Z" id="react-path-1060432"></path><filter x="-0.8%" y="-2.0%" width="101.5%" height="108.0%" filterUnits="objectBoundingBox" id="react-filter-1060429"><feOffset dx="0" dy="2" in="SourceAlpha" result="shadowOffsetOuter1"></feOffset><feColorMatrix values="0 0 0 0 0   0 0 0 0 0   0 0 0 0 0  0 0 0 0.16 0" type="matrix" in="shadowOffsetOuter1" result="shadowMatrixOuter1"></feColorMatrix><feMerge><feMergeNode in="shadowMatrixOuter1"></feMergeNode><feMergeNode in="SourceGraphic"></feMergeNode></feMerge></filter></defs><mask id="react-mask-1060431" fill="white"><use xlink:href="#react-path-1060433"></use></mask><g id="Mask"></g><g id="Top/Short-Hair/Short-Flat" mask="url(#react-mask-1060431)"><g transform="translate(-1.000000, 0.000000)"><mask id="react-mask-1060430" fill="white"><use xlink:href="#react-path-1060432"></use></mask><use id="Short-Hair" stroke="none" fill="#1F3140" fill-rule="evenodd" xlink:href="#react-path-1060432"></use><g id="Skin/👶🏽-03-Brown" mask="url(#react-mask-1060430)" fill="#4A312C"><g transform="translate(0.000000, 0.000000) " id="Color"><rect x="0" y="0" width="264" height="280"></rect></g></g></g></g></g></g></g></g></g>` },
@@ -1246,6 +1612,7 @@ window.__ModuleLoader__.load({
         waiting: { vb: '0 0 264 280', corpo: `<desc>Created with getavataaars.com</desc><defs><circle id="react-path-1465151" cx="120" cy="120" r="120"></circle><path d="M12,160 C12,226.27417 65.72583,280 132,280 C198.27417,280 252,226.27417 252,160 L264,160 L264,-1.42108547e-14 L-3.19744231e-14,-1.42108547e-14 L-3.19744231e-14,160 L12,160 Z" id="react-path-1465152"></path><path d="M124,144.610951 L124,163 L128,163 L128,163 C167.764502,163 200,195.235498 200,235 L200,244 L0,244 L0,235 C-4.86974701e-15,195.235498 32.235498,163 72,163 L72,163 L76,163 L76,144.610951 C58.7626345,136.422372 46.3722246,119.687011 44.3051388,99.8812385 C38.4803105,99.0577866 34,94.0521096 34,88 L34,74 C34,68.0540074 38.3245733,63.1180731 44,62.1659169 L44,56 L44,56 C44,25.072054 69.072054,5.68137151e-15 100,0 L100,0 L100,0 C130.927946,-5.68137151e-15 156,25.072054 156,56 L156,62.1659169 C161.675427,63.1180731 166,68.0540074 166,74 L166,88 C166,94.0521096 161.51969,99.0577866 155.694861,99.8812385 C153.627775,119.687011 141.237365,136.422372 124,144.610951 Z" id="react-path-1465153"></path></defs><g id="Avataaar" stroke="none" stroke-width="1" fill="none" fill-rule="evenodd"><g transform="translate(-825.000000, -1100.000000)" id="Avataaar/Circle"><g transform="translate(825.000000, 1100.000000)"><g id="Mask"></g><g id="Avataaar" stroke-width="1" fill-rule="evenodd" mask="url(#react-mask-1465155)"><g id="Body" transform="translate(32.000000, 36.000000)"><mask id="react-mask-1465156" fill="white"><use xlink:href="#react-path-1465153"></use></mask><use fill="#D0C6AC" xlink:href="#react-path-1465153"></use><g id="Skin/👶🏽-03-Brown" mask="url(#react-mask-1465156)" fill="#FD9841"><g transform="translate(0.000000, 0.000000)" id="Color"><rect x="0" y="0" width="264" height="280"></rect></g></g><path d="M156,79 L156,102 C156,132.927946 130.927946,158 100,158 C69.072054,158 44,132.927946 44,102 L44,79 L44,94 C44,124.927946 69.072054,150 100,150 C130.927946,150 156,124.927946 156,94 L156,79 Z" id="Neck-Shadow" fill-opacity="0.100000001" fill="#000000" mask="url(#react-mask-1465156)"></path></g><g id="Clothing/Shirt-Crew-Neck" transform="translate(0.000000, 170.000000)"><defs><path d="M165.960472,29.2949161 C202.936473,32.3249982 232,63.2942856 232,101.051724 L232,110 L32,110 L32,101.051724 C32,62.9525631 61.591985,31.7649812 99.0454063,29.2195264 C99.0152598,29.5931145 99,29.9692272 99,30.3476251 C99,42.2107177 113.998461,51.8276544 132.5,51.8276544 C151.001539,51.8276544 166,42.2107177 166,30.3476251 C166,29.9946691 165.986723,29.6437014 165.960472,29.2949161 Z" id="react-path-1465157"></path></defs><mask id="react-mask-1465158" fill="white"><use xlink:href="#react-path-1465157"></use></mask><use id="Clothes" fill="#E6E6E6" fill-rule="evenodd" xlink:href="#react-path-1465157"></use><g id="Color/Palette/Gray-01" mask="url(#react-mask-1465158)" fill-rule="evenodd" fill="#5199E4"><rect id="🖍Color" x="0" y="0" width="264" height="110"></rect></g><g id="Shadowy" opacity="0.599999964" stroke-width="1" fill-rule="evenodd" mask="url(#react-mask-1465158)" fill-opacity="0.16" fill="#000000"><g transform="translate(92.000000, 4.000000)" id="Hola-👋🏼"><ellipse cx="40.5" cy="27.8476251" rx="39.6351047" ry="26.9138272"></ellipse></g></g></g><g id="Face" transform="translate(76.000000, 82.000000)" fill="#000000"><g id="Mouth/Sad" transform="translate(2.000000, 52.000000)" fill-opacity="0.699999988" fill="#000000"><path d="M40.0582943,16.6539438 C40.7076459,23.6831146 46.7016363,28.3768187 54,28.3768187 C61.3416045,28.3768187 67.3633339,23.627332 67.9526838,16.5287605 C67.9840218,16.1513016 67.0772329,15.8529531 66.6289111,16.077395 C61.0902255,18.8502083 56.8805885,20.2366149 54,20.2366149 C51.1558456,20.2366149 47.0072148,18.8804569 41.5541074,16.168141 C41.0473376,15.9160792 40.0197139,16.2363147 40.0582943,16.6539438 Z" id="Mouth" transform="translate(54.005357, 22.188409) scale(1, -1) translate(-54.005357, -22.188409) "></path></g><g id="Nose/Default" transform="translate(28.000000, 40.000000)" fill-opacity="0.16"><path d="M16,8 C16,12.418278 21.372583,16 28,16 L28,16 C34.627417,16 40,12.418278 40,8" id="Nose"></path></g><g id="Eyes/Default-😀" transform="translate(0.000000, 8.000000)" fill-opacity="0.599999964"><circle id="Eye" cx="30" cy="22" r="6"></circle><circle id="Eye" cx="82" cy="22" r="6"></circle></g><g id="Eyebrow/Outline/Sad-Concerned" fill-opacity="0.599999964" fill-rule="nonzero"><path d="M15.9726042,19.4088529 C17.452356,11.0203704 30.0622688,5.22829657 39.2106453,8.9774793 C40.2254706,9.39337449 41.4016967,8.94600219 41.8378196,7.97824531 C42.2739426,7.01048842 41.8048116,5.88881678 40.7899862,5.47292159 C29.3457328,0.782843812 13.9550264,7.85221132 12.0280273,18.7760684 C11.84479,19.8148122 12.5792704,20.798534 13.6685352,20.9732726 C14.7578,21.1480113 15.7893668,20.4475967 15.9726042,19.4088529 Z" id="Eyebrow" transform="translate(27.000414, 12.500000) scale(-1, -1) translate(-27.000414, -12.500000) "></path><path d="M73.9726042,19.4088529 C75.452356,11.0203704 88.0622688,5.22829657 97.2106453,8.9774793 C98.2254706,9.39337449 99.4016967,8.94600219 99.8378196,7.97824531 C100.273943,7.01048842 99.8048116,5.88881678 98.7899862,5.47292159 C87.3457328,0.782843812 71.9550264,7.85221132 70.0280273,18.7760684 C69.84479,19.8148122 70.5792704,20.798534 71.6685352,20.9732726 C72.7578,21.1480113 73.7893668,20.4475967 73.9726042,19.4088529 Z" id="Eyebrow" transform="translate(85.000414, 12.500000) scale(1, -1) translate(-85.000414, -12.500000) "></path></g></g><g id="Top" stroke-width="1" fill-rule="evenodd"><defs><rect id="react-path-1465163" x="0" y="0" width="264" height="280"></rect><path d="M180.14998,39.9204083 C177.390206,37.1003988 174.185913,34.7068297 171.069252,32.3065503 C170.381566,31.777442 169.682843,31.2610833 169.010544,30.7118441 C168.857687,30.5870323 167.291999,29.4657388 167.104691,29.0530544 C166.653816,28.0602634 166.915042,28.8332916 166.977255,27.6485857 C167.055857,26.150508 170.11064,21.9193194 167.831176,20.9490079 C166.828413,20.522232 165.039628,21.6579526 164.077671,22.0330592 C162.196235,22.7671676 160.291721,23.3932399 158.346734,23.9330847 C159.278588,22.0763407 161.055333,18.3594977 157.71591,19.3543018 C155.114345,20.1293431 152.690052,22.1219709 150.075777,23.0594018 C150.940735,21.6415124 154.399901,17.2479341 151.274209,17.0023366 C150.301549,16.925839 147.471201,18.7503735 146.423952,19.1395717 C143.287223,20.3054888 140.083264,21.0590571 136.789999,21.6525844 C125.59203,23.6707114 112.497238,23.0953019 102.1368,28.1934632 C94.1494796,32.1236942 86.262502,38.2220278 81.648386,45.987539 C77.2011742,53.472559 75.537818,61.6641751 74.6069673,70.2412987 C73.9239644,76.535909 73.8684412,83.0425652 74.1878671,89.3599905 C74.2922241,91.4297869 74.5250203,100.970847 77.5319724,98.0813859 C79.0300967,96.641688 79.019059,90.8282073 79.3963495,88.8604076 C80.1472513,84.9452748 80.870057,81.0126951 82.122006,77.2227096 C84.3282191,70.5439339 86.9307879,63.4296587 92.4269209,58.8297383 C95.9539853,55.8782066 98.4307906,51.8889248 101.806002,48.9112229 C103.322188,47.5738572 102.165231,47.7130963 104.602902,47.888571 C106.240504,48.006337 107.885464,48.0512961 109.52641,48.0942421 C113.322394,48.1928837 117.124399,48.16772 120.921387,48.1811407 C128.56821,48.208653 136.179243,48.316689 143.818708,47.9164188 C147.213653,47.7385955 150.617965,47.6423024 154.00388,47.3282597 C155.895349,47.152785 159.251496,45.9405668 160.808488,46.8669256 C162.233362,47.7144383 163.71309,50.4817719 164.736257,51.615144 C167.153525,54.2935659 170.035717,56.3392052 172.862385,58.5354911 C178.756547,63.114945 181.732392,68.8666908 183.522515,76.023241 C185.305949,83.1532854 184.805905,89.76815 187.013456,96.78479 C187.401784,98.0184813 188.428965,100.14498 189.695296,98.2389151 C189.930434,97.8849461 189.869559,95.9390277 189.869559,94.819339 C189.869559,90.2995934 191.014141,86.9083772 190.999758,82.3591197 C190.943566,68.5271489 190.49637,50.4908308 180.14998,39.9204083 Z" id="react-path-1465162"></path><filter x="-0.8%" y="-2.0%" width="101.5%" height="108.0%" filterUnits="objectBoundingBox" id="react-filter-1465159"><feOffset dx="0" dy="2" in="SourceAlpha" result="shadowOffsetOuter1"></feOffset><feColorMatrix values="0 0 0 0 0   0 0 0 0 0   0 0 0 0 0  0 0 0 0.16 0" type="matrix" in="shadowOffsetOuter1" result="shadowMatrixOuter1"></feColorMatrix><feMerge><feMergeNode in="shadowMatrixOuter1"></feMergeNode><feMergeNode in="SourceGraphic"></feMergeNode></feMerge></filter></defs><mask id="react-mask-1465161" fill="white"><use xlink:href="#react-path-1465163"></use></mask><g id="Mask"></g><g id="Top/Short-Hair/Short-Flat" mask="url(#react-mask-1465161)"><g transform="translate(-1.000000, 0.000000)"><mask id="react-mask-1465160" fill="white"><use xlink:href="#react-path-1465162"></use></mask><use id="Short-Hair" stroke="none" fill="#1F3140" fill-rule="evenodd" xlink:href="#react-path-1465162"></use><g id="Skin/👶🏽-03-Brown" mask="url(#react-mask-1465160)" fill="#4A312C"><g transform="translate(0.000000, 0.000000) " id="Color"><rect x="0" y="0" width="264" height="280"></rect></g></g></g></g></g></g></g></g></g>` },
         error: { vb: '0 0 264 280', corpo: `<desc>Created with getavataaars.com</desc><defs><circle id="react-path-1465222" cx="120" cy="120" r="120"></circle><path d="M12,160 C12,226.27417 65.72583,280 132,280 C198.27417,280 252,226.27417 252,160 L264,160 L264,-1.42108547e-14 L-3.19744231e-14,-1.42108547e-14 L-3.19744231e-14,160 L12,160 Z" id="react-path-1465223"></path><path d="M124,144.610951 L124,163 L128,163 L128,163 C167.764502,163 200,195.235498 200,235 L200,244 L0,244 L0,235 C-4.86974701e-15,195.235498 32.235498,163 72,163 L72,163 L76,163 L76,144.610951 C58.7626345,136.422372 46.3722246,119.687011 44.3051388,99.8812385 C38.4803105,99.0577866 34,94.0521096 34,88 L34,74 C34,68.0540074 38.3245733,63.1180731 44,62.1659169 L44,56 L44,56 C44,25.072054 69.072054,5.68137151e-15 100,0 L100,0 L100,0 C130.927946,-5.68137151e-15 156,25.072054 156,56 L156,62.1659169 C161.675427,63.1180731 166,68.0540074 166,74 L166,88 C166,94.0521096 161.51969,99.0577866 155.694861,99.8812385 C153.627775,119.687011 141.237365,136.422372 124,144.610951 Z" id="react-path-1465224"></path></defs><g id="Avataaar" stroke="none" stroke-width="1" fill="none" fill-rule="evenodd"><g transform="translate(-825.000000, -1100.000000)" id="Avataaar/Circle"><g transform="translate(825.000000, 1100.000000)"><g id="Mask"></g><g id="Avataaar" stroke-width="1" fill-rule="evenodd" mask="url(#react-mask-1465226)"><g id="Body" transform="translate(32.000000, 36.000000)"><mask id="react-mask-1465227" fill="white"><use xlink:href="#react-path-1465224"></use></mask><use fill="#D0C6AC" xlink:href="#react-path-1465224"></use><g id="Skin/👶🏽-03-Brown" mask="url(#react-mask-1465227)" fill="#FD9841"><g transform="translate(0.000000, 0.000000)" id="Color"><rect x="0" y="0" width="264" height="280"></rect></g></g><path d="M156,79 L156,102 C156,132.927946 130.927946,158 100,158 C69.072054,158 44,132.927946 44,102 L44,79 L44,94 C44,124.927946 69.072054,150 100,150 C130.927946,150 156,124.927946 156,94 L156,79 Z" id="Neck-Shadow" fill-opacity="0.100000001" fill="#000000" mask="url(#react-mask-1465227)"></path></g><g id="Clothing/Shirt-Crew-Neck" transform="translate(0.000000, 170.000000)"><defs><path d="M165.960472,29.2949161 C202.936473,32.3249982 232,63.2942856 232,101.051724 L232,110 L32,110 L32,101.051724 C32,62.9525631 61.591985,31.7649812 99.0454063,29.2195264 C99.0152598,29.5931145 99,29.9692272 99,30.3476251 C99,42.2107177 113.998461,51.8276544 132.5,51.8276544 C151.001539,51.8276544 166,42.2107177 166,30.3476251 C166,29.9946691 165.986723,29.6437014 165.960472,29.2949161 Z" id="react-path-1465228"></path></defs><mask id="react-mask-1465229" fill="white"><use xlink:href="#react-path-1465228"></use></mask><use id="Clothes" fill="#E6E6E6" fill-rule="evenodd" xlink:href="#react-path-1465228"></use><g id="Color/Palette/Gray-01" mask="url(#react-mask-1465229)" fill-rule="evenodd" fill="#5199E4"><rect id="🖍Color" x="0" y="0" width="264" height="110"></rect></g><g id="Shadowy" opacity="0.599999964" stroke-width="1" fill-rule="evenodd" mask="url(#react-mask-1465229)" fill-opacity="0.16" fill="#000000"><g transform="translate(92.000000, 4.000000)" id="Hola-👋🏼"><ellipse cx="40.5" cy="27.8476251" rx="39.6351047" ry="26.9138272"></ellipse></g></g></g><g id="Face" transform="translate(76.000000, 82.000000)" fill="#000000"><g id="Mouth/Grimace" transform="translate(2.000000, 52.000000)"><defs><rect id="react-path-1465230" x="24" y="9" width="60" height="22" rx="11"></rect></defs><rect id="Mouth" fill-opacity="0.599999964" fill="#000000" fill-rule="evenodd" x="22" y="7" width="64" height="26" rx="13"></rect><mask id="react-mask-1465231" fill="white"><use xlink:href="#react-path-1465230"></use></mask><use id="Mouth" fill="#FFFFFF" fill-rule="evenodd" xlink:href="#react-path-1465230"></use><path d="M71,22 L62,22 L62,34 L58,34 L58,22 L49,22 L49,34 L45,34 L45,22 L36,22 L36,34 L32,34 L32,22 L24,22 L24,18 L32,18 L32,6 L36,6 L36,18 L45,18 L45,6 L49,6 L49,18 L58,18 L58,6 L62,6 L62,18 L71,18 L71,6 L75,6 L75,18 L83.8666667,18 L83.8666667,22 L75,22 L75,34 L71,34 L71,22 Z" id="Grimace-Teeth" fill="#E6E6E6" fill-rule="evenodd" mask="url(#react-mask-1465231)"></path></g><g id="Nose/Default" transform="translate(28.000000, 40.000000)" fill-opacity="0.16"><path d="M16,8 C16,12.418278 21.372583,16 28,16 L28,16 C34.627417,16 40,12.418278 40,8" id="Nose"></path></g><g id="Eyes/Cry-😢" transform="translate(0.000000, 8.000000)"><circle id="Eye" fill-opacity="0.599999964" fill="#000000" fill-rule="evenodd" cx="30" cy="22" r="6"></circle><path d="M25,27 C25,27 19,34.2706667 19,38.2706667 C19,41.5846667 21.686,44.2706667 25,44.2706667 C28.314,44.2706667 31,41.5846667 31,38.2706667 C31,34.2706667 25,27 25,27 Z" id="Drop" fill="#92D9FF" fill-rule="nonzero"></path><circle id="Eye" fill-opacity="0.599999964" fill="#000000" fill-rule="evenodd" cx="82" cy="22" r="6"></circle></g><g id="Eyebrow/Natural/Angry-Natural" fill-opacity="0.599999964"><path d="M44.8565785,12.2282877 C44.8578785,12.2192877 44.8578785,12.2192877 44.8565785,12.2282877 M17.5862288,7.89238094 C15.2441598,8.3302947 13.0866155,9.78806858 12.1523766,12.0987479 C11.8009169,12.967391 11.3917103,14.9243181 11.7083227,15.8073302 C11.8284629,16.14295 12.0332321,16.1008692 12.9555234,16.0430509 C14.643791,15.9369937 16.9330912,13.6622369 18.7484684,13.2557982 C21.2753939,12.6899315 23.9825295,13.1148447 26.4961798,13.6882381 C30.8109365,14.6725177 36.4854008,17.7875215 40.9461842,16.1699775 C41.2783949,16.0495512 45.6210294,12.9225732 44.3685187,12.2769925 C43.9238011,11.9068186 41.1370145,12.0854053 40.6216067,11.9988489 C38.2277647,11.5971998 35.7297127,10.9345131 33.373373,10.3265657 C28.2329017,9.00016592 22.9666484,6.88073171 17.5862288,7.89238094" id="Eyebrows-The-Web" transform="translate(28.094701, 12.127505) rotate(17.000000) translate(-28.094701, -12.127505) "></path><path d="M100.918293,12.2094196 C100.919593,12.2004196 100.919593,12.2004196 100.918293,12.2094196 M73.5862288,7.89238094 C71.2441598,8.3302947 69.0866155,9.78806858 68.1523766,12.0987479 C67.8009169,12.967391 67.3917103,14.9243181 67.7083227,15.8073302 C67.8284629,16.14295 68.0332321,16.1008692 68.9555234,16.0430509 C70.643791,15.9369937 72.9330912,13.6622369 74.7484684,13.2557982 C77.2753939,12.6899315 79.9825295,13.1148447 82.4961798,13.6882381 C86.8109365,14.6725177 92.4854008,17.7875215 96.9461842,16.1699775 C97.2783949,16.0495512 101.621029,12.9225732 100.368519,12.2769925 C99.9238011,11.9068186 97.1370145,12.0854053 96.6216067,11.9988489 C94.2277647,11.5971998 91.7297127,10.9345131 89.373373,10.3265657 C84.2329017,9.00016592 78.9666484,6.88073171 73.5862288,7.89238094" id="Eyebrows-The-Web" transform="translate(84.094701, 12.127505) scale(-1, 1) rotate(17.000000) translate(-84.094701, -12.127505) "></path></g></g><g id="Top" stroke-width="1" fill-rule="evenodd"><defs><rect id="react-path-1465236" x="0" y="0" width="264" height="280"></rect><path d="M180.14998,39.9204083 C177.390206,37.1003988 174.185913,34.7068297 171.069252,32.3065503 C170.381566,31.777442 169.682843,31.2610833 169.010544,30.7118441 C168.857687,30.5870323 167.291999,29.4657388 167.104691,29.0530544 C166.653816,28.0602634 166.915042,28.8332916 166.977255,27.6485857 C167.055857,26.150508 170.11064,21.9193194 167.831176,20.9490079 C166.828413,20.522232 165.039628,21.6579526 164.077671,22.0330592 C162.196235,22.7671676 160.291721,23.3932399 158.346734,23.9330847 C159.278588,22.0763407 161.055333,18.3594977 157.71591,19.3543018 C155.114345,20.1293431 152.690052,22.1219709 150.075777,23.0594018 C150.940735,21.6415124 154.399901,17.2479341 151.274209,17.0023366 C150.301549,16.925839 147.471201,18.7503735 146.423952,19.1395717 C143.287223,20.3054888 140.083264,21.0590571 136.789999,21.6525844 C125.59203,23.6707114 112.497238,23.0953019 102.1368,28.1934632 C94.1494796,32.1236942 86.262502,38.2220278 81.648386,45.987539 C77.2011742,53.472559 75.537818,61.6641751 74.6069673,70.2412987 C73.9239644,76.535909 73.8684412,83.0425652 74.1878671,89.3599905 C74.2922241,91.4297869 74.5250203,100.970847 77.5319724,98.0813859 C79.0300967,96.641688 79.019059,90.8282073 79.3963495,88.8604076 C80.1472513,84.9452748 80.870057,81.0126951 82.122006,77.2227096 C84.3282191,70.5439339 86.9307879,63.4296587 92.4269209,58.8297383 C95.9539853,55.8782066 98.4307906,51.8889248 101.806002,48.9112229 C103.322188,47.5738572 102.165231,47.7130963 104.602902,47.888571 C106.240504,48.006337 107.885464,48.0512961 109.52641,48.0942421 C113.322394,48.1928837 117.124399,48.16772 120.921387,48.1811407 C128.56821,48.208653 136.179243,48.316689 143.818708,47.9164188 C147.213653,47.7385955 150.617965,47.6423024 154.00388,47.3282597 C155.895349,47.152785 159.251496,45.9405668 160.808488,46.8669256 C162.233362,47.7144383 163.71309,50.4817719 164.736257,51.615144 C167.153525,54.2935659 170.035717,56.3392052 172.862385,58.5354911 C178.756547,63.114945 181.732392,68.8666908 183.522515,76.023241 C185.305949,83.1532854 184.805905,89.76815 187.013456,96.78479 C187.401784,98.0184813 188.428965,100.14498 189.695296,98.2389151 C189.930434,97.8849461 189.869559,95.9390277 189.869559,94.819339 C189.869559,90.2995934 191.014141,86.9083772 190.999758,82.3591197 C190.943566,68.5271489 190.49637,50.4908308 180.14998,39.9204083 Z" id="react-path-1465235"></path><filter x="-0.8%" y="-2.0%" width="101.5%" height="108.0%" filterUnits="objectBoundingBox" id="react-filter-1465232"><feOffset dx="0" dy="2" in="SourceAlpha" result="shadowOffsetOuter1"></feOffset><feColorMatrix values="0 0 0 0 0   0 0 0 0 0   0 0 0 0 0  0 0 0 0.16 0" type="matrix" in="shadowOffsetOuter1" result="shadowMatrixOuter1"></feColorMatrix><feMerge><feMergeNode in="shadowMatrixOuter1"></feMergeNode><feMergeNode in="SourceGraphic"></feMergeNode></feMerge></filter></defs><mask id="react-mask-1465234" fill="white"><use xlink:href="#react-path-1465236"></use></mask><g id="Mask"></g><g id="Top/Short-Hair/Short-Flat" mask="url(#react-mask-1465234)"><g transform="translate(-1.000000, 0.000000)"><mask id="react-mask-1465233" fill="white"><use xlink:href="#react-path-1465235"></use></mask><use id="Short-Hair" stroke="none" fill="#1F3140" fill-rule="evenodd" xlink:href="#react-path-1465235"></use><g id="Skin/👶🏽-03-Brown" mask="url(#react-mask-1465233)" fill="#4A312C"><g transform="translate(0.000000, 0.000000) " id="Color"><rect x="0" y="0" width="264" height="280"></rect></g></g></g></g></g></g></g></g></g>` },
         success: { vb: '0 0 264 280', corpo: `<desc>Created with getavataaars.com</desc><defs><circle id="react-path-1465192" cx="120" cy="120" r="120"></circle><path d="M12,160 C12,226.27417 65.72583,280 132,280 C198.27417,280 252,226.27417 252,160 L264,160 L264,-1.42108547e-14 L-3.19744231e-14,-1.42108547e-14 L-3.19744231e-14,160 L12,160 Z" id="react-path-1465193"></path><path d="M124,144.610951 L124,163 L128,163 L128,163 C167.764502,163 200,195.235498 200,235 L200,244 L0,244 L0,235 C-4.86974701e-15,195.235498 32.235498,163 72,163 L72,163 L76,163 L76,144.610951 C58.7626345,136.422372 46.3722246,119.687011 44.3051388,99.8812385 C38.4803105,99.0577866 34,94.0521096 34,88 L34,74 C34,68.0540074 38.3245733,63.1180731 44,62.1659169 L44,56 L44,56 C44,25.072054 69.072054,5.68137151e-15 100,0 L100,0 L100,0 C130.927946,-5.68137151e-15 156,25.072054 156,56 L156,62.1659169 C161.675427,63.1180731 166,68.0540074 166,74 L166,88 C166,94.0521096 161.51969,99.0577866 155.694861,99.8812385 C153.627775,119.687011 141.237365,136.422372 124,144.610951 Z" id="react-path-1465194"></path></defs><g id="Avataaar" stroke="none" stroke-width="1" fill="none" fill-rule="evenodd"><g transform="translate(-825.000000, -1100.000000)" id="Avataaar/Circle"><g transform="translate(825.000000, 1100.000000)"><g id="Mask"></g><g id="Avataaar" stroke-width="1" fill-rule="evenodd" mask="url(#react-mask-1465196)"><g id="Body" transform="translate(32.000000, 36.000000)"><mask id="react-mask-1465197" fill="white"><use xlink:href="#react-path-1465194"></use></mask><use fill="#D0C6AC" xlink:href="#react-path-1465194"></use><g id="Skin/👶🏽-03-Brown" mask="url(#react-mask-1465197)" fill="#FD9841"><g transform="translate(0.000000, 0.000000)" id="Color"><rect x="0" y="0" width="264" height="280"></rect></g></g><path d="M156,79 L156,102 C156,132.927946 130.927946,158 100,158 C69.072054,158 44,132.927946 44,102 L44,79 L44,94 C44,124.927946 69.072054,150 100,150 C130.927946,150 156,124.927946 156,94 L156,79 Z" id="Neck-Shadow" fill-opacity="0.100000001" fill="#000000" mask="url(#react-mask-1465197)"></path></g><g id="Clothing/Shirt-Crew-Neck" transform="translate(0.000000, 170.000000)"><defs><path d="M165.960472,29.2949161 C202.936473,32.3249982 232,63.2942856 232,101.051724 L232,110 L32,110 L32,101.051724 C32,62.9525631 61.591985,31.7649812 99.0454063,29.2195264 C99.0152598,29.5931145 99,29.9692272 99,30.3476251 C99,42.2107177 113.998461,51.8276544 132.5,51.8276544 C151.001539,51.8276544 166,42.2107177 166,30.3476251 C166,29.9946691 165.986723,29.6437014 165.960472,29.2949161 Z" id="react-path-1465198"></path></defs><mask id="react-mask-1465199" fill="white"><use xlink:href="#react-path-1465198"></use></mask><use id="Clothes" fill="#E6E6E6" fill-rule="evenodd" xlink:href="#react-path-1465198"></use><g id="Color/Palette/Gray-01" mask="url(#react-mask-1465199)" fill-rule="evenodd" fill="#5199E4"><rect id="🖍Color" x="0" y="0" width="264" height="110"></rect></g><g id="Shadowy" opacity="0.599999964" stroke-width="1" fill-rule="evenodd" mask="url(#react-mask-1465199)" fill-opacity="0.16" fill="#000000"><g transform="translate(92.000000, 4.000000)" id="Hola-👋🏼"><ellipse cx="40.5" cy="27.8476251" rx="39.6351047" ry="26.9138272"></ellipse></g></g></g><g id="Face" transform="translate(76.000000, 82.000000)" fill="#000000"><g id="Mouth/Smile" transform="translate(2.000000, 52.000000)"><defs><path d="M35.117844,15.1280772 C36.1757121,24.6198025 44.2259873,32 54,32 C63.8042055,32 71.8740075,24.574136 72.8917593,15.0400546 C72.9736685,14.272746 72.1167429,13 71.042767,13 C56.1487536,13 44.7379213,13 37.0868244,13 C36.0066168,13 35.0120058,14.1784435 35.117844,15.1280772 Z" id="react-path-1465200"></path></defs><mask id="react-mask-1465201" fill="white"><use xlink:href="#react-path-1465200"></use></mask><use id="Mouth" fill-opacity="0.699999988" fill="#000000" fill-rule="evenodd" xlink:href="#react-path-1465200"></use><rect id="Teeth" fill="#FFFFFF" fill-rule="evenodd" mask="url(#react-mask-1465201)" x="39" y="2" width="31" height="16" rx="5"></rect><g id="Tongue" stroke-width="1" fill-rule="evenodd" mask="url(#react-mask-1465201)" fill="#FF4F6D"><g transform="translate(38.000000, 24.000000)"><circle cx="11" cy="11" r="11"></circle><circle cx="21" cy="11" r="11"></circle></g></g></g><g id="Nose/Default" transform="translate(28.000000, 40.000000)" fill-opacity="0.16"><path d="M16,8 C16,12.418278 21.372583,16 28,16 L28,16 C34.627417,16 40,12.418278 40,8" id="Nose"></path></g><g id="Eyes/Happy-😁" transform="translate(0.000000, 8.000000)" fill-opacity="0.599999964"><path d="M16.1601674,22.4473116 C18.006676,18.648508 22.1644225,16 26.9975803,16 C31.8136766,16 35.9591217,18.629842 37.8153518,22.4071242 C38.3667605,23.5291977 37.5821037,24.4474817 36.790607,23.7670228 C34.3395063,21.6597833 30.8587163,20.3437884 26.9975803,20.3437884 C23.2572061,20.3437884 19.8737584,21.5787519 17.4375392,23.5716412 C16.5467928,24.3002944 15.6201012,23.5583844 16.1601674,22.4473116 Z" id="Squint"></path><path d="M74.1601674,22.4473116 C76.006676,18.648508 80.1644225,16 84.9975803,16 C89.8136766,16 93.9591217,18.629842 95.8153518,22.4071242 C96.3667605,23.5291977 95.5821037,24.4474817 94.790607,23.7670228 C92.3395063,21.6597833 88.8587163,20.3437884 84.9975803,20.3437884 C81.2572061,20.3437884 77.8737584,21.5787519 75.4375392,23.5716412 C74.5467928,24.3002944 73.6201012,23.5583844 74.1601674,22.4473116 Z" id="Squint"></path></g><g id="Eyebrow/Natural/Raised-Excited-Natural" fill-opacity="0.599999964"><path d="M22.7663531,1.57844898 L23.6772984,1.17582144 C28.9190996,-0.905265751 36.8645466,-0.0328729562 41.7227321,2.29911638 C42.2897848,2.57148957 41.9021563,3.4519421 41.3211012,3.40711006 C26.4021788,2.25602197 16.3582869,11.5525942 12.9460869,17.8470939 C12.8449215,18.0337142 12.5391523,18.05489 12.4635344,17.8808353 C10.156283,12.5620676 16.9134476,3.89614725 22.7663531,1.57844898 Z" id="Eye-Browse-Reddit"></path><path d="M80.7663531,1.57844898 L81.6772984,1.17582144 C86.9190996,-0.905265751 94.8645466,-0.0328729562 99.7227321,2.29911638 C100.289785,2.57148957 99.9021563,3.4519421 99.3211012,3.40711006 C84.4021788,2.25602197 74.3582869,11.5525942 70.9460869,17.8470939 C70.8449215,18.0337142 70.5391523,18.05489 70.4635344,17.8808353 C68.156283,12.5620676 74.9134476,3.89614725 80.7663531,1.57844898 Z" id="Eye-Browse-Reddit" transform="translate(85.000000, 9.000000) scale(-1, 1) translate(-85.000000, -9.000000) "></path></g></g><g id="Top" stroke-width="1" fill-rule="evenodd"><defs><rect id="react-path-1465206" x="0" y="0" width="264" height="280"></rect><path d="M180.14998,39.9204083 C177.390206,37.1003988 174.185913,34.7068297 171.069252,32.3065503 C170.381566,31.777442 169.682843,31.2610833 169.010544,30.7118441 C168.857687,30.5870323 167.291999,29.4657388 167.104691,29.0530544 C166.653816,28.0602634 166.915042,28.8332916 166.977255,27.6485857 C167.055857,26.150508 170.11064,21.9193194 167.831176,20.9490079 C166.828413,20.522232 165.039628,21.6579526 164.077671,22.0330592 C162.196235,22.7671676 160.291721,23.3932399 158.346734,23.9330847 C159.278588,22.0763407 161.055333,18.3594977 157.71591,19.3543018 C155.114345,20.1293431 152.690052,22.1219709 150.075777,23.0594018 C150.940735,21.6415124 154.399901,17.2479341 151.274209,17.0023366 C150.301549,16.925839 147.471201,18.7503735 146.423952,19.1395717 C143.287223,20.3054888 140.083264,21.0590571 136.789999,21.6525844 C125.59203,23.6707114 112.497238,23.0953019 102.1368,28.1934632 C94.1494796,32.1236942 86.262502,38.2220278 81.648386,45.987539 C77.2011742,53.472559 75.537818,61.6641751 74.6069673,70.2412987 C73.9239644,76.535909 73.8684412,83.0425652 74.1878671,89.3599905 C74.2922241,91.4297869 74.5250203,100.970847 77.5319724,98.0813859 C79.0300967,96.641688 79.019059,90.8282073 79.3963495,88.8604076 C80.1472513,84.9452748 80.870057,81.0126951 82.122006,77.2227096 C84.3282191,70.5439339 86.9307879,63.4296587 92.4269209,58.8297383 C95.9539853,55.8782066 98.4307906,51.8889248 101.806002,48.9112229 C103.322188,47.5738572 102.165231,47.7130963 104.602902,47.888571 C106.240504,48.006337 107.885464,48.0512961 109.52641,48.0942421 C113.322394,48.1928837 117.124399,48.16772 120.921387,48.1811407 C128.56821,48.208653 136.179243,48.316689 143.818708,47.9164188 C147.213653,47.7385955 150.617965,47.6423024 154.00388,47.3282597 C155.895349,47.152785 159.251496,45.9405668 160.808488,46.8669256 C162.233362,47.7144383 163.71309,50.4817719 164.736257,51.615144 C167.153525,54.2935659 170.035717,56.3392052 172.862385,58.5354911 C178.756547,63.114945 181.732392,68.8666908 183.522515,76.023241 C185.305949,83.1532854 184.805905,89.76815 187.013456,96.78479 C187.401784,98.0184813 188.428965,100.14498 189.695296,98.2389151 C189.930434,97.8849461 189.869559,95.9390277 189.869559,94.819339 C189.869559,90.2995934 191.014141,86.9083772 190.999758,82.3591197 C190.943566,68.5271489 190.49637,50.4908308 180.14998,39.9204083 Z" id="react-path-1465205"></path><filter x="-0.8%" y="-2.0%" width="101.5%" height="108.0%" filterUnits="objectBoundingBox" id="react-filter-1465202"><feOffset dx="0" dy="2" in="SourceAlpha" result="shadowOffsetOuter1"></feOffset><feColorMatrix values="0 0 0 0 0   0 0 0 0 0   0 0 0 0 0  0 0 0 0.16 0" type="matrix" in="shadowOffsetOuter1" result="shadowMatrixOuter1"></feColorMatrix><feMerge><feMergeNode in="shadowMatrixOuter1"></feMergeNode><feMergeNode in="SourceGraphic"></feMergeNode></feMerge></filter></defs><mask id="react-mask-1465204" fill="white"><use xlink:href="#react-path-1465206"></use></mask><g id="Mask"></g><g id="Top/Short-Hair/Short-Flat" mask="url(#react-mask-1465204)"><g transform="translate(-1.000000, 0.000000)"><mask id="react-mask-1465203" fill="white"><use xlink:href="#react-path-1465205"></use></mask><use id="Short-Hair" stroke="none" fill="#1F3140" fill-rule="evenodd" xlink:href="#react-path-1465205"></use><g id="Skin/👶🏽-03-Brown" mask="url(#react-mask-1465203)" fill="#4A312C"><g transform="translate(0.000000, 0.000000) " id="Color"><rect x="0" y="0" width="264" height="280"></rect></g></g></g></g></g></g></g></g></g>` },
+        sleeping: { vb: '0 0 264 280', corpo: `<desc>Created with getavataaars.com</desc><defs><circle id="react-path-3783819" cx="120" cy="120" r="120"></circle><path d="M12,160 C12,226.27417 65.72583,280 132,280 C198.27417,280 252,226.27417 252,160 L264,160 L264,-1.42108547e-14 L-3.19744231e-14,-1.42108547e-14 L-3.19744231e-14,160 L12,160 Z" id="react-path-3783820"></path><path d="M124,144.610951 L124,163 L128,163 L128,163 C167.764502,163 200,195.235498 200,235 L200,244 L0,244 L0,235 C-4.86974701e-15,195.235498 32.235498,163 72,163 L72,163 L76,163 L76,144.610951 C58.7626345,136.422372 46.3722246,119.687011 44.3051388,99.8812385 C38.4803105,99.0577866 34,94.0521096 34,88 L34,74 C34,68.0540074 38.3245733,63.1180731 44,62.1659169 L44,56 L44,56 C44,25.072054 69.072054,5.68137151e-15 100,0 L100,0 L100,0 C130.927946,-5.68137151e-15 156,25.072054 156,56 L156,62.1659169 C161.675427,63.1180731 166,68.0540074 166,74 L166,88 C166,94.0521096 161.51969,99.0577866 155.694861,99.8812385 C153.627775,119.687011 141.237365,136.422372 124,144.610951 Z" id="react-path-3783821"></path></defs><g id="Avataaar" stroke="none" stroke-width="1" fill="none" fill-rule="evenodd"><g transform="translate(-825.000000, -1100.000000)" id="Avataaar/Circle"><g transform="translate(825.000000, 1100.000000)"><g id="Mask"></g><g id="Avataaar" stroke-width="1" fill-rule="evenodd" mask="url(#react-mask-3783823)"><g id="Body" transform="translate(32.000000, 36.000000)"><mask id="react-mask-3783824" fill="white"><use xlink:href="#react-path-3783821"></use></mask><use fill="#D0C6AC" xlink:href="#react-path-3783821"></use><g id="Skin/👶🏽-03-Brown" mask="url(#react-mask-3783824)" fill="#FD9841"><g transform="translate(0.000000, 0.000000)" id="Color"><rect x="0" y="0" width="264" height="280"></rect></g></g><path d="M156,79 L156,102 C156,132.927946 130.927946,158 100,158 C69.072054,158 44,132.927946 44,102 L44,79 L44,94 C44,124.927946 69.072054,150 100,150 C130.927946,150 156,124.927946 156,94 L156,79 Z" id="Neck-Shadow" fill-opacity="0.100000001" fill="#000000" mask="url(#react-mask-3783824)"></path></g><g id="Clothing/Shirt-Crew-Neck" transform="translate(0.000000, 170.000000)"><defs><path d="M165.960472,29.2949161 C202.936473,32.3249982 232,63.2942856 232,101.051724 L232,110 L32,110 L32,101.051724 C32,62.9525631 61.591985,31.7649812 99.0454063,29.2195264 C99.0152598,29.5931145 99,29.9692272 99,30.3476251 C99,42.2107177 113.998461,51.8276544 132.5,51.8276544 C151.001539,51.8276544 166,42.2107177 166,30.3476251 C166,29.9946691 165.986723,29.6437014 165.960472,29.2949161 Z" id="react-path-3783825"></path></defs><mask id="react-mask-3783826" fill="white"><use xlink:href="#react-path-3783825"></use></mask><use id="Clothes" fill="#E6E6E6" fill-rule="evenodd" xlink:href="#react-path-3783825"></use><g id="Color/Palette/Gray-01" mask="url(#react-mask-3783826)" fill-rule="evenodd" fill="#5199E4"><rect id="🖍Color" x="0" y="0" width="264" height="110"></rect></g><g id="Shadowy" opacity="0.599999964" stroke-width="1" fill-rule="evenodd" mask="url(#react-mask-3783826)" fill-opacity="0.16" fill="#000000"><g transform="translate(92.000000, 4.000000)" id="Hola-👋🏼"><ellipse cx="40.5" cy="27.8476251" rx="39.6351047" ry="26.9138272"></ellipse></g></g></g><g id="Face" transform="translate(76.000000, 82.000000)" fill="#000000"><g id="Mouth/Serious" transform="translate(2.000000, 52.000000)" fill="#000000" fill-opacity="0.699999988"><rect id="Why-so-serious?" x="42" y="18" width="24" height="6" rx="3"></rect></g><g id="Nose/Default" transform="translate(28.000000, 40.000000)" fill-opacity="0.16"><path d="M16,8 C16,12.418278 21.372583,16 28,16 L28,16 C34.627417,16 40,12.418278 40,8" id="Nose"></path></g><g id="Eyes/Closed-😌" transform="translate(0.000000, 8.000000)" fill-opacity="0.599999964"><path d="M16.1601674,32.4473116 C18.006676,28.648508 22.1644225,26 26.9975803,26 C31.8136766,26 35.9591217,28.629842 37.8153518,32.4071242 C38.3667605,33.5291977 37.5821037,34.4474817 36.790607,33.7670228 C34.3395063,31.6597833 30.8587163,30.3437884 26.9975803,30.3437884 C23.2572061,30.3437884 19.8737584,31.5787519 17.4375392,33.5716412 C16.5467928,34.3002944 15.6201012,33.5583844 16.1601674,32.4473116 Z" id="Closed-Eye" transform="translate(27.000000, 30.000000) scale(1, -1) translate(-27.000000, -30.000000) "></path><path d="M74.1601674,32.4473116 C76.006676,28.648508 80.1644225,26 84.9975803,26 C89.8136766,26 93.9591217,28.629842 95.8153518,32.4071242 C96.3667605,33.5291977 95.5821037,34.4474817 94.790607,33.7670228 C92.3395063,31.6597833 88.8587163,30.3437884 84.9975803,30.3437884 C81.2572061,30.3437884 77.8737584,31.5787519 75.4375392,33.5716412 C74.5467928,34.3002944 73.6201012,33.5583844 74.1601674,32.4473116 Z" id="Closed-Eye" transform="translate(85.000000, 30.000000) scale(1, -1) translate(-85.000000, -30.000000) "></path></g><g id="Eyebrow/Natural/Default-Natural" fill-opacity="0.599999964"><path d="M26.0390934,6.21012364 C20.2775554,6.98346216 11.2929313,12.0052479 12.04426,17.8178111 C12.0689481,18.0080543 12.3567302,18.0673468 12.4809077,17.9084937 C14.9674041,14.7203351 34.1927973,10.0365481 41.1942673,11.0147151 C41.8350523,11.1044465 42.2580662,10.4430343 41.8210501,10.0302067 C38.0765663,6.49485426 31.2003792,5.51224825 26.0390934,6.21012364" id="Eyebrow" transform="translate(27.000000, 12.000000) rotate(5.000000) translate(-27.000000, -12.000000) "></path><path d="M85.0390934,6.21012364 C79.2775554,6.98346216 70.2929313,12.0052479 71.04426,17.8178111 C71.0689481,18.0080543 71.3567302,18.0673468 71.4809077,17.9084937 C73.9674041,14.7203351 93.1927973,10.0365481 100.194267,11.0147151 C100.835052,11.1044465 101.258066,10.4430343 100.82105,10.0302067 C97.0765663,6.49485426 90.2003792,5.51224825 85.0390934,6.21012364" id="Eyebrow" transform="translate(86.000000, 12.000000) scale(-1, 1) rotate(5.000000) translate(-86.000000, -12.000000) "></path></g></g><g id="Top" stroke-width="1" fill-rule="evenodd"><defs><rect id="react-path-3783831" x="0" y="0" width="264" height="280"></rect><path d="M180.14998,39.9204083 C177.390206,37.1003988 174.185913,34.7068297 171.069252,32.3065503 C170.381566,31.777442 169.682843,31.2610833 169.010544,30.7118441 C168.857687,30.5870323 167.291999,29.4657388 167.104691,29.0530544 C166.653816,28.0602634 166.915042,28.8332916 166.977255,27.6485857 C167.055857,26.150508 170.11064,21.9193194 167.831176,20.9490079 C166.828413,20.522232 165.039628,21.6579526 164.077671,22.0330592 C162.196235,22.7671676 160.291721,23.3932399 158.346734,23.9330847 C159.278588,22.0763407 161.055333,18.3594977 157.71591,19.3543018 C155.114345,20.1293431 152.690052,22.1219709 150.075777,23.0594018 C150.940735,21.6415124 154.399901,17.2479341 151.274209,17.0023366 C150.301549,16.925839 147.471201,18.7503735 146.423952,19.1395717 C143.287223,20.3054888 140.083264,21.0590571 136.789999,21.6525844 C125.59203,23.6707114 112.497238,23.0953019 102.1368,28.1934632 C94.1494796,32.1236942 86.262502,38.2220278 81.648386,45.987539 C77.2011742,53.472559 75.537818,61.6641751 74.6069673,70.2412987 C73.9239644,76.535909 73.8684412,83.0425652 74.1878671,89.3599905 C74.2922241,91.4297869 74.5250203,100.970847 77.5319724,98.0813859 C79.0300967,96.641688 79.019059,90.8282073 79.3963495,88.8604076 C80.1472513,84.9452748 80.870057,81.0126951 82.122006,77.2227096 C84.3282191,70.5439339 86.9307879,63.4296587 92.4269209,58.8297383 C95.9539853,55.8782066 98.4307906,51.8889248 101.806002,48.9112229 C103.322188,47.5738572 102.165231,47.7130963 104.602902,47.888571 C106.240504,48.006337 107.885464,48.0512961 109.52641,48.0942421 C113.322394,48.1928837 117.124399,48.16772 120.921387,48.1811407 C128.56821,48.208653 136.179243,48.316689 143.818708,47.9164188 C147.213653,47.7385955 150.617965,47.6423024 154.00388,47.3282597 C155.895349,47.152785 159.251496,45.9405668 160.808488,46.8669256 C162.233362,47.7144383 163.71309,50.4817719 164.736257,51.615144 C167.153525,54.2935659 170.035717,56.3392052 172.862385,58.5354911 C178.756547,63.114945 181.732392,68.8666908 183.522515,76.023241 C185.305949,83.1532854 184.805905,89.76815 187.013456,96.78479 C187.401784,98.0184813 188.428965,100.14498 189.695296,98.2389151 C189.930434,97.8849461 189.869559,95.9390277 189.869559,94.819339 C189.869559,90.2995934 191.014141,86.9083772 190.999758,82.3591197 C190.943566,68.5271489 190.49637,50.4908308 180.14998,39.9204083 Z" id="react-path-3783830"></path><filter x="-0.8%" y="-2.0%" width="101.5%" height="108.0%" filterUnits="objectBoundingBox" id="react-filter-3783827"><feOffset dx="0" dy="2" in="SourceAlpha" result="shadowOffsetOuter1"></feOffset><feColorMatrix values="0 0 0 0 0   0 0 0 0 0   0 0 0 0 0  0 0 0 0.16 0" type="matrix" in="shadowOffsetOuter1" result="shadowMatrixOuter1"></feColorMatrix><feMerge><feMergeNode in="shadowMatrixOuter1"></feMergeNode><feMergeNode in="SourceGraphic"></feMergeNode></feMerge></filter></defs><mask id="react-mask-3783829" fill="white"><use xlink:href="#react-path-3783831"></use></mask><g id="Mask"></g><g id="Top/Short-Hair/Short-Flat" mask="url(#react-mask-3783829)"><g transform="translate(-1.000000, 0.000000)"><mask id="react-mask-3783828" fill="white"><use xlink:href="#react-path-3783830"></use></mask><use id="Short-Hair" stroke="none" fill="#1F3140" fill-rule="evenodd" xlink:href="#react-path-3783830"></use><g id="Skin/👶🏽-03-Brown" mask="url(#react-mask-3783828)" fill="#4A312C"><g transform="translate(0.000000, 0.000000) " id="Color"><rect x="0" y="0" width="264" height="280"></rect></g></g></g></g></g></g></g></g></g>` },
       },
       maya: {
         idle: { vb: '0 0 264 280', corpo: `<desc>Created with getavataaars.com</desc><defs><circle id="react-path-1060466" cx="120" cy="120" r="120"></circle><path d="M12,160 C12,226.27417 65.72583,280 132,280 C198.27417,280 252,226.27417 252,160 L264,160 L264,-1.42108547e-14 L-3.19744231e-14,-1.42108547e-14 L-3.19744231e-14,160 L12,160 Z" id="react-path-1060467"></path><path d="M124,144.610951 L124,163 L128,163 L128,163 C167.764502,163 200,195.235498 200,235 L200,244 L0,244 L0,235 C-4.86974701e-15,195.235498 32.235498,163 72,163 L72,163 L76,163 L76,144.610951 C58.7626345,136.422372 46.3722246,119.687011 44.3051388,99.8812385 C38.4803105,99.0577866 34,94.0521096 34,88 L34,74 C34,68.0540074 38.3245733,63.1180731 44,62.1659169 L44,56 L44,56 C44,25.072054 69.072054,5.68137151e-15 100,0 L100,0 L100,0 C130.927946,-5.68137151e-15 156,25.072054 156,56 L156,62.1659169 C161.675427,63.1180731 166,68.0540074 166,74 L166,88 C166,94.0521096 161.51969,99.0577866 155.694861,99.8812385 C153.627775,119.687011 141.237365,136.422372 124,144.610951 Z" id="react-path-1060468"></path></defs><g id="Avataaar" stroke="none" stroke-width="1" fill="none" fill-rule="evenodd"><g transform="translate(-825.000000, -1100.000000)" id="Avataaar/Circle"><g transform="translate(825.000000, 1100.000000)"><g id="Mask"></g><g id="Avataaar" stroke-width="1" fill-rule="evenodd" mask="url(#react-mask-1060470)"><g id="Body" transform="translate(32.000000, 36.000000)"><mask id="react-mask-1060471" fill="white"><use xlink:href="#react-path-1060468"></use></mask><use fill="#D0C6AC" xlink:href="#react-path-1060468"></use><g id="Skin/👶🏽-03-Brown" mask="url(#react-mask-1060471)" fill="#FD9841"><g transform="translate(0.000000, 0.000000)" id="Color"><rect x="0" y="0" width="264" height="280"></rect></g></g><path d="M156,79 L156,102 C156,132.927946 130.927946,158 100,158 C69.072054,158 44,132.927946 44,102 L44,79 L44,94 C44,124.927946 69.072054,150 100,150 C130.927946,150 156,124.927946 156,94 L156,79 Z" id="Neck-Shadow" fill-opacity="0.100000001" fill="#000000" mask="url(#react-mask-1060471)"></path></g><g id="Clothing/Shirt-Crew-Neck" transform="translate(0.000000, 170.000000)"><defs><path d="M165.960472,29.2949161 C202.936473,32.3249982 232,63.2942856 232,101.051724 L232,110 L32,110 L32,101.051724 C32,62.9525631 61.591985,31.7649812 99.0454063,29.2195264 C99.0152598,29.5931145 99,29.9692272 99,30.3476251 C99,42.2107177 113.998461,51.8276544 132.5,51.8276544 C151.001539,51.8276544 166,42.2107177 166,30.3476251 C166,29.9946691 165.986723,29.6437014 165.960472,29.2949161 Z" id="react-path-1060472"></path></defs><mask id="react-mask-1060473" fill="white"><use xlink:href="#react-path-1060472"></use></mask><use id="Clothes" fill="#E6E6E6" fill-rule="evenodd" xlink:href="#react-path-1060472"></use><g id="Color/Palette/Gray-01" mask="url(#react-mask-1060473)" fill-rule="evenodd" fill="#2F9A94"><rect id="🖍Color" x="0" y="0" width="264" height="110"></rect></g><g id="Shadowy" opacity="0.599999964" stroke-width="1" fill-rule="evenodd" mask="url(#react-mask-1060473)" fill-opacity="0.16" fill="#000000"><g transform="translate(92.000000, 4.000000)" id="Hola-👋🏼"><ellipse cx="40.5" cy="27.8476251" rx="39.6351047" ry="26.9138272"></ellipse></g></g></g><g id="Face" transform="translate(76.000000, 82.000000)" fill="#000000"><g id="Mouth/Smile" transform="translate(2.000000, 52.000000)"><defs><path d="M35.117844,15.1280772 C36.1757121,24.6198025 44.2259873,32 54,32 C63.8042055,32 71.8740075,24.574136 72.8917593,15.0400546 C72.9736685,14.272746 72.1167429,13 71.042767,13 C56.1487536,13 44.7379213,13 37.0868244,13 C36.0066168,13 35.0120058,14.1784435 35.117844,15.1280772 Z" id="react-path-1060474"></path></defs><mask id="react-mask-1060475" fill="white"><use xlink:href="#react-path-1060474"></use></mask><use id="Mouth" fill-opacity="0.699999988" fill="#000000" fill-rule="evenodd" xlink:href="#react-path-1060474"></use><rect id="Teeth" fill="#FFFFFF" fill-rule="evenodd" mask="url(#react-mask-1060475)" x="39" y="2" width="31" height="16" rx="5"></rect><g id="Tongue" stroke-width="1" fill-rule="evenodd" mask="url(#react-mask-1060475)" fill="#FF4F6D"><g transform="translate(38.000000, 24.000000)"><circle cx="11" cy="11" r="11"></circle><circle cx="21" cy="11" r="11"></circle></g></g></g><g id="Nose/Default" transform="translate(28.000000, 40.000000)" fill-opacity="0.16"><path d="M16,8 C16,12.418278 21.372583,16 28,16 L28,16 C34.627417,16 40,12.418278 40,8" id="Nose"></path></g><g id="Eyes/Default-😀" transform="translate(0.000000, 8.000000)" fill-opacity="0.599999964"><circle id="Eye" cx="30" cy="22" r="6"></circle><circle id="Eye" cx="82" cy="22" r="6"></circle></g><g id="Eyebrow/Natural/Default-Natural" fill-opacity="0.599999964"><path d="M26.0390934,6.21012364 C20.2775554,6.98346216 11.2929313,12.0052479 12.04426,17.8178111 C12.0689481,18.0080543 12.3567302,18.0673468 12.4809077,17.9084937 C14.9674041,14.7203351 34.1927973,10.0365481 41.1942673,11.0147151 C41.8350523,11.1044465 42.2580662,10.4430343 41.8210501,10.0302067 C38.0765663,6.49485426 31.2003792,5.51224825 26.0390934,6.21012364" id="Eyebrow" transform="translate(27.000000, 12.000000) rotate(5.000000) translate(-27.000000, -12.000000) "></path><path d="M85.0390934,6.21012364 C79.2775554,6.98346216 70.2929313,12.0052479 71.04426,17.8178111 C71.0689481,18.0080543 71.3567302,18.0673468 71.4809077,17.9084937 C73.9674041,14.7203351 93.1927973,10.0365481 100.194267,11.0147151 C100.835052,11.1044465 101.258066,10.4430343 100.82105,10.0302067 C97.0765663,6.49485426 90.2003792,5.51224825 85.0390934,6.21012364" id="Eyebrow" transform="translate(86.000000, 12.000000) scale(-1, 1) rotate(5.000000) translate(-86.000000, -12.000000) "></path></g></g><g id="Top" stroke-width="1" fill-rule="evenodd"><defs><rect id="react-path-1060478" x="0" y="0" width="264" height="280"></rect><path d="M133.506381,81.3351151 C137.363649,83.3307002 140,87.3574737 140,92 L140,105 C140,111.018625 135.569129,116.002364 129.791419,116.867187 C128.048193,137.114792 115.530782,154.282984 98,162.610951 L98,162.610951 L98,181 L102,181 C119.490913,181 135.525121,187.236892 148,197.608051 L148,74 C148,53.5654643 139.717268,35.0654643 126.325902,21.6740982 C112.934536,8.28273213 94.4345357,-3.55271368e-15 74,0 C33.1309285,7.10542736e-15 -7.10542736e-15,33.1309285 0,74 L0,257.716445 C13.5691766,255.775526 24,244.105888 24,230 L24,184.423101 C30.9346808,182.200199 38.3271796,181 46,181 L50,181 L50,162.610951 C38.7726252,157.277407 29.6015372,148.317951 24,137.245847 L24,75.2659587 C33.1467898,72.2910056 42.777598,68.0170651 52.3415164,62.4953343 C67.7445474,53.6023901 80.4313947,42.9409152 89.0661426,32.3970356 C90.8310687,37.5951441 93.1752556,42.8009742 96.1104311,47.8848473 C104.877881,63.0705152 117.224186,74.2337047 130,79.9170491 L130,80.1659169 C130.400422,80.233095 130.794121,80.3201038 131.18005,80.4258987 C131.954509,80.7493055 132.730185,81.0524853 133.506381,81.3351151 Z" id="react-path-1060479"></path></defs><mask id="react-mask-1060476" fill="white"><use xlink:href="#react-path-1060478"></use></mask><g id="Mask"></g><g id="Top/Long-Hair/Straight" mask="url(#react-mask-1060476)"><g transform="translate(-1.000000, 0.000000)"><g id="Hair" stroke-width="1" fill="none" fill-rule="evenodd" transform="translate(59.000000, 18.000000)"><mask id="react-mask-1060477" fill="white"><use xlink:href="#react-path-1060479"></use></mask><use id="Mask-Hair" fill="#944F23" xlink:href="#react-path-1060479"></use><g id="Skin/👶🏽-03-Brown" mask="url(#react-mask-1060477)" fill="#2C1B18"><g transform="translate(0.000000, 0.000000) " id="Color"><rect x="0" y="0" width="264" height="280"></rect></g></g></g><path d="M192.506381,99.3351151 C197.3745,101.107702 202.263079,102.071957 207,102.148232 L207,102.148232 L207,92 C207,71.5654643 198.717268,53.0654643 185.325902,39.6740982 C198.717268,53.0654643 207,71.5654643 207,92 L207,215.608051 C194.525121,205.236892 178.490913,199 161,199 L157,199 L157,180.610951 L157,180.610951 C174.530782,172.282984 187.048193,155.114792 188.791419,134.867187 C194.569129,134.002364 199,129.018625 199,123 L199,110 C199,105.357474 196.363649,101.3307 192.506381,99.3351151 Z M190.18005,98.4258987 C189.794121,98.3201038 189.400422,98.233095 189,98.1659169 L189,97.9170491 C189.392974,98.0918644 189.786355,98.2614951 190.18005,98.4258987 Z M83,155.245847 C88.6015372,166.317951 97.7726252,175.277407 109,180.610951 L109,199 L105,199 C97.3271796,199 89.9346808,200.200199 83,202.423101 L83,155.245847 Z" id="Shadow" fill-opacity="0.24" fill="#000000" fill-rule="evenodd"></path></g></g></g></g></g></g></g>` },
@@ -1254,27 +1621,15 @@ window.__ModuleLoader__.load({
         waiting: { vb: '0 0 264 280', corpo: `<desc>Created with getavataaars.com</desc><defs><circle id="react-path-1465409" cx="120" cy="120" r="120"></circle><path d="M12,160 C12,226.27417 65.72583,280 132,280 C198.27417,280 252,226.27417 252,160 L264,160 L264,-1.42108547e-14 L-3.19744231e-14,-1.42108547e-14 L-3.19744231e-14,160 L12,160 Z" id="react-path-1465410"></path><path d="M124,144.610951 L124,163 L128,163 L128,163 C167.764502,163 200,195.235498 200,235 L200,244 L0,244 L0,235 C-4.86974701e-15,195.235498 32.235498,163 72,163 L72,163 L76,163 L76,144.610951 C58.7626345,136.422372 46.3722246,119.687011 44.3051388,99.8812385 C38.4803105,99.0577866 34,94.0521096 34,88 L34,74 C34,68.0540074 38.3245733,63.1180731 44,62.1659169 L44,56 L44,56 C44,25.072054 69.072054,5.68137151e-15 100,0 L100,0 L100,0 C130.927946,-5.68137151e-15 156,25.072054 156,56 L156,62.1659169 C161.675427,63.1180731 166,68.0540074 166,74 L166,88 C166,94.0521096 161.51969,99.0577866 155.694861,99.8812385 C153.627775,119.687011 141.237365,136.422372 124,144.610951 Z" id="react-path-1465411"></path></defs><g id="Avataaar" stroke="none" stroke-width="1" fill="none" fill-rule="evenodd"><g transform="translate(-825.000000, -1100.000000)" id="Avataaar/Circle"><g transform="translate(825.000000, 1100.000000)"><g id="Mask"></g><g id="Avataaar" stroke-width="1" fill-rule="evenodd" mask="url(#react-mask-1465413)"><g id="Body" transform="translate(32.000000, 36.000000)"><mask id="react-mask-1465414" fill="white"><use xlink:href="#react-path-1465411"></use></mask><use fill="#D0C6AC" xlink:href="#react-path-1465411"></use><g id="Skin/👶🏽-03-Brown" mask="url(#react-mask-1465414)" fill="#FD9841"><g transform="translate(0.000000, 0.000000)" id="Color"><rect x="0" y="0" width="264" height="280"></rect></g></g><path d="M156,79 L156,102 C156,132.927946 130.927946,158 100,158 C69.072054,158 44,132.927946 44,102 L44,79 L44,94 C44,124.927946 69.072054,150 100,150 C130.927946,150 156,124.927946 156,94 L156,79 Z" id="Neck-Shadow" fill-opacity="0.100000001" fill="#000000" mask="url(#react-mask-1465414)"></path></g><g id="Clothing/Shirt-Crew-Neck" transform="translate(0.000000, 170.000000)"><defs><path d="M165.960472,29.2949161 C202.936473,32.3249982 232,63.2942856 232,101.051724 L232,110 L32,110 L32,101.051724 C32,62.9525631 61.591985,31.7649812 99.0454063,29.2195264 C99.0152598,29.5931145 99,29.9692272 99,30.3476251 C99,42.2107177 113.998461,51.8276544 132.5,51.8276544 C151.001539,51.8276544 166,42.2107177 166,30.3476251 C166,29.9946691 165.986723,29.6437014 165.960472,29.2949161 Z" id="react-path-1465415"></path></defs><mask id="react-mask-1465416" fill="white"><use xlink:href="#react-path-1465415"></use></mask><use id="Clothes" fill="#E6E6E6" fill-rule="evenodd" xlink:href="#react-path-1465415"></use><g id="Color/Palette/Gray-01" mask="url(#react-mask-1465416)" fill-rule="evenodd" fill="#2F9A94"><rect id="🖍Color" x="0" y="0" width="264" height="110"></rect></g><g id="Shadowy" opacity="0.599999964" stroke-width="1" fill-rule="evenodd" mask="url(#react-mask-1465416)" fill-opacity="0.16" fill="#000000"><g transform="translate(92.000000, 4.000000)" id="Hola-👋🏼"><ellipse cx="40.5" cy="27.8476251" rx="39.6351047" ry="26.9138272"></ellipse></g></g></g><g id="Face" transform="translate(76.000000, 82.000000)" fill="#000000"><g id="Mouth/Sad" transform="translate(2.000000, 52.000000)" fill-opacity="0.699999988" fill="#000000"><path d="M40.0582943,16.6539438 C40.7076459,23.6831146 46.7016363,28.3768187 54,28.3768187 C61.3416045,28.3768187 67.3633339,23.627332 67.9526838,16.5287605 C67.9840218,16.1513016 67.0772329,15.8529531 66.6289111,16.077395 C61.0902255,18.8502083 56.8805885,20.2366149 54,20.2366149 C51.1558456,20.2366149 47.0072148,18.8804569 41.5541074,16.168141 C41.0473376,15.9160792 40.0197139,16.2363147 40.0582943,16.6539438 Z" id="Mouth" transform="translate(54.005357, 22.188409) scale(1, -1) translate(-54.005357, -22.188409) "></path></g><g id="Nose/Default" transform="translate(28.000000, 40.000000)" fill-opacity="0.16"><path d="M16,8 C16,12.418278 21.372583,16 28,16 L28,16 C34.627417,16 40,12.418278 40,8" id="Nose"></path></g><g id="Eyes/Default-😀" transform="translate(0.000000, 8.000000)" fill-opacity="0.599999964"><circle id="Eye" cx="30" cy="22" r="6"></circle><circle id="Eye" cx="82" cy="22" r="6"></circle></g><g id="Eyebrow/Outline/Sad-Concerned" fill-opacity="0.599999964" fill-rule="nonzero"><path d="M15.9726042,19.4088529 C17.452356,11.0203704 30.0622688,5.22829657 39.2106453,8.9774793 C40.2254706,9.39337449 41.4016967,8.94600219 41.8378196,7.97824531 C42.2739426,7.01048842 41.8048116,5.88881678 40.7899862,5.47292159 C29.3457328,0.782843812 13.9550264,7.85221132 12.0280273,18.7760684 C11.84479,19.8148122 12.5792704,20.798534 13.6685352,20.9732726 C14.7578,21.1480113 15.7893668,20.4475967 15.9726042,19.4088529 Z" id="Eyebrow" transform="translate(27.000414, 12.500000) scale(-1, -1) translate(-27.000414, -12.500000) "></path><path d="M73.9726042,19.4088529 C75.452356,11.0203704 88.0622688,5.22829657 97.2106453,8.9774793 C98.2254706,9.39337449 99.4016967,8.94600219 99.8378196,7.97824531 C100.273943,7.01048842 99.8048116,5.88881678 98.7899862,5.47292159 C87.3457328,0.782843812 71.9550264,7.85221132 70.0280273,18.7760684 C69.84479,19.8148122 70.5792704,20.798534 71.6685352,20.9732726 C72.7578,21.1480113 73.7893668,20.4475967 73.9726042,19.4088529 Z" id="Eyebrow" transform="translate(85.000414, 12.500000) scale(1, -1) translate(-85.000414, -12.500000) "></path></g></g><g id="Top" stroke-width="1" fill-rule="evenodd"><defs><rect id="react-path-1465419" x="0" y="0" width="264" height="280"></rect><path d="M133.506381,81.3351151 C137.363649,83.3307002 140,87.3574737 140,92 L140,105 C140,111.018625 135.569129,116.002364 129.791419,116.867187 C128.048193,137.114792 115.530782,154.282984 98,162.610951 L98,162.610951 L98,181 L102,181 C119.490913,181 135.525121,187.236892 148,197.608051 L148,74 C148,53.5654643 139.717268,35.0654643 126.325902,21.6740982 C112.934536,8.28273213 94.4345357,-3.55271368e-15 74,0 C33.1309285,7.10542736e-15 -7.10542736e-15,33.1309285 0,74 L0,257.716445 C13.5691766,255.775526 24,244.105888 24,230 L24,184.423101 C30.9346808,182.200199 38.3271796,181 46,181 L50,181 L50,162.610951 C38.7726252,157.277407 29.6015372,148.317951 24,137.245847 L24,75.2659587 C33.1467898,72.2910056 42.777598,68.0170651 52.3415164,62.4953343 C67.7445474,53.6023901 80.4313947,42.9409152 89.0661426,32.3970356 C90.8310687,37.5951441 93.1752556,42.8009742 96.1104311,47.8848473 C104.877881,63.0705152 117.224186,74.2337047 130,79.9170491 L130,80.1659169 C130.400422,80.233095 130.794121,80.3201038 131.18005,80.4258987 C131.954509,80.7493055 132.730185,81.0524853 133.506381,81.3351151 Z" id="react-path-1465420"></path></defs><mask id="react-mask-1465417" fill="white"><use xlink:href="#react-path-1465419"></use></mask><g id="Mask"></g><g id="Top/Long-Hair/Straight" mask="url(#react-mask-1465417)"><g transform="translate(-1.000000, 0.000000)"><g id="Hair" stroke-width="1" fill="none" fill-rule="evenodd" transform="translate(59.000000, 18.000000)"><mask id="react-mask-1465418" fill="white"><use xlink:href="#react-path-1465420"></use></mask><use id="Mask-Hair" fill="#944F23" xlink:href="#react-path-1465420"></use><g id="Skin/👶🏽-03-Brown" mask="url(#react-mask-1465418)" fill="#2C1B18"><g transform="translate(0.000000, 0.000000) " id="Color"><rect x="0" y="0" width="264" height="280"></rect></g></g></g><path d="M192.506381,99.3351151 C197.3745,101.107702 202.263079,102.071957 207,102.148232 L207,102.148232 L207,92 C207,71.5654643 198.717268,53.0654643 185.325902,39.6740982 C198.717268,53.0654643 207,71.5654643 207,92 L207,215.608051 C194.525121,205.236892 178.490913,199 161,199 L157,199 L157,180.610951 L157,180.610951 C174.530782,172.282984 187.048193,155.114792 188.791419,134.867187 C194.569129,134.002364 199,129.018625 199,123 L199,110 C199,105.357474 196.363649,101.3307 192.506381,99.3351151 Z M190.18005,98.4258987 C189.794121,98.3201038 189.400422,98.233095 189,98.1659169 L189,97.9170491 C189.392974,98.0918644 189.786355,98.2614951 190.18005,98.4258987 Z M83,155.245847 C88.6015372,166.317951 97.7726252,175.277407 109,180.610951 L109,199 L105,199 C97.3271796,199 89.9346808,200.200199 83,202.423101 L83,155.245847 Z" id="Shadow" fill-opacity="0.24" fill="#000000" fill-rule="evenodd"></path></g></g></g></g></g></g></g>` },
         error: { vb: '0 0 264 280', corpo: `<desc>Created with getavataaars.com</desc><defs><circle id="react-path-1465517" cx="120" cy="120" r="120"></circle><path d="M12,160 C12,226.27417 65.72583,280 132,280 C198.27417,280 252,226.27417 252,160 L264,160 L264,-1.42108547e-14 L-3.19744231e-14,-1.42108547e-14 L-3.19744231e-14,160 L12,160 Z" id="react-path-1465518"></path><path d="M124,144.610951 L124,163 L128,163 L128,163 C167.764502,163 200,195.235498 200,235 L200,244 L0,244 L0,235 C-4.86974701e-15,195.235498 32.235498,163 72,163 L72,163 L76,163 L76,144.610951 C58.7626345,136.422372 46.3722246,119.687011 44.3051388,99.8812385 C38.4803105,99.0577866 34,94.0521096 34,88 L34,74 C34,68.0540074 38.3245733,63.1180731 44,62.1659169 L44,56 L44,56 C44,25.072054 69.072054,5.68137151e-15 100,0 L100,0 L100,0 C130.927946,-5.68137151e-15 156,25.072054 156,56 L156,62.1659169 C161.675427,63.1180731 166,68.0540074 166,74 L166,88 C166,94.0521096 161.51969,99.0577866 155.694861,99.8812385 C153.627775,119.687011 141.237365,136.422372 124,144.610951 Z" id="react-path-1465519"></path></defs><g id="Avataaar" stroke="none" stroke-width="1" fill="none" fill-rule="evenodd"><g transform="translate(-825.000000, -1100.000000)" id="Avataaar/Circle"><g transform="translate(825.000000, 1100.000000)"><g id="Mask"></g><g id="Avataaar" stroke-width="1" fill-rule="evenodd" mask="url(#react-mask-1465521)"><g id="Body" transform="translate(32.000000, 36.000000)"><mask id="react-mask-1465522" fill="white"><use xlink:href="#react-path-1465519"></use></mask><use fill="#D0C6AC" xlink:href="#react-path-1465519"></use><g id="Skin/👶🏽-03-Brown" mask="url(#react-mask-1465522)" fill="#FD9841"><g transform="translate(0.000000, 0.000000)" id="Color"><rect x="0" y="0" width="264" height="280"></rect></g></g><path d="M156,79 L156,102 C156,132.927946 130.927946,158 100,158 C69.072054,158 44,132.927946 44,102 L44,79 L44,94 C44,124.927946 69.072054,150 100,150 C130.927946,150 156,124.927946 156,94 L156,79 Z" id="Neck-Shadow" fill-opacity="0.100000001" fill="#000000" mask="url(#react-mask-1465522)"></path></g><g id="Clothing/Shirt-Crew-Neck" transform="translate(0.000000, 170.000000)"><defs><path d="M165.960472,29.2949161 C202.936473,32.3249982 232,63.2942856 232,101.051724 L232,110 L32,110 L32,101.051724 C32,62.9525631 61.591985,31.7649812 99.0454063,29.2195264 C99.0152598,29.5931145 99,29.9692272 99,30.3476251 C99,42.2107177 113.998461,51.8276544 132.5,51.8276544 C151.001539,51.8276544 166,42.2107177 166,30.3476251 C166,29.9946691 165.986723,29.6437014 165.960472,29.2949161 Z" id="react-path-1465523"></path></defs><mask id="react-mask-1465524" fill="white"><use xlink:href="#react-path-1465523"></use></mask><use id="Clothes" fill="#E6E6E6" fill-rule="evenodd" xlink:href="#react-path-1465523"></use><g id="Color/Palette/Gray-01" mask="url(#react-mask-1465524)" fill-rule="evenodd" fill="#2F9A94"><rect id="🖍Color" x="0" y="0" width="264" height="110"></rect></g><g id="Shadowy" opacity="0.599999964" stroke-width="1" fill-rule="evenodd" mask="url(#react-mask-1465524)" fill-opacity="0.16" fill="#000000"><g transform="translate(92.000000, 4.000000)" id="Hola-👋🏼"><ellipse cx="40.5" cy="27.8476251" rx="39.6351047" ry="26.9138272"></ellipse></g></g></g><g id="Face" transform="translate(76.000000, 82.000000)" fill="#000000"><g id="Mouth/Grimace" transform="translate(2.000000, 52.000000)"><defs><rect id="react-path-1465525" x="24" y="9" width="60" height="22" rx="11"></rect></defs><rect id="Mouth" fill-opacity="0.599999964" fill="#000000" fill-rule="evenodd" x="22" y="7" width="64" height="26" rx="13"></rect><mask id="react-mask-1465526" fill="white"><use xlink:href="#react-path-1465525"></use></mask><use id="Mouth" fill="#FFFFFF" fill-rule="evenodd" xlink:href="#react-path-1465525"></use><path d="M71,22 L62,22 L62,34 L58,34 L58,22 L49,22 L49,34 L45,34 L45,22 L36,22 L36,34 L32,34 L32,22 L24,22 L24,18 L32,18 L32,6 L36,6 L36,18 L45,18 L45,6 L49,6 L49,18 L58,18 L58,6 L62,6 L62,18 L71,18 L71,6 L75,6 L75,18 L83.8666667,18 L83.8666667,22 L75,22 L75,34 L71,34 L71,22 Z" id="Grimace-Teeth" fill="#E6E6E6" fill-rule="evenodd" mask="url(#react-mask-1465526)"></path></g><g id="Nose/Default" transform="translate(28.000000, 40.000000)" fill-opacity="0.16"><path d="M16,8 C16,12.418278 21.372583,16 28,16 L28,16 C34.627417,16 40,12.418278 40,8" id="Nose"></path></g><g id="Eyes/Cry-😢" transform="translate(0.000000, 8.000000)"><circle id="Eye" fill-opacity="0.599999964" fill="#000000" fill-rule="evenodd" cx="30" cy="22" r="6"></circle><path d="M25,27 C25,27 19,34.2706667 19,38.2706667 C19,41.5846667 21.686,44.2706667 25,44.2706667 C28.314,44.2706667 31,41.5846667 31,38.2706667 C31,34.2706667 25,27 25,27 Z" id="Drop" fill="#92D9FF" fill-rule="nonzero"></path><circle id="Eye" fill-opacity="0.599999964" fill="#000000" fill-rule="evenodd" cx="82" cy="22" r="6"></circle></g><g id="Eyebrow/Natural/Angry-Natural" fill-opacity="0.599999964"><path d="M44.8565785,12.2282877 C44.8578785,12.2192877 44.8578785,12.2192877 44.8565785,12.2282877 M17.5862288,7.89238094 C15.2441598,8.3302947 13.0866155,9.78806858 12.1523766,12.0987479 C11.8009169,12.967391 11.3917103,14.9243181 11.7083227,15.8073302 C11.8284629,16.14295 12.0332321,16.1008692 12.9555234,16.0430509 C14.643791,15.9369937 16.9330912,13.6622369 18.7484684,13.2557982 C21.2753939,12.6899315 23.9825295,13.1148447 26.4961798,13.6882381 C30.8109365,14.6725177 36.4854008,17.7875215 40.9461842,16.1699775 C41.2783949,16.0495512 45.6210294,12.9225732 44.3685187,12.2769925 C43.9238011,11.9068186 41.1370145,12.0854053 40.6216067,11.9988489 C38.2277647,11.5971998 35.7297127,10.9345131 33.373373,10.3265657 C28.2329017,9.00016592 22.9666484,6.88073171 17.5862288,7.89238094" id="Eyebrows-The-Web" transform="translate(28.094701, 12.127505) rotate(17.000000) translate(-28.094701, -12.127505) "></path><path d="M100.918293,12.2094196 C100.919593,12.2004196 100.919593,12.2004196 100.918293,12.2094196 M73.5862288,7.89238094 C71.2441598,8.3302947 69.0866155,9.78806858 68.1523766,12.0987479 C67.8009169,12.967391 67.3917103,14.9243181 67.7083227,15.8073302 C67.8284629,16.14295 68.0332321,16.1008692 68.9555234,16.0430509 C70.643791,15.9369937 72.9330912,13.6622369 74.7484684,13.2557982 C77.2753939,12.6899315 79.9825295,13.1148447 82.4961798,13.6882381 C86.8109365,14.6725177 92.4854008,17.7875215 96.9461842,16.1699775 C97.2783949,16.0495512 101.621029,12.9225732 100.368519,12.2769925 C99.9238011,11.9068186 97.1370145,12.0854053 96.6216067,11.9988489 C94.2277647,11.5971998 91.7297127,10.9345131 89.373373,10.3265657 C84.2329017,9.00016592 78.9666484,6.88073171 73.5862288,7.89238094" id="Eyebrows-The-Web" transform="translate(84.094701, 12.127505) scale(-1, 1) rotate(17.000000) translate(-84.094701, -12.127505) "></path></g></g><g id="Top" stroke-width="1" fill-rule="evenodd"><defs><rect id="react-path-1465529" x="0" y="0" width="264" height="280"></rect><path d="M133.506381,81.3351151 C137.363649,83.3307002 140,87.3574737 140,92 L140,105 C140,111.018625 135.569129,116.002364 129.791419,116.867187 C128.048193,137.114792 115.530782,154.282984 98,162.610951 L98,162.610951 L98,181 L102,181 C119.490913,181 135.525121,187.236892 148,197.608051 L148,74 C148,53.5654643 139.717268,35.0654643 126.325902,21.6740982 C112.934536,8.28273213 94.4345357,-3.55271368e-15 74,0 C33.1309285,7.10542736e-15 -7.10542736e-15,33.1309285 0,74 L0,257.716445 C13.5691766,255.775526 24,244.105888 24,230 L24,184.423101 C30.9346808,182.200199 38.3271796,181 46,181 L50,181 L50,162.610951 C38.7726252,157.277407 29.6015372,148.317951 24,137.245847 L24,75.2659587 C33.1467898,72.2910056 42.777598,68.0170651 52.3415164,62.4953343 C67.7445474,53.6023901 80.4313947,42.9409152 89.0661426,32.3970356 C90.8310687,37.5951441 93.1752556,42.8009742 96.1104311,47.8848473 C104.877881,63.0705152 117.224186,74.2337047 130,79.9170491 L130,80.1659169 C130.400422,80.233095 130.794121,80.3201038 131.18005,80.4258987 C131.954509,80.7493055 132.730185,81.0524853 133.506381,81.3351151 Z" id="react-path-1465530"></path></defs><mask id="react-mask-1465527" fill="white"><use xlink:href="#react-path-1465529"></use></mask><g id="Mask"></g><g id="Top/Long-Hair/Straight" mask="url(#react-mask-1465527)"><g transform="translate(-1.000000, 0.000000)"><g id="Hair" stroke-width="1" fill="none" fill-rule="evenodd" transform="translate(59.000000, 18.000000)"><mask id="react-mask-1465528" fill="white"><use xlink:href="#react-path-1465530"></use></mask><use id="Mask-Hair" fill="#944F23" xlink:href="#react-path-1465530"></use><g id="Skin/👶🏽-03-Brown" mask="url(#react-mask-1465528)" fill="#2C1B18"><g transform="translate(0.000000, 0.000000) " id="Color"><rect x="0" y="0" width="264" height="280"></rect></g></g></g><path d="M192.506381,99.3351151 C197.3745,101.107702 202.263079,102.071957 207,102.148232 L207,102.148232 L207,92 C207,71.5654643 198.717268,53.0654643 185.325902,39.6740982 C198.717268,53.0654643 207,71.5654643 207,92 L207,215.608051 C194.525121,205.236892 178.490913,199 161,199 L157,199 L157,180.610951 L157,180.610951 C174.530782,172.282984 187.048193,155.114792 188.791419,134.867187 C194.569129,134.002364 199,129.018625 199,123 L199,110 C199,105.357474 196.363649,101.3307 192.506381,99.3351151 Z M190.18005,98.4258987 C189.794121,98.3201038 189.400422,98.233095 189,98.1659169 L189,97.9170491 C189.392974,98.0918644 189.786355,98.2614951 190.18005,98.4258987 Z M83,155.245847 C88.6015372,166.317951 97.7726252,175.277407 109,180.610951 L109,199 L105,199 C97.3271796,199 89.9346808,200.200199 83,202.423101 L83,155.245847 Z" id="Shadow" fill-opacity="0.24" fill="#000000" fill-rule="evenodd"></path></g></g></g></g></g></g></g>` },
         success: { vb: '0 0 264 280', corpo: `<desc>Created with getavataaars.com</desc><defs><circle id="react-path-1465454" cx="120" cy="120" r="120"></circle><path d="M12,160 C12,226.27417 65.72583,280 132,280 C198.27417,280 252,226.27417 252,160 L264,160 L264,-1.42108547e-14 L-3.19744231e-14,-1.42108547e-14 L-3.19744231e-14,160 L12,160 Z" id="react-path-1465455"></path><path d="M124,144.610951 L124,163 L128,163 L128,163 C167.764502,163 200,195.235498 200,235 L200,244 L0,244 L0,235 C-4.86974701e-15,195.235498 32.235498,163 72,163 L72,163 L76,163 L76,144.610951 C58.7626345,136.422372 46.3722246,119.687011 44.3051388,99.8812385 C38.4803105,99.0577866 34,94.0521096 34,88 L34,74 C34,68.0540074 38.3245733,63.1180731 44,62.1659169 L44,56 L44,56 C44,25.072054 69.072054,5.68137151e-15 100,0 L100,0 L100,0 C130.927946,-5.68137151e-15 156,25.072054 156,56 L156,62.1659169 C161.675427,63.1180731 166,68.0540074 166,74 L166,88 C166,94.0521096 161.51969,99.0577866 155.694861,99.8812385 C153.627775,119.687011 141.237365,136.422372 124,144.610951 Z" id="react-path-1465456"></path></defs><g id="Avataaar" stroke="none" stroke-width="1" fill="none" fill-rule="evenodd"><g transform="translate(-825.000000, -1100.000000)" id="Avataaar/Circle"><g transform="translate(825.000000, 1100.000000)"><g id="Mask"></g><g id="Avataaar" stroke-width="1" fill-rule="evenodd" mask="url(#react-mask-1465458)"><g id="Body" transform="translate(32.000000, 36.000000)"><mask id="react-mask-1465459" fill="white"><use xlink:href="#react-path-1465456"></use></mask><use fill="#D0C6AC" xlink:href="#react-path-1465456"></use><g id="Skin/👶🏽-03-Brown" mask="url(#react-mask-1465459)" fill="#FD9841"><g transform="translate(0.000000, 0.000000)" id="Color"><rect x="0" y="0" width="264" height="280"></rect></g></g><path d="M156,79 L156,102 C156,132.927946 130.927946,158 100,158 C69.072054,158 44,132.927946 44,102 L44,79 L44,94 C44,124.927946 69.072054,150 100,150 C130.927946,150 156,124.927946 156,94 L156,79 Z" id="Neck-Shadow" fill-opacity="0.100000001" fill="#000000" mask="url(#react-mask-1465459)"></path></g><g id="Clothing/Shirt-Crew-Neck" transform="translate(0.000000, 170.000000)"><defs><path d="M165.960472,29.2949161 C202.936473,32.3249982 232,63.2942856 232,101.051724 L232,110 L32,110 L32,101.051724 C32,62.9525631 61.591985,31.7649812 99.0454063,29.2195264 C99.0152598,29.5931145 99,29.9692272 99,30.3476251 C99,42.2107177 113.998461,51.8276544 132.5,51.8276544 C151.001539,51.8276544 166,42.2107177 166,30.3476251 C166,29.9946691 165.986723,29.6437014 165.960472,29.2949161 Z" id="react-path-1465460"></path></defs><mask id="react-mask-1465461" fill="white"><use xlink:href="#react-path-1465460"></use></mask><use id="Clothes" fill="#E6E6E6" fill-rule="evenodd" xlink:href="#react-path-1465460"></use><g id="Color/Palette/Gray-01" mask="url(#react-mask-1465461)" fill-rule="evenodd" fill="#2F9A94"><rect id="🖍Color" x="0" y="0" width="264" height="110"></rect></g><g id="Shadowy" opacity="0.599999964" stroke-width="1" fill-rule="evenodd" mask="url(#react-mask-1465461)" fill-opacity="0.16" fill="#000000"><g transform="translate(92.000000, 4.000000)" id="Hola-👋🏼"><ellipse cx="40.5" cy="27.8476251" rx="39.6351047" ry="26.9138272"></ellipse></g></g></g><g id="Face" transform="translate(76.000000, 82.000000)" fill="#000000"><g id="Mouth/Smile" transform="translate(2.000000, 52.000000)"><defs><path d="M35.117844,15.1280772 C36.1757121,24.6198025 44.2259873,32 54,32 C63.8042055,32 71.8740075,24.574136 72.8917593,15.0400546 C72.9736685,14.272746 72.1167429,13 71.042767,13 C56.1487536,13 44.7379213,13 37.0868244,13 C36.0066168,13 35.0120058,14.1784435 35.117844,15.1280772 Z" id="react-path-1465462"></path></defs><mask id="react-mask-1465463" fill="white"><use xlink:href="#react-path-1465462"></use></mask><use id="Mouth" fill-opacity="0.699999988" fill="#000000" fill-rule="evenodd" xlink:href="#react-path-1465462"></use><rect id="Teeth" fill="#FFFFFF" fill-rule="evenodd" mask="url(#react-mask-1465463)" x="39" y="2" width="31" height="16" rx="5"></rect><g id="Tongue" stroke-width="1" fill-rule="evenodd" mask="url(#react-mask-1465463)" fill="#FF4F6D"><g transform="translate(38.000000, 24.000000)"><circle cx="11" cy="11" r="11"></circle><circle cx="21" cy="11" r="11"></circle></g></g></g><g id="Nose/Default" transform="translate(28.000000, 40.000000)" fill-opacity="0.16"><path d="M16,8 C16,12.418278 21.372583,16 28,16 L28,16 C34.627417,16 40,12.418278 40,8" id="Nose"></path></g><g id="Eyes/Happy-😁" transform="translate(0.000000, 8.000000)" fill-opacity="0.599999964"><path d="M16.1601674,22.4473116 C18.006676,18.648508 22.1644225,16 26.9975803,16 C31.8136766,16 35.9591217,18.629842 37.8153518,22.4071242 C38.3667605,23.5291977 37.5821037,24.4474817 36.790607,23.7670228 C34.3395063,21.6597833 30.8587163,20.3437884 26.9975803,20.3437884 C23.2572061,20.3437884 19.8737584,21.5787519 17.4375392,23.5716412 C16.5467928,24.3002944 15.6201012,23.5583844 16.1601674,22.4473116 Z" id="Squint"></path><path d="M74.1601674,22.4473116 C76.006676,18.648508 80.1644225,16 84.9975803,16 C89.8136766,16 93.9591217,18.629842 95.8153518,22.4071242 C96.3667605,23.5291977 95.5821037,24.4474817 94.790607,23.7670228 C92.3395063,21.6597833 88.8587163,20.3437884 84.9975803,20.3437884 C81.2572061,20.3437884 77.8737584,21.5787519 75.4375392,23.5716412 C74.5467928,24.3002944 73.6201012,23.5583844 74.1601674,22.4473116 Z" id="Squint"></path></g><g id="Eyebrow/Natural/Raised-Excited-Natural" fill-opacity="0.599999964"><path d="M22.7663531,1.57844898 L23.6772984,1.17582144 C28.9190996,-0.905265751 36.8645466,-0.0328729562 41.7227321,2.29911638 C42.2897848,2.57148957 41.9021563,3.4519421 41.3211012,3.40711006 C26.4021788,2.25602197 16.3582869,11.5525942 12.9460869,17.8470939 C12.8449215,18.0337142 12.5391523,18.05489 12.4635344,17.8808353 C10.156283,12.5620676 16.9134476,3.89614725 22.7663531,1.57844898 Z" id="Eye-Browse-Reddit"></path><path d="M80.7663531,1.57844898 L81.6772984,1.17582144 C86.9190996,-0.905265751 94.8645466,-0.0328729562 99.7227321,2.29911638 C100.289785,2.57148957 99.9021563,3.4519421 99.3211012,3.40711006 C84.4021788,2.25602197 74.3582869,11.5525942 70.9460869,17.8470939 C70.8449215,18.0337142 70.5391523,18.05489 70.4635344,17.8808353 C68.156283,12.5620676 74.9134476,3.89614725 80.7663531,1.57844898 Z" id="Eye-Browse-Reddit" transform="translate(85.000000, 9.000000) scale(-1, 1) translate(-85.000000, -9.000000) "></path></g></g><g id="Top" stroke-width="1" fill-rule="evenodd"><defs><rect id="react-path-1465466" x="0" y="0" width="264" height="280"></rect><path d="M133.506381,81.3351151 C137.363649,83.3307002 140,87.3574737 140,92 L140,105 C140,111.018625 135.569129,116.002364 129.791419,116.867187 C128.048193,137.114792 115.530782,154.282984 98,162.610951 L98,162.610951 L98,181 L102,181 C119.490913,181 135.525121,187.236892 148,197.608051 L148,74 C148,53.5654643 139.717268,35.0654643 126.325902,21.6740982 C112.934536,8.28273213 94.4345357,-3.55271368e-15 74,0 C33.1309285,7.10542736e-15 -7.10542736e-15,33.1309285 0,74 L0,257.716445 C13.5691766,255.775526 24,244.105888 24,230 L24,184.423101 C30.9346808,182.200199 38.3271796,181 46,181 L50,181 L50,162.610951 C38.7726252,157.277407 29.6015372,148.317951 24,137.245847 L24,75.2659587 C33.1467898,72.2910056 42.777598,68.0170651 52.3415164,62.4953343 C67.7445474,53.6023901 80.4313947,42.9409152 89.0661426,32.3970356 C90.8310687,37.5951441 93.1752556,42.8009742 96.1104311,47.8848473 C104.877881,63.0705152 117.224186,74.2337047 130,79.9170491 L130,80.1659169 C130.400422,80.233095 130.794121,80.3201038 131.18005,80.4258987 C131.954509,80.7493055 132.730185,81.0524853 133.506381,81.3351151 Z" id="react-path-1465467"></path></defs><mask id="react-mask-1465464" fill="white"><use xlink:href="#react-path-1465466"></use></mask><g id="Mask"></g><g id="Top/Long-Hair/Straight" mask="url(#react-mask-1465464)"><g transform="translate(-1.000000, 0.000000)"><g id="Hair" stroke-width="1" fill="none" fill-rule="evenodd" transform="translate(59.000000, 18.000000)"><mask id="react-mask-1465465" fill="white"><use xlink:href="#react-path-1465467"></use></mask><use id="Mask-Hair" fill="#944F23" xlink:href="#react-path-1465467"></use><g id="Skin/👶🏽-03-Brown" mask="url(#react-mask-1465465)" fill="#2C1B18"><g transform="translate(0.000000, 0.000000) " id="Color"><rect x="0" y="0" width="264" height="280"></rect></g></g></g><path d="M192.506381,99.3351151 C197.3745,101.107702 202.263079,102.071957 207,102.148232 L207,102.148232 L207,92 C207,71.5654643 198.717268,53.0654643 185.325902,39.6740982 C198.717268,53.0654643 207,71.5654643 207,92 L207,215.608051 C194.525121,205.236892 178.490913,199 161,199 L157,199 L157,180.610951 L157,180.610951 C174.530782,172.282984 187.048193,155.114792 188.791419,134.867187 C194.569129,134.002364 199,129.018625 199,123 L199,110 C199,105.357474 196.363649,101.3307 192.506381,99.3351151 Z M190.18005,98.4258987 C189.794121,98.3201038 189.400422,98.233095 189,98.1659169 L189,97.9170491 C189.392974,98.0918644 189.786355,98.2614951 190.18005,98.4258987 Z M83,155.245847 C88.6015372,166.317951 97.7726252,175.277407 109,180.610951 L109,199 L105,199 C97.3271796,199 89.9346808,200.200199 83,202.423101 L83,155.245847 Z" id="Shadow" fill-opacity="0.24" fill="#000000" fill-rule="evenodd"></path></g></g></g></g></g></g></g>` },
+        sleeping: { vb: '0 0 264 280', corpo: `<desc>Created with getavataaars.com</desc><defs><circle id="react-path-3783862" cx="120" cy="120" r="120"></circle><path d="M12,160 C12,226.27417 65.72583,280 132,280 C198.27417,280 252,226.27417 252,160 L264,160 L264,-1.42108547e-14 L-3.19744231e-14,-1.42108547e-14 L-3.19744231e-14,160 L12,160 Z" id="react-path-3783863"></path><path d="M124,144.610951 L124,163 L128,163 L128,163 C167.764502,163 200,195.235498 200,235 L200,244 L0,244 L0,235 C-4.86974701e-15,195.235498 32.235498,163 72,163 L72,163 L76,163 L76,144.610951 C58.7626345,136.422372 46.3722246,119.687011 44.3051388,99.8812385 C38.4803105,99.0577866 34,94.0521096 34,88 L34,74 C34,68.0540074 38.3245733,63.1180731 44,62.1659169 L44,56 L44,56 C44,25.072054 69.072054,5.68137151e-15 100,0 L100,0 L100,0 C130.927946,-5.68137151e-15 156,25.072054 156,56 L156,62.1659169 C161.675427,63.1180731 166,68.0540074 166,74 L166,88 C166,94.0521096 161.51969,99.0577866 155.694861,99.8812385 C153.627775,119.687011 141.237365,136.422372 124,144.610951 Z" id="react-path-3783864"></path></defs><g id="Avataaar" stroke="none" stroke-width="1" fill="none" fill-rule="evenodd"><g transform="translate(-825.000000, -1100.000000)" id="Avataaar/Circle"><g transform="translate(825.000000, 1100.000000)"><g id="Mask"></g><g id="Avataaar" stroke-width="1" fill-rule="evenodd" mask="url(#react-mask-3783866)"><g id="Body" transform="translate(32.000000, 36.000000)"><mask id="react-mask-3783867" fill="white"><use xlink:href="#react-path-3783864"></use></mask><use fill="#D0C6AC" xlink:href="#react-path-3783864"></use><g id="Skin/👶🏽-03-Brown" mask="url(#react-mask-3783867)" fill="#FD9841"><g transform="translate(0.000000, 0.000000)" id="Color"><rect x="0" y="0" width="264" height="280"></rect></g></g><path d="M156,79 L156,102 C156,132.927946 130.927946,158 100,158 C69.072054,158 44,132.927946 44,102 L44,79 L44,94 C44,124.927946 69.072054,150 100,150 C130.927946,150 156,124.927946 156,94 L156,79 Z" id="Neck-Shadow" fill-opacity="0.100000001" fill="#000000" mask="url(#react-mask-3783867)"></path></g><g id="Clothing/Shirt-Crew-Neck" transform="translate(0.000000, 170.000000)"><defs><path d="M165.960472,29.2949161 C202.936473,32.3249982 232,63.2942856 232,101.051724 L232,110 L32,110 L32,101.051724 C32,62.9525631 61.591985,31.7649812 99.0454063,29.2195264 C99.0152598,29.5931145 99,29.9692272 99,30.3476251 C99,42.2107177 113.998461,51.8276544 132.5,51.8276544 C151.001539,51.8276544 166,42.2107177 166,30.3476251 C166,29.9946691 165.986723,29.6437014 165.960472,29.2949161 Z" id="react-path-3783868"></path></defs><mask id="react-mask-3783869" fill="white"><use xlink:href="#react-path-3783868"></use></mask><use id="Clothes" fill="#E6E6E6" fill-rule="evenodd" xlink:href="#react-path-3783868"></use><g id="Color/Palette/Gray-01" mask="url(#react-mask-3783869)" fill-rule="evenodd" fill="#2F9A94"><rect id="🖍Color" x="0" y="0" width="264" height="110"></rect></g><g id="Shadowy" opacity="0.599999964" stroke-width="1" fill-rule="evenodd" mask="url(#react-mask-3783869)" fill-opacity="0.16" fill="#000000"><g transform="translate(92.000000, 4.000000)" id="Hola-👋🏼"><ellipse cx="40.5" cy="27.8476251" rx="39.6351047" ry="26.9138272"></ellipse></g></g></g><g id="Face" transform="translate(76.000000, 82.000000)" fill="#000000"><g id="Mouth/Serious" transform="translate(2.000000, 52.000000)" fill="#000000" fill-opacity="0.699999988"><rect id="Why-so-serious?" x="42" y="18" width="24" height="6" rx="3"></rect></g><g id="Nose/Default" transform="translate(28.000000, 40.000000)" fill-opacity="0.16"><path d="M16,8 C16,12.418278 21.372583,16 28,16 L28,16 C34.627417,16 40,12.418278 40,8" id="Nose"></path></g><g id="Eyes/Closed-😌" transform="translate(0.000000, 8.000000)" fill-opacity="0.599999964"><path d="M16.1601674,32.4473116 C18.006676,28.648508 22.1644225,26 26.9975803,26 C31.8136766,26 35.9591217,28.629842 37.8153518,32.4071242 C38.3667605,33.5291977 37.5821037,34.4474817 36.790607,33.7670228 C34.3395063,31.6597833 30.8587163,30.3437884 26.9975803,30.3437884 C23.2572061,30.3437884 19.8737584,31.5787519 17.4375392,33.5716412 C16.5467928,34.3002944 15.6201012,33.5583844 16.1601674,32.4473116 Z" id="Closed-Eye" transform="translate(27.000000, 30.000000) scale(1, -1) translate(-27.000000, -30.000000) "></path><path d="M74.1601674,32.4473116 C76.006676,28.648508 80.1644225,26 84.9975803,26 C89.8136766,26 93.9591217,28.629842 95.8153518,32.4071242 C96.3667605,33.5291977 95.5821037,34.4474817 94.790607,33.7670228 C92.3395063,31.6597833 88.8587163,30.3437884 84.9975803,30.3437884 C81.2572061,30.3437884 77.8737584,31.5787519 75.4375392,33.5716412 C74.5467928,34.3002944 73.6201012,33.5583844 74.1601674,32.4473116 Z" id="Closed-Eye" transform="translate(85.000000, 30.000000) scale(1, -1) translate(-85.000000, -30.000000) "></path></g><g id="Eyebrow/Natural/Default-Natural" fill-opacity="0.599999964"><path d="M26.0390934,6.21012364 C20.2775554,6.98346216 11.2929313,12.0052479 12.04426,17.8178111 C12.0689481,18.0080543 12.3567302,18.0673468 12.4809077,17.9084937 C14.9674041,14.7203351 34.1927973,10.0365481 41.1942673,11.0147151 C41.8350523,11.1044465 42.2580662,10.4430343 41.8210501,10.0302067 C38.0765663,6.49485426 31.2003792,5.51224825 26.0390934,6.21012364" id="Eyebrow" transform="translate(27.000000, 12.000000) rotate(5.000000) translate(-27.000000, -12.000000) "></path><path d="M85.0390934,6.21012364 C79.2775554,6.98346216 70.2929313,12.0052479 71.04426,17.8178111 C71.0689481,18.0080543 71.3567302,18.0673468 71.4809077,17.9084937 C73.9674041,14.7203351 93.1927973,10.0365481 100.194267,11.0147151 C100.835052,11.1044465 101.258066,10.4430343 100.82105,10.0302067 C97.0765663,6.49485426 90.2003792,5.51224825 85.0390934,6.21012364" id="Eyebrow" transform="translate(86.000000, 12.000000) scale(-1, 1) rotate(5.000000) translate(-86.000000, -12.000000) "></path></g></g><g id="Top" stroke-width="1" fill-rule="evenodd"><defs><rect id="react-path-3783872" x="0" y="0" width="264" height="280"></rect><path d="M133.506381,81.3351151 C137.363649,83.3307002 140,87.3574737 140,92 L140,105 C140,111.018625 135.569129,116.002364 129.791419,116.867187 C128.048193,137.114792 115.530782,154.282984 98,162.610951 L98,162.610951 L98,181 L102,181 C119.490913,181 135.525121,187.236892 148,197.608051 L148,74 C148,53.5654643 139.717268,35.0654643 126.325902,21.6740982 C112.934536,8.28273213 94.4345357,-3.55271368e-15 74,0 C33.1309285,7.10542736e-15 -7.10542736e-15,33.1309285 0,74 L0,257.716445 C13.5691766,255.775526 24,244.105888 24,230 L24,184.423101 C30.9346808,182.200199 38.3271796,181 46,181 L50,181 L50,162.610951 C38.7726252,157.277407 29.6015372,148.317951 24,137.245847 L24,75.2659587 C33.1467898,72.2910056 42.777598,68.0170651 52.3415164,62.4953343 C67.7445474,53.6023901 80.4313947,42.9409152 89.0661426,32.3970356 C90.8310687,37.5951441 93.1752556,42.8009742 96.1104311,47.8848473 C104.877881,63.0705152 117.224186,74.2337047 130,79.9170491 L130,80.1659169 C130.400422,80.233095 130.794121,80.3201038 131.18005,80.4258987 C131.954509,80.7493055 132.730185,81.0524853 133.506381,81.3351151 Z" id="react-path-3783873"></path></defs><mask id="react-mask-3783870" fill="white"><use xlink:href="#react-path-3783872"></use></mask><g id="Mask"></g><g id="Top/Long-Hair/Straight" mask="url(#react-mask-3783870)"><g transform="translate(-1.000000, 0.000000)"><g id="Hair" stroke-width="1" fill="none" fill-rule="evenodd" transform="translate(59.000000, 18.000000)"><mask id="react-mask-3783871" fill="white"><use xlink:href="#react-path-3783873"></use></mask><use id="Mask-Hair" fill="#944F23" xlink:href="#react-path-3783873"></use><g id="Skin/👶🏽-03-Brown" mask="url(#react-mask-3783871)" fill="#2C1B18"><g transform="translate(0.000000, 0.000000) " id="Color"><rect x="0" y="0" width="264" height="280"></rect></g></g></g><path d="M192.506381,99.3351151 C197.3745,101.107702 202.263079,102.071957 207,102.148232 L207,102.148232 L207,92 C207,71.5654643 198.717268,53.0654643 185.325902,39.6740982 C198.717268,53.0654643 207,71.5654643 207,92 L207,215.608051 C194.525121,205.236892 178.490913,199 161,199 L157,199 L157,180.610951 L157,180.610951 C174.530782,172.282984 187.048193,155.114792 188.791419,134.867187 C194.569129,134.002364 199,129.018625 199,123 L199,110 C199,105.357474 196.363649,101.3307 192.506381,99.3351151 Z M190.18005,98.4258987 C189.794121,98.3201038 189.400422,98.233095 189,98.1659169 L189,97.9170491 C189.392974,98.0918644 189.786355,98.2614951 190.18005,98.4258987 Z M83,155.245847 C88.6015372,166.317951 97.7726252,175.277407 109,180.610951 L109,199 L105,199 C97.3271796,199 89.9346808,200.200199 83,202.423101 L83,155.245847 Z" id="Shadow" fill-opacity="0.24" fill="#000000" fill-rule="evenodd"></path></g></g></g></g></g></g></g>` },
       },
     };
 
-    // Formatação partilhada entre a cena e o inspetor.
-    function formatoCtx(ctx) {
-      if (!ctx || !Number.isFinite(Number(ctx.window)) || Number(ctx.window) <= 0) {
-        return { texto: 'CTX —', largura: 0, pct: null };
-      }
-      const pct = Math.round((num(ctx.used) / num(ctx.window)) * 100);
-      return { texto: `CTX ~${Math.min(999, pct)}%`, largura: Math.max(2, Math.min(160, pct * 1.6)), pct };
-    }
-
+    // Custo na ficha (e no total da mesa): sem dado, "custo —", nunca zero.
     function formatoCusto(custo) {
       return typeof custo === 'number' && Number.isFinite(custo)
         ? `US$ ${custo.toFixed(2).replace('.', ',')}`
         : 'custo —';
-    }
-
-    function nomeModelo(m) {
-      if (!m) return 'modelo —';
-      return String(typeof m === 'string' ? m : (m.model ?? m.provider ?? '')).slice(0, 18);
     }
 
     /* ── Bonecos: um <symbol> por corpo, desenhado com <use> ─────────────
@@ -1341,26 +1696,74 @@ window.__ModuleLoader__.load({
 
     const EQUIPA_SEM_WORKSPACE = 'sem-workspace';
 
+    /* ── Filtros da sala (persistidos por navegador) ──────────────────────
+       Por omissão a sala segue a barra lateral do DSH: arquivadas e conversas
+       em branco (paradas) não se sentam; "Sem workspace" aparece. Subagentes
+       nunca têm lugar próprio (só na mesa de delegação) — isso não é filtro. */
+    const CHAVE_FILTROS = 'dsh-work-game:filtros';
+    const FILTROS_PADRAO = Object.freeze({
+      mostrarArquivadas: false,
+      mostrarSemWorkspace: true,
+      soTrabalhando: false,
+      mostrarEmBranco: false,
+    });
+    const FILTROS_UI = [
+      { chave: 'mostrarArquivadas', rotulo: 'Mostrar arquivadas', ajuda: 'Na mesa do seu workspace (ou em "Sem workspace"), com a ficha "Arquivada" em cinzento.' },
+      { chave: 'mostrarSemWorkspace', rotulo: 'Mostrar "Sem workspace"', ajuda: 'Conversas que nenhum workspace reclama (o Ungrouped do DSH).' },
+      { chave: 'soTrabalhando', rotulo: 'Só quem está a trabalhar', ajuda: 'Esconde quem está parado e as mesas sem ninguém a trabalhar.' },
+      { chave: 'mostrarEmBranco', rotulo: 'Mostrar conversas em branco', ajuda: 'Conversas novas, ainda sem nenhuma mensagem.' },
+    ];
+    function normalizarFiltros(bruto) {
+      const f = { ...FILTROS_PADRAO };
+      if (bruto && typeof bruto === 'object') {
+        for (const chave of Object.keys(FILTROS_PADRAO)) {
+          if (typeof bruto[chave] === 'boolean') f[chave] = bruto[chave];
+        }
+      }
+      return f;
+    }
+    // Quantos interruptores estão fora do padrão (o número no botão Filtros).
+    const filtrosAlterados = (f) => Object.keys(FILTROS_PADRAO).filter((k) => f[k] !== FILTROS_PADRAO[k]).length;
+    function lerFiltros() {
+      try {
+        const bruto = window.localStorage.getItem(CHAVE_FILTROS);
+        return normalizarFiltros(bruto ? JSON.parse(bruto) : null);
+      } catch {
+        return normalizarFiltros(null); /* sem localStorage (modo privado, sandbox): padrão */
+      }
+    }
+    function guardarFiltros(f) {
+      try {
+        window.localStorage.setItem(CHAVE_FILTROS, JSON.stringify(normalizarFiltros(f)));
+        return true;
+      } catch {
+        return false; /* persistência indisponível: os filtros valem nesta página */
+      }
+    }
+    // "A trabalhar" = turno a correr (ou sinal de trabalho/ferramenta).
+    const aTrabalhar = (p) => p.running === true || p.status === 'working' || p.status === 'tool';
+
     /**
-     * Mesas e lugares a partir das pessoas e dos workspaces do DSH.
+     * Mesas e lugares a partir das pessoas, dos workspaces do DSH e dos filtros.
      * @param {Array} pessoas vistas (officeView.people), na ordem do catálogo do host
      * @param {{fonte, items, archived}|null} workspaces
-     * @returns {{ equipas: Map, modules: Array, visiveis: number, chaves: string[] }}
+     * @param {object} [filtros] ver FILTROS_PADRAO (campos em falta = padrão)
+     * @returns {{ equipas: Map, modules: Array, visiveis: number, chaves: string[],
+     *   arquivadas: Set, escondidas: {total, arquivadas, emBranco, semWorkspace, paradas},
+     *   filtros: object }}
      */
-    function montarEscritorio(pessoas, workspaces) {
+    function montarEscritorio(pessoas, workspaces, filtros) {
+      const f = normalizarFiltros(filtros);
       const porId = new Map(pessoas.map((p) => [p.id, p]));
       const doDsh = !!(workspaces && workspaces.fonte === 'dsh');
       const arquivadas = new Set(doDsh ? workspaces.archived : []);
       const nomeDe = (id) => (porId.get(id) ? porId.get(id).name : 'equipe');
 
-      // Mesma regra da barra lateral do DSH (ui-workspace/tree.ts): subagentes,
-      // arquivadas e conversas em branco não têm lugar próprio.
-      const raiz = (p) => !p.subagent && !arquivadas.has(p.id) && !(p.blank && !p.running);
-
       // Delegação em curso: subagentes A CORRER, agrupados pelo pai.
       const filhosAtivos = new Map();
       for (const p of pessoas) {
-        if (!p.subagent || !p.running || !p.parentId || arquivadas.has(p.id)) continue;
+        if (!p.subagent || !p.running || !p.parentId) continue;
+        if (arquivadas.has(p.id) && !f.mostrarArquivadas) continue;
         if (!filhosAtivos.has(p.parentId)) filhosAtivos.set(p.parentId, []);
         filhosAtivos.get(p.parentId).push(p.id);
       }
@@ -1391,6 +1794,27 @@ window.__ModuleLoader__.load({
         if (dono.has(p.id)) return dono.get(p.id);
         if (!doDsh && p.cwd) return `cwd:${p.cwd}`;
         return EQUIPA_SEM_WORKSPACE;
+      };
+
+      // Porque é que uma conversa (não subagente) fica fora da sala — null se
+      // se senta. Por omissão = a barra lateral do DSH (ui-workspace/tree.ts):
+      // arquivadas e conversas em branco paradas não têm lugar próprio.
+      const escondidas = { total: 0, arquivadas: 0, emBranco: 0, semWorkspace: 0, paradas: 0 };
+      const motivoOculta = (p) => {
+        if (arquivadas.has(p.id) && !f.mostrarArquivadas) return 'arquivadas';
+        if (p.blank && !p.running && !f.mostrarEmBranco) return 'emBranco';
+        if (!f.mostrarSemWorkspace && equipaDe(p) === EQUIPA_SEM_WORKSPACE) return 'semWorkspace';
+        if (f.soTrabalhando && !aTrabalhar(p)) return 'paradas';
+        return null;
+      };
+      const raiz = (p) => {
+        if (p.subagent) return false;
+        const motivo = motivoOculta(p);
+        if (motivo) {
+          escondidas.total += 1;
+          escondidas[motivo] += 1;
+        }
+        return motivo === null;
       };
 
       // 2) lugares de casa: conversas-raiz visíveis na mesa do seu workspace
@@ -1441,6 +1865,9 @@ window.__ModuleLoader__.load({
 
       for (const [equipaId] of [...equipas]) {
         const lista = casa.get(equipaId) || [];
+        // "Só quem está a trabalhar": mesas sem ninguém a trabalhar saem da
+        // sala (lugares "livres" de gente escondida convidariam a recrutar).
+        if (f.soTrabalhando && lista.length === 0) continue;
         lista.forEach((p) => colocados.add(p.id));
         const lugares = lista.map((p) => (emDelegacao(p.id) ? { reservado: p.id } : p.id));
         const total = Math.max(4, Math.ceil(lugares.length / 4) * 4); // workspace vazio = 4 lugares livres
@@ -1461,13 +1888,16 @@ window.__ModuleLoader__.load({
         if (colocados.has(liderId)) continue;
         if ((filhosAtivos.get(liderId) || []).every((id) => colocados.has(id))) continue;
         const equipaId = equipaDe(porId.get(liderId));
+        if (equipaId === EQUIPA_SEM_WORKSPACE && !f.mostrarSemWorkspace) continue;
         if (equipaId === EQUIPA_SEM_WORKSPACE) precisaSemWorkspace();
         else if (!equipas.has(equipaId)) juntarEquipa(equipaId, nomeDaPasta(equipaId.replace(/^(ws|cwd):/, '')) ?? 'equipa', '');
         modules.push(...mesasDeDelegacao(liderId, equipaId, false));
       }
 
-      // Corpos a desenhar (para o sprite) e contagem de pessoas na sala.
+      // Corpos a desenhar (para o sprite), contagem de pessoas na sala e as
+      // arquivadas sentadas (ficha "Arquivada" em cinzento).
       const chaves = [];
+      const arquivadasNaSala = new Set();
       let visiveis = 0;
       for (const mod of modules) {
         for (const lugar of mod.seats) {
@@ -1475,15 +1905,18 @@ window.__ModuleLoader__.load({
           const p = porId.get(lugar);
           if (!p) continue;
           visiveis += 1;
+          if (arquivadas.has(p.id)) arquivadasNaSala.add(p.id);
           chaves.push(chaveCorpo(p.avatar, estadoDemo(p).preset));
         }
       }
-      return { equipas, modules, visiveis, chaves };
+      return { equipas, modules, visiveis, chaves, arquivadas: arquivadasNaSala, escondidas, filtros: f };
     }
 
     // Estados com o vocabulário VISUAL da demo (rótulo, cor, ícone, expressão).
+    // Quem está Disponível (parado, sem correr) dorme: olhos fechados (preset
+    // 'sleeping', de assets/avatars/sleeping/) e o "zzz" junto à cabeça.
     const ESTADOS_DEMO = {
-      available: { label: 'Disponível', color: '#9aa6ad', icon: 'plus', preset: 'idle' },
+      available: { label: 'Disponível', color: '#9aa6ad', icon: 'plus', preset: 'sleeping' },
       working: { label: 'Trabalhando', color: '#299875', icon: 'play', preset: 'working' },
       tool: { label: 'Executando ferramenta', color: '#5e8cad', icon: 'code', preset: 'tool' },
       waiting: { label: 'Aguardando', color: '#c08c45', icon: 'hand', preset: 'waiting' },
@@ -1498,7 +1931,10 @@ window.__ModuleLoader__.load({
     const glyph = (id, x, y, size, color) => `<g style="color:${color}">${useMob(`icon-${id}`, x, y, size, size)}</g>`;
 
     function custoDe(p) { return typeof p.cost === 'number' && Number.isFinite(p.cost) ? p.cost : 0; }
-    function speedDe(p) { return Number.isFinite(Number(p.speed)) && p.speed > 0 ? Math.round(p.speed) : 0; }
+    // tok/s só de quem está a trabalhar: a ponte mede-a DENTRO do turno e dá
+    // null fora dele — a ficha e a barra lateral nunca mostram a velocidade
+    // de um turno que já acabou a quem está Disponível.
+    function speedDe(p) { return aTrabalhar(p) && Number.isFinite(Number(p.speed)) && p.speed > 0 ? Math.round(p.speed) : 0; }
     function ctxPct(p) {
       const j = p.ctx ? num(p.ctx.window) : 0;
       return j > 0 ? Math.min(100, Math.round((num(p.ctx && p.ctx.used) / j) * 100)) : null;
@@ -1566,19 +2002,367 @@ window.__ModuleLoader__.load({
         <text x="${cx + 72}" y="211" text-anchor="middle" font-size="16">${p.emoji}</text></g>`;
     }
 
+    /* ── Movimento da cena (só CSS; desliga com prefers-reduced-motion) ──
+       Quem trabalha balança (sobe uns 7 px e volta) e quem dorme solta um
+       "zzz". A fase é determinística por pessoa (hash do id → animation-delay
+       negativo): cada boneco no seu ritmo e a mesma pessoa sempre na mesma
+       fase. A cena é re-montada por innerHTML a cada evento, o que recomeçaria
+       as animações; o painel põe-nas no relógio da cena (criarRelogioCena) e a
+       fase continua em vez de saltar.
+       DESEMPENHO: animar elementos SVG dentro da cena obriga o browser a
+       servir as animações e a repintar a camada da sala a cada frame (não há
+       composição na GPU). A 60 fps, com a sala parada, isso ocupava CPU de
+       forma permanente (medido no DSH 3080: 6 pessoas a dormir ≈ 31% contra
+       2,5% sem animação; 78 ≈ 75%). Por isso o movimento anda em DEGRAUS de
+       PASSO_ANIM_S: quadros-chave amostrados a cada passo (steps(1,end)), as
+       animações ficam em PAUSA no CSS e um só temporizador do painel põe-nas
+       todas no degrau do relógio comum — o browser só trabalha
+       1/PASSO_ANIM_S vezes por segundo, seja qual for o nº de pessoas. */
+    const PASSO_ANIM_S = 0.2; // 5 degraus por segundo
+    const BALANCO_S = 2.8; // ciclo do balanço: sobe em 1,4 s, desce em 1,4 s
+    const BALANCO_PX = 7; // amplitude (unidades do mundo; ≈ 2,8 px no ecrã a 40%)
+    const ZZZ_S = 3.6; // ciclo de cada "z" (três letras, desfasadas 1/3 de ciclo)
+    const ANIMACOES_EM_FASE = new Set(['wg-balanco', 'wg-zzz']);
+    const passosDe = (periodo) => Math.max(1, Math.round(periodo / PASSO_ANIM_S));
+    // Atraso ≤ 0 (a fase já vai a meio), sempre múltiplo do passo.
+    function faseDe(id, periodo) {
+      // hashEstavel = FNV-1a com a mistura final do MurmurHash3: ids curtos e
+      // parecidos ("t", "f") não caem no mesmo degrau só por azar dos bits baixos.
+      return -(hashEstavel(id) % passosDe(periodo)) * PASSO_ANIM_S;
+    }
+    const segundos = (s) => `${(Math.abs(s) < 0.005 ? 0 : s).toFixed(2)}s`;
+    const agoraMs = () => (typeof performance !== 'undefined' && typeof performance.now === 'function' ? performance.now() : Date.now());
+    const dec = (v) => (Math.abs(v) < 0.005 ? 0 : +v.toFixed(2));
+    // Posição do quadro-chave k de n, arredondada para BAIXO (3 casas): nunca
+    // fica acima da fração exata k/n — com steps(1,end), um quadro-chave
+    // arredondado para cima (1/14 → 7,143%) fazia o progresso exato cair no
+    // degrau anterior. O relógio da cena ainda acerta as animações a MEIO do
+    // degrau (tempoDaCena), por isso nenhum arredondamento chega à fronteira.
+    const pctQuadro = (k, n) => `${Math.floor((k * 100000) / n) / 1000}%`;
+    // Balanço: um ciclo em cosseno (suave nos extremos), só para CIMA (≤ 0 —
+    // nunca desce sobre o portátil).
+    function keyframesBalanco() {
+      const n = passosDe(BALANCO_S);
+      const quadros = [];
+      for (let k = 0; k <= n; k += 1) {
+        const y = dec((-BALANCO_PX * (1 - Math.cos((2 * Math.PI * k) / n))) / 2);
+        quadros.push(`${pctQuadro(k, n)}{transform:translateY(${y ? `${y}px` : 0})}`);
+      }
+      return `@keyframes wg-balanco{${quadros.join('')}}`;
+    }
+    // "z": aparece (0→1 até 15%), sobe 60 e anda 22 para a direita, cresce de
+    // 0,6 a 1,2 e apaga-se a partir dos 70%.
+    function keyframesZzz() {
+      const n = passosDe(ZZZ_S);
+      const quadros = [];
+      for (let k = 0; k <= n; k += 1) {
+        const t = k / n;
+        const opacidade = t <= 0.15 ? t / 0.15 : t <= 0.7 ? 1 - ((t - 0.15) / 0.55) * 0.1 : 0.9 * (1 - (t - 0.7) / 0.3);
+        quadros.push(`${pctQuadro(k, n)}{opacity:${dec(opacidade)};transform:translate(${dec(22 * t)}px,${dec(-60 * t)}px) scale(${dec(0.6 + 0.6 * t)})}`);
+      }
+      return `@keyframes wg-zzz{${quadros.join('')}}`;
+    }
+
+    // RELÓGIO DA CENA. As animações do zzz e do balanço estão em PAUSA no CSS e
+    // é o painel que as põe no degrau certo: `t` = o relógio do documento no
+    // MEIO do degrau corrente (início + PASSO/2), igual para todas (com o
+    // atraso negativo de cada pessoa — múltiplo do passo — a fase continua
+    // certa). A meio do degrau, o progresso fica sempre a meio caminho entre
+    // dois quadros-chave: nem o arredondamento das percentagens nem o erro de
+    // vírgula flutuante mostram o degrau anterior. Chamado a cada degrau (um
+    // só temporizador, 1/PASSO_ANIM_S vezes por segundo, e só com algo animado
+    // à vista e a aba visível — criarRelogioCena) e depois de cada re-montagem
+    // da cena (senão os elementos novos saltavam). Entre degraus o browser
+    // não tem animação nenhuma para servir: nem estilo, nem pintura.
+    const PASSO_ANIM_MS = Math.round(PASSO_ANIM_S * 1000);
+    const tempoDaCena = (agoraMs) => Math.floor(agoraMs / PASSO_ANIM_MS) * PASSO_ANIM_MS + PASSO_ANIM_MS / 2;
+    // Põe as NOSSAS animações (wg-zzz / wg-balanco) de uma lista de Animation
+    // no degrau t; as outras não se tocam.
+    function acertarAnimacoes(animacoes, t) {
+      let n = 0;
+      for (const a of animacoes || []) {
+        if (!a || !ANIMACOES_EM_FASE.has(a.animationName)) continue;
+        if (a.currentTime !== t) a.currentTime = t;
+        n += 1;
+      }
+      return n;
+    }
+    // As animações da cena viva dos `elementos`, numa SÓ consulta à subárvore
+    // de `raiz` (as mesas fora de vista nem as têm: animation:none), filtradas
+    // pelo alvo. Nunca uma consulta por elemento: no Chrome cada
+    // Element.getAnimations() percorre as animações do documento inteiro
+    // (medido: 100 elementos → ~33 ms por degrau só em script). Sem raiz, por
+    // elemento (motores/testes sem a subárvore).
+    function recolherAnimacoes(raiz, elementos) {
+      const alvo = new Set(elementos || []);
+      alvo.delete(null);
+      if (!alvo.size) return [];
+      let todas = [];
+      if (raiz && typeof raiz.getAnimations === 'function') todas = raiz.getAnimations({ subtree: true });
+      else for (const el of alvo) if (typeof el.getAnimations === 'function') todas = todas.concat(el.getAnimations());
+      return todas.filter((a) => a && ANIMACOES_EM_FASE.has(a.animationName) && alvo.has(a.effect ? a.effect.target : null));
+    }
+    // `alvos`: uma raiz (getAnimations da subárvore) ou uma lista de elementos.
+    function alinharAnimacoes(alvos, t = 0) {
+      if (!alvos) return 0;
+      if (typeof alvos.getAnimations === 'function') return acertarAnimacoes(alvos.getAnimations({ subtree: true }), t);
+      if (typeof alvos[Symbol.iterator] !== 'function') return 0;
+      return acertarAnimacoes(recolherAnimacoes(null, alvos), t);
+    }
+
+    // Só se anima o que a câmara mostra. `vistaDoMundo` = o retângulo do mundo
+    // à vista (câmara {zoom, x, y} numa tela w×h), alargado por MARGEM_VISTA
+    // (~1 mesa para cada lado: ao arrastar, a mesa seguinte já vem a mexer).
+    // `mesasAVista(n, …)` diz, por mesa da grelha, se cruza essa vista; as
+    // outras levam a classe `wg-fora` (animation:none no CSS) e saem da lista
+    // do relógio.
+    const MARGEM_VISTA = { x: GRID.pitchX, y: GRID.pitchY };
+    const ALTURA_MESA_CENA = 660; // do balão (y 2) ao fundo da mesa (365 + 288) e rótulos
+    function vistaDoMundo(camera, tela, margem = MARGEM_VISTA) {
+      const zoom = camera && camera.zoom > 0 ? camera.zoom : 1;
+      const cx = camera && Number.isFinite(camera.x) ? camera.x : 0;
+      const cy = camera && Number.isFinite(camera.y) ? camera.y : 0;
+      return {
+        x0: -cx / zoom - margem.x,
+        x1: ((tela && tela.w) || 0) / zoom - cx / zoom + margem.x,
+        y0: -cy / zoom - margem.y,
+        y1: ((tela && tela.h) || 0) / zoom - cy / zoom + margem.y,
+      };
+    }
+    function mesasAVista(nMesas, camera, tela, margem = MARGEM_VISTA) {
+      const v = vistaDoMundo(camera, tela, margem);
+      const out = [];
+      for (let i = 0; i < nMesas; i += 1) {
+        const p = posicaoGrelha(i);
+        out.push(p.x < v.x1 && p.x + LARGURA_MESA > v.x0 && p.y < v.y1 && p.y + ALTURA_MESA_CENA > v.y0);
+      }
+      return out;
+    }
+
+    // Quem fica DEBAIXO do que flutua por cima da sala (o celular; a barra
+    // lateral quando se sobrepõe à sala, janela ≤ 800 px) não se anima: não se
+    // vê — e, sobretudo, a pintura do "zzz"/balanço a 5 Hz por baixo do
+    // cabeçalho translúcido do celular (backdrop-filter) obrigava o compositor
+    // a refazer o desfoque a cada degrau (medido no DSH 3080, Chrome headless:
+    // painel aberto ~16% de CPU → ~7%, o mesmo que sem o desfoque).
+    // `tapas` = caixas {esq, dir, topo, fundo} em px da tela; a câmara
+    // {zoom, x, y}; devolve o Set dos ids cujo boneco/"zzz" cruza uma delas.
+    // Caixa animada de um lugar, relativa ao centro dele (x) e ao topo da mesa
+    // (y): o busto (226×240 em y 147, a subir até 7 no balanço) e o "zzz"
+    // (de x+77, y 226, a subir 60 e a crescer até 1,2×).
+    const CAIXA_ANIMADA = { x0: -113, x1: 116, y0: 134, y1: 388 };
+    function lugaresTapados(layout, camera, tapas) {
+      const out = new Set();
+      if (!layout || !Array.isArray(layout.modules) || !Array.isArray(tapas) || !tapas.length) return out;
+      const zoom = camera && camera.zoom > 0 ? camera.zoom : 1;
+      const cx0 = camera && Number.isFinite(camera.x) ? camera.x : 0;
+      const cy0 = camera && Number.isFinite(camera.y) ? camera.y : 0;
+      const mundo = tapas.filter(Boolean).map((t) => ({
+        x0: (t.esq - cx0) / zoom, x1: (t.dir - cx0) / zoom, y0: (t.topo - cy0) / zoom, y1: (t.fundo - cy0) / zoom,
+      }));
+      layout.modules.forEach((mod, i) => {
+        const pos = posicaoGrelha(i);
+        (mod.seats || []).forEach((id, j) => {
+          if (typeof id !== 'string') return;
+          const cx = pos.x + 112.5 + j * 225;
+          const x0 = cx + CAIXA_ANIMADA.x0;
+          const x1 = cx + CAIXA_ANIMADA.x1;
+          const y0 = pos.y + CAIXA_ANIMADA.y0;
+          const y1 = pos.y + CAIXA_ANIMADA.y1;
+          if (mundo.some((t) => x0 < t.x1 && x1 > t.x0 && y0 < t.y1 && y1 > t.y0)) out.add(id);
+        });
+      });
+      return out;
+    }
+    // Caixa de LAYOUT (offset*: sem transformações — a entrada animada do
+    // celular) de um elemento, em px da tela: {esq, dir, topo, fundo}; null
+    // fora do layout.
+    function caixaNaTela(el, origem) {
+      if (!el || !Number.isFinite(el.offsetLeft) || !(el.offsetWidth > 0) || !(el.offsetHeight > 0)) return null;
+      const pai = el.offsetParent;
+      const base = pai && typeof pai.getBoundingClientRect === 'function' ? pai.getBoundingClientRect() : { left: 0, top: 0 };
+      const esq = base.left + ((pai && pai.clientLeft) || 0) + el.offsetLeft - ((origem && origem.left) || 0);
+      const topo = base.top + ((pai && pai.clientTop) || 0) + el.offsetTop - ((origem && origem.top) || 0);
+      return { esq, dir: esq + el.offsetWidth, topo, fundo: topo + el.offsetHeight };
+    }
+
+    // O relógio do painel: um só temporizador, acertado aos degraus, que só
+    // corre com pelo menos um zzz/balanço À VISTA, com animações VIVAS e com a
+    // aba visível (`visibilitychange`: escondida, pára; ao voltar, recolhe,
+    // acerta logo e retoma).
+    // `definir(elementos, raiz)` troca a lista dos elementos animados à vista
+    // (depois de cada re-montagem da cena ou de a vista mudar): recolhe as
+    // animações deles UMA vez (recolherAnimacoes) e GUARDA-AS — cada degrau só
+    // acerta essa lista (nada de getAnimations a cada tique); acerta-as já e
+    // outra vez no frame seguinte, recolhendo de novo (o WebKit só cria parte
+    // das animações CSS no cálculo de estilo seguinte). A cada RECOLHER_A_CADA
+    // degraus (1 s) recolhe outra vez — uma animação recriada por fora (ex.:
+    // estilo mexido pelo inspetor) não fica parada. Se, depois de recolher,
+    // não sobra nenhuma animação viva (o CSS cancelou-as: animation:none,
+    // prefers-reduced-motion), o temporizador PÁRA — volta com `definir`, com
+    // a aba a voltar ou com a mudança de `prefers-reduced-motion` (ouvida:
+    // `definir` corre outra vez com a última lista pedida). Com a aba
+    // escondida, `definir` só guarda a lista: a recolha (que força o estilo)
+    // fica para o regresso. Dependências injetáveis para os testes.
+    const RECOLHER_A_CADA = 5;
+    const CONSULTA_SEM_MOVIMENTO = '(prefers-reduced-motion: reduce)';
+    function criarRelogioCena(opcoes = {}) {
+      const doc = 'documento' in opcoes ? opcoes.documento : (typeof document !== 'undefined' ? document : null);
+      const agora = opcoes.agora || agoraMs;
+      const agendar = opcoes.agendar || ((fn, ms) => setTimeout(fn, ms));
+      const cancelar = opcoes.cancelar || ((id) => clearTimeout(id));
+      const proximoQuadro = 'proximoQuadro' in opcoes ? opcoes.proximoQuadro
+        : (typeof requestAnimationFrame === 'function' ? (fn) => requestAnimationFrame(fn) : null);
+      // MediaQueryList de prefers-reduced-motion (injetável): lida em cada
+      // `definir` e OUVIDA — ligar/desligar "Reduzir movimento" com o painel
+      // aberto volta a pedir a lista (o CSS cria ou cancela as animações).
+      const midia = 'midiaMovimento' in opcoes ? opcoes.midiaMovimento : (() => {
+        try { return typeof matchMedia === 'function' ? matchMedia(CONSULTA_SEM_MOVIMENTO) : null; } catch { return null; }
+      })();
+      const semMovimento = opcoes.semMovimento || (() => !!(midia && midia.matches));
+      const diag = opcoes.diag !== undefined ? opcoes.diag
+        : (typeof window !== 'undefined' ? (window.__wgRelogio = { tiques: 0, elementos: 0, animacoes: 0, ativo: false }) : null);
+      let pedido = { lista: [], raiz: null }; // a última lista pedida (para a mudança de movimento)
+      let elementos = [];
+      let raiz = null;
+      let animacoes = [];
+      let pendente = false; // falta recolher (a lista chegou com a aba escondida, ou a aba voltou)
+      let desdeRecolha = 0;
+      let timer = null;
+      let vivo = true;
+      let geracao = 0;
+      const escondida = () => !!(doc && doc.hidden);
+      // Sem animações vivas não há nada para acertar: só corre para recolher
+      // (pendente) ou com a lista guardada não vazia.
+      const deveCorrer = () => vivo && elementos.length > 0 && !escondida() && (pendente || animacoes.length > 0);
+      const marcar = () => { if (diag) { diag.elementos = elementos.length; diag.animacoes = animacoes.length; diag.ativo = timer !== null; } };
+      const recolher = () => { animacoes = recolherAnimacoes(raiz, elementos); desdeRecolha = 0; pendente = false; };
+      const tique = () => {
+        timer = null;
+        if (!deveCorrer()) { marcar(); return; }
+        const passo = PASSO_ANIM_MS;
+        const agoraT = agora();
+        desdeRecolha += 1;
+        // Uma animação guardada que o CSS entretanto CANCELOU (animation:none,
+        // prefers-reduced-motion, estilo mexido por fora) não se toca: acertar
+        // o currentTime ressuscitava-a, desligada do CSS (e para sempre na
+        // subárvore). Ler playState força o estilo no máximo uma vez — antes
+        // de se mexer em qualquer uma (em regra, já está em dia).
+        if (pendente || desdeRecolha >= RECOLHER_A_CADA || animacoes.some((a) => a.playState === 'idle')) recolher();
+        if (!animacoes.length) { marcar(); return; } // nada vivo para acertar: pára
+        acertarAnimacoes(animacoes, tempoDaCena(agoraT));
+        if (diag) diag.tiques += 1;
+        timer = agendar(tique, passo - (agoraT % passo) + 2);
+        marcar();
+      };
+      // Liga (acertando já) ou desliga o temporizador conforme o que há para animar.
+      const ajustar = () => {
+        if (deveCorrer()) { if (timer === null) tique(); } else if (timer !== null) { cancelar(timer); timer = null; }
+        marcar();
+      };
+      // De volta à aba: recolhe logo no 1.º degrau (pode ter mudado entretanto).
+      const aoMudarVisibilidade = () => { if (!escondida()) pendente = true; ajustar(); };
+      if (doc && typeof doc.addEventListener === 'function') doc.addEventListener('visibilitychange', aoMudarVisibilidade);
+      const api = {
+        definir(lista, raizDaCena = null) {
+          pedido = { lista: [...(lista || [])], raiz: raizDaCena };
+          elementos = semMovimento() ? [] : [...pedido.lista];
+          raiz = raizDaCena;
+          geracao += 1;
+          if (timer !== null) { cancelar(timer); timer = null; }
+          if (!vivo || escondida()) {
+            // Escondida: nada de recolher (forçava um cálculo de estilo que o
+            // browser, em segundo plano, saltaria); o regresso recolhe.
+            animacoes = [];
+            pendente = elementos.length > 0;
+            marcar();
+            return;
+          }
+          recolher();
+          ajustar(); // acerta já (antes de pintar) e retoma o ritmo dos degraus
+          if (elementos.length && proximoQuadro) {
+            const g = geracao;
+            proximoQuadro(() => {
+              if (!vivo || g !== geracao || escondida()) return;
+              recolher();
+              if (timer !== null) acertarAnimacoes(animacoes, tempoDaCena(agora()));
+              ajustar(); // o WebKit pode só agora ter as animações: arranca (ou pára)
+            });
+          }
+        },
+        estado: () => ({ elementos: elementos.length, animacoes: animacoes.length, ativo: timer !== null }),
+        parar() {
+          vivo = false;
+          if (timer !== null) { cancelar(timer); timer = null; }
+          animacoes = [];
+          if (doc && typeof doc.removeEventListener === 'function') doc.removeEventListener('visibilitychange', aoMudarVisibilidade);
+          desligarMidia();
+          marcar();
+        },
+      };
+      // "Reduzir movimento" mudou com o painel aberto: a mesma lista outra vez
+      // (ligado → o CSS cancela as animações e o relógio pára; desligado → o
+      // CSS cria-as em pausa no 0 e o relógio põe-nas já no degrau certo).
+      const aoMudarMovimento = () => { if (vivo) api.definir(pedido.lista, pedido.raiz); };
+      let desligarMidia = () => {};
+      if (midia && typeof midia.addEventListener === 'function') {
+        midia.addEventListener('change', aoMudarMovimento);
+        desligarMidia = () => midia.removeEventListener('change', aoMudarMovimento);
+      } else if (midia && typeof midia.addListener === 'function') {
+        midia.addListener(aoMudarMovimento);
+        desligarMidia = () => midia.removeListener(aoMudarMovimento);
+      }
+      return api;
+    }
+
+    // "zzz" de quem dorme: três letras que sobem da orelha direita e se
+    // desvanecem, em loop; sem movimento, ficam paradas em escada. O grupo
+    // leva a posição (translate) e cada <text> fica em (0,0), centrado: a
+    // escala e a subida partem da própria letra em qualquer motor.
+    const ZZZ_DX = 77; // centro da 1.ª letra: à direita da cabeça, antes do vizinho
+    const ZZZ_Y = 226; // linha de base: à altura da orelha
+    function zzzSvg(p, cx) {
+      const base = faseDe(`${p.id}|zzz`, ZZZ_S);
+      const letras = [0, 1, 2].map((k) =>
+        `<text class="wg-z" text-anchor="middle" style="animation-delay:${segundos(base - (k * ZZZ_S) / 3)}">z</text>`).join('');
+      return `<g class="wg-zzz" aria-hidden="true" transform="translate(${cx + ZZZ_DX} ${ZZZ_Y})">${letras}</g>`;
+    }
+
     function renderCharacter(p, cx) {
-      const preset = estadoDemo(p).preset;
+      const info = estadoDemo(p);
+      const preset = info.preset;
       const chave = chaveCorpo(p.avatar, preset);
       const corpo = chave
         ? `<use href="#${idSimbolo(...chave.split('|'))}" width="226" height="240"/>`
         : '<rect x="60" y="40" width="106" height="130" rx="20" fill="#b9c2cb"/>';
+      const trabalha = p.status === 'working' || p.status === 'tool';
+      const balanco = trabalha
+        ? ` style="animation-delay:${segundos(faseDe(p.id, BALANCO_S))}"`
+        : '';
       return `<g class="seat character-hit" data-session-id="${esc(p.id)}" aria-hidden="true">`
-        + `<g transform="translate(${cx - 113} 147)"><g class="character" data-character-id="${esc(p.id)}" data-expression="${preset}">`
+        + `<g transform="translate(${cx - 113} 147)"><g class="character${trabalha ? ' wg-balanca' : ''}" data-character-id="${esc(p.id)}" data-expression="${preset}"${balanco}>`
         + corpo
-        + '</g></g></g>';
+        + '</g></g>'
+        + (info === ESTADOS_DEMO.available ? zzzSvg(p, cx) : '')
+        + '</g>';
     }
 
-    function renderSeat(lugar, index, pessoas, selecionada, mod, recrutar) {
+    // Portátil junto ao peito de quem está sentado (o busto ocupa
+    // translate(cx-113,147) a 226×240; o queixo fica em y≈294). O tampo — as
+    // costas do ecrã, voltado para a pessoa — começa logo abaixo do queixo
+    // (nunca cobre olhos nem boca, nem no ponto mais alto do balanço, que só
+    // sobe) e a base assenta junto à borda de trás da mesa (y 366).
+    const PORTATIL = { dx: -84, y: 301, w: 168, h: 105 };
+    function portatilSvg(cx, icone) {
+      const { dx, y, w, h } = PORTATIL;
+      // Ícone do estado ao centro do ecrã (x 17–161, y 9–93 no viewBox 180×112).
+      const lado = Math.round((28 * w) / 152);
+      const gx = Math.round(cx + dx + (w * 89) / 180 - lado / 2);
+      const gy = Math.round(y + (h * 51) / 112 - lado / 2);
+      return `<g class="character-laptop">${useMob('laptop', cx + dx, y, w, h)}${glyph(icone, gx, gy, lado, '#f4f7f8')}</g>`;
+    }
+
+    function renderSeat(lugar, index, pessoas, selecionada, mod, recrutar, arquivadas) {
       const cx = 112.5 + index * 225;
       const hit = `<rect x="${cx - 104}" y="271" width="208" height="234" fill="transparent" pointer-events="all"/>`;
       if (lugar && typeof lugar === 'object' && lugar.reservado) {
@@ -1603,15 +2387,19 @@ window.__ModuleLoader__.load({
       }
       const info = estadoDemo(person);
       const sel = person.id === selecionada ? ' selected' : '';
-      const laptop = `<g class="character-laptop">${useMob('laptop', cx - 76, 323, 152, 95)}${glyph(info.icon === 'plus' ? 'code' : info.icon, cx - 14, 350, 28, '#f4f7f8')}</g>`;
+      const laptop = portatilSvg(cx, info.icon === 'plus' ? 'code' : info.icon);
       const conversa = person.title ? ` · ${person.title}` : '';
-      return `<g class="seat${sel}${excedeuCtx(person) ? ' context-over' : ''}" role="button" tabindex="0"
-        aria-label="Abrir ${esc(person.name)}${esc(conversa)}, ${esc(info.label)}" data-session-id="${esc(person.id)}">
-        <title>${esc(person.name)}${esc(conversa)} · ${esc(info.label)} · clique para inspecionar</title>${hit}${laptop}
+      // Arquivada (só com o filtro "Mostrar arquivadas"): a ficha diz-o, em cinzento.
+      const arquivada = !!(arquivadas && arquivadas.has(person.id));
+      const rotuloEstado = arquivada ? 'Arquivada' : info.label;
+      const corEstado = arquivada ? '#919ea4' : info.color;
+      return `<g class="seat${sel}${excedeuCtx(person) ? ' context-over' : ''}${arquivada ? ' arquivada' : ''}" role="button" tabindex="0"
+        aria-label="Abrir ${esc(person.name)}${esc(conversa)}, ${esc(info.label)}${arquivada ? ', arquivada' : ''}" data-session-id="${esc(person.id)}">
+        <title>${esc(person.name)}${esc(conversa)} · ${esc(info.label)}${arquivada ? ' · arquivada' : ''} · clique para inspecionar</title>${hit}${laptop}
         <rect class="seat-card" x="${cx - 99}" y="426" width="198" height="77" rx="9"/>
         <text class="seat-card-name" x="${cx}" y="450" text-anchor="middle">${esc(cortar(person.name, 14))}</text>
         <text class="seat-card-role" x="${cx}" y="469" text-anchor="middle">${seatRoleHtml(person)}</text>
-        <circle cx="${cx - 73}" cy="487" r="5.5" fill="${info.color}"/><text class="seat-card-status" x="${cx - 60}" y="492" fill="${info.color}">${esc(info.label)}</text>
+        <circle cx="${cx - 73}" cy="487" r="5.5" fill="${corEstado}"/><text class="seat-card-status" x="${cx - 60}" y="492" fill="${corEstado}">${esc(rotuloEstado)}</text>
         <rect class="selection-line" x="${cx - 33}" y="415" width="66" height="4" rx="2" fill="#3881b4"/>
         ${questionFlagSvg(person, cx)}
         ${contextWarnSvg(person, cx)}
@@ -1627,7 +2415,7 @@ window.__ModuleLoader__.load({
       return `<g class="scene-action" role="button" tabindex="0" aria-label="${esc(rotulo)}" ${atributos} transform="translate(${x} ${y})"><rect width="${largura}" height="37" rx="9" fill="#faf8f0" stroke="#d8dbcf"/>${glyph(glifo, 12, 10, 16, '#85939b')}<text x="36" y="24">${esc(rotulo)}</text></g>`;
     }
 
-    function renderModulo(mod, indice, pessoas, equipas, selecionada, recrutar) {
+    function renderModulo(mod, indice, pessoas, equipas, selecionada, recrutar, arquivadas) {
       const equipa = equipas.get(mod.teamId) || { name: 'Equipa', path: '', theme: 'blue' };
       const pos = posicaoGrelha(indice);
       const ocupados = mod.seats.filter((s) => typeof s === 'string' && pessoas[s]).length;
@@ -1646,12 +2434,52 @@ window.__ModuleLoader__.load({
         : '';
       return `<g class="desk-module" data-module-id="${esc(mod.id)}" data-team-id="${esc(mod.teamId)}" data-kind="${mod.kind}" data-seats="4" transform="translate(${pos.x} ${pos.y})" style="${estiloTema(delegacao ? 'violet' : equipa.theme)}">
         ${controlo}${chairs}${characters}${useMob('desk', 0, 365, LARGURA_MESA, 288)}
-        ${mod.seats.map((s, i) => renderSeat(s, i, pessoas, selecionada, mod, recrutar)).join('')}
+        ${mod.seats.map((s, i) => renderSeat(s, i, pessoas, selecionada, mod, recrutar, arquivadas)).join('')}
         ${glyph(delegacao ? 'team' : 'browser', 64, 548, 48, '#f7f9f3')}
         <text class="desk-label" x="139" y="577">${esc(cortar(titulo, 26))}</text>
         <text class="desk-subtitle" x="141" y="609">${esc(cortarInicio(subtitulo, 52))}</text>
         <text class="desk-counter" x="840" y="610" text-anchor="end">${ocupados}/4 lugares · ${esc(formatoCusto(custoMesa))} gasto</text>
       </g>`;
+    }
+
+    // Quanto a sala se prolonga para fora do mundo, em unidades do mundo — o
+    // chão para baixo e para os lados, o forro para cima e a parede (forro
+    // ripado, sanca, ripado, rodapé) para os lados: a tela nunca mostra o fim
+    // da pintura, nem com a câmara encostada à borda do mundo (ex.: a pessoa
+    // da mesa da direita aberta, com o celular) nem no "Enquadrar" ao zoom
+    // mínimo. Dimensionada pelo PIOR caso: uma tela de LARGURA_MAX_TELA px
+    // (8K) ao zoom mínimo do "Enquadrar" (ZOOM_MIN_ENQUADRAR), com a sala
+    // centrada, precisa de (w / zoom − largura do mundo) / 2 para cada lado —
+    // menos do que w / (2 · zoom). 8000 fixos deixavam faixas lisas numa tela
+    // de mais de ~2270 px a 12% (ex.: ultrawide com a sala de 33 mesas).
+    const LARGURA_MAX_TELA = 7680;
+    const SANGRIA = Math.ceil(LARGURA_MAX_TELA / (2 * ZOOM_MIN_ENQUADRAR) - 1e-6); // 32000
+    // Padrões das ripas da sangria: a MESMA fase das ripas do FUNDO_ESCRITORIO
+    // (forro: x ≡ 14 mod 30, y 0–24; ripado: brilho x ≡ 17 e friso x ≡ 13 mod
+    // 26, y 254–332) — continuam sem costura para lá de x = 0 e x = 2900.
+    const PADROES_SANGRIA = '<pattern id="wg-forro" width="30" height="24" patternUnits="userSpaceOnUse">'
+      + '<path d="M14 0V24" stroke="#e0d3bb" stroke-width="2"/></pattern>'
+      + '<pattern id="wg-ripado" y="252" width="26" height="82" patternUnits="userSpaceOnUse">'
+      + '<path d="M17 2V80" stroke="#ead9bd" stroke-width="2" stroke-linecap="round"/>'
+      + '<path d="M13 2V80" stroke="#d0b78f" stroke-width="3" stroke-linecap="round"/></pattern>';
+    // A parede de fora do mundo, entre x0 e x0+largura: só as faixas
+    // horizontais do FUNDO_ESCRITORIO (wg-bg-parede), pela mesma ordem, com as
+    // mesmas cores e traços — sem janela, planta, quadros nem estante (esse
+    // desenho não se toca).
+    function sangriaParede(x0, largura) {
+      const x1 = x0 + largura;
+      const faixa = (y, h, fill, extra = '') => `<rect x="${x0}" y="${y}" width="${largura}" height="${h}" fill="${fill}"${extra}/>`;
+      const traco = (ys, cor, espessura) => `<path d="${ys.map((y) => `M${x0} ${y}H${x1}`).join('')}" stroke="${cor}" stroke-width="${espessura}"/>`;
+      return '<g class="wg-sangria wg-sangria-parede" pointer-events="none" stroke-linejoin="round" stroke-linecap="round">'
+        + faixa(0, ALTURA_PAREDE, '#e4e8dc')
+        + faixa(0, 24, '#efe6d4') + faixa(0, 24, 'url(#wg-forro)')
+        + faixa(22, 12, '#faf6ed') + faixa(34, 10, '#f1ebdd') + faixa(44, 6, '#fbf8f1')
+        + traco([23, 34], '#dcd1bc', 2) + traco([50], '#d3c8b1', 2.5)
+        + faixa(51, 12, '#fbf6e4', ' opacity=".7"') + faixa(63, 14, '#fbf6e4', ' opacity=".3"')
+        + faixa(252, 82, '#e2cfae') + faixa(252, 82, 'url(#wg-ripado)')
+        + faixa(238, 14, '#f4ecdc') + traco([246], '#e6d9c1', 2) + traco([238, 252], '#cdbb9b', 2.5)
+        + faixa(334, 26, '#cdb089') + traco([339], '#dcc49f', 3) + traco([334, 359], '#b09370', 2.5)
+        + '</g>';
     }
 
     // renderOffice(state) -> markup SVG da cena (estética da demo). Aceita o
@@ -1661,28 +2489,1060 @@ window.__ModuleLoader__.load({
         ? [...state.people.values()]
         : Object.values(state.people ?? {});
       const pessoas = Object.fromEntries(bruto.map((p) => [p.id, p]));
-      const layout = state.layout ?? montarEscritorio(bruto, state.workspaces ?? null);
+      const layout = state.layout ?? montarEscritorio(bruto, state.workspaces ?? null, state.filtros);
       const selecionada = state.selecionada ?? null;
       const recrutar = state.recrutar === true; // há uiWorkspace para abrir conversas novas
+      const arquivadas = layout.arquivadas instanceof Set ? layout.arquivadas : new Set();
       const { largura, altura, linhas } = tamanhoMundo(layout.modules.length);
 
       if (layout.modules.length === 0) {
+        // Sala vazia por causa dos filtros não é "à espera de telemetria".
+        const vazio = layout.escondidas && layout.escondidas.total > 0
+          ? 'Os filtros escondem todas as conversas'
+          : 'Escritório vazio — à espera de telemetria';
         return `<svg class="office-scene" xmlns="http://www.w3.org/2000/svg" width="${largura}" height="${altura}" viewBox="0 0 ${largura} ${altura}" `
           + 'role="img" aria-label="Escritório de agentes">'
           + `<text x="${largura / 2}" y="${altura / 2}" text-anchor="middle" font-size="22" fill="#8b958e">`
-          + 'Escritório vazio — à espera de telemetria</text></svg>';
+          + `${vazio}</text></svg>`;
       }
 
+      // Grelha só no chão: a parede (opaca, 0–360) tapa o resto e a linha de
+      // cima (originY − 20) cai no ripado — não se desenha.
       const grelha = [];
-      for (let r = 0; r <= linhas; r += 1) grelha.push(`<path class="grid-line" d="M0 ${GRID.originY + r * GRID.pitchY - 20}H${largura}"/>`);
-      for (let c = 0; c <= GRID.cols; c += 1) grelha.push(`<path class="grid-line" d="M${GRID.originX + c * GRID.pitchX - 20} 0V${altura}"/>`);
+      for (let r = 0; r <= linhas; r += 1) {
+        const y = GRID.originY + r * GRID.pitchY - 20;
+        if (y > ALTURA_PAREDE) grelha.push(`<path class="grid-line" d="M0 ${y}H${largura}"/>`);
+      }
+      for (let c = 0; c <= GRID.cols; c += 1) grelha.push(`<path class="grid-line" d="M${GRID.originX + c * GRID.pitchX - 20} ${ALTURA_PAREDE}V${altura}"/>`);
 
+      // Ordem: sangria → chão → grelha → parede do escritório → mesas. Fora do
+      // mundo (o <svg> tem overflow visível) a sala continua: o forro para
+      // cima, o chão para baixo e para os lados (o mesmo padrão, sem costura)
+      // e a parede para os lados (sangriaParede): a sala enche sempre o
+      // quadro, sem faixa lisa #efece2 quando a câmara a desloca.
+      const larguraSangria = largura + 2 * SANGRIA;
       return `<svg class="office-scene" xmlns="http://www.w3.org/2000/svg" width="${largura}" height="${altura}" viewBox="0 0 ${largura} ${altura}" role="img" aria-label="Escritório de agentes com as mesas de todos os workspaces">`
-        + '<defs><pattern id="wg-floor" width="72" height="72" patternUnits="userSpaceOnUse"><rect width="72" height="72" fill="#f2eee4"/><path d="M0 72L72 0M-18 18L18 -18M54 90L90 54" stroke="#ece6d7" stroke-width="2"/></pattern></defs>'
+        + '<defs><pattern id="wg-floor" width="72" height="72" patternUnits="userSpaceOnUse"><rect width="72" height="72" fill="#f2eee4"/><path d="M0 72L72 0M-18 18L18 -18M54 90L90 54" stroke="#ece6d7" stroke-width="2"/></pattern>'
+        + `${PADROES_SANGRIA}</defs>`
+        + `<rect class="wg-sangria" x="-${SANGRIA}" y="-${SANGRIA}" width="${larguraSangria}" height="${SANGRIA}" fill="#efe6d4"/>`
+        + `<rect class="wg-sangria" x="0" y="${altura}" width="${largura}" height="${SANGRIA}" fill="url(#wg-floor)"/>`
+        + `<rect class="wg-sangria" x="-${SANGRIA}" y="${ALTURA_PAREDE}" width="${SANGRIA}" height="${altura - ALTURA_PAREDE + SANGRIA}" fill="url(#wg-floor)"/>`
+        + `<rect class="wg-sangria" x="${largura}" y="${ALTURA_PAREDE}" width="${SANGRIA}" height="${altura - ALTURA_PAREDE + SANGRIA}" fill="url(#wg-floor)"/>`
+        + sangriaParede(-SANGRIA, SANGRIA)
+        + sangriaParede(largura, SANGRIA)
         + `<rect x="0" y="0" width="${largura}" height="${altura}" fill="url(#wg-floor)"/>`
         + grelha.join('')
-        + layout.modules.map((mod, i) => renderModulo(mod, i, pessoas, layout.equipas, selecionada, recrutar)).join('')
+        + FUNDO_ESCRITORIO
+        + layout.modules.map((mod, i) => renderModulo(mod, i, pessoas, layout.equipas, selecionada, recrutar, arquivadas)).join('')
         + '</svg>';
+    }
+
+    /* ── Barra lateral da pessoa: o que mostra (pura e testável) ──────────
+       A mesma barra da demo ("UMA PESSOA, MUITAS IDEIAS"), mas só com dados
+       REAIS do DSH: janela de contexto (contextPressure), os 4 buckets de
+       tokens (tokenUsage, somados dos eventos `usage`), custo ESTIMADO com a
+       nossa tabela, modelo, velocidade e a linha do tempo dos eventos
+       recebidos. Sem dado → "—"; nada de composição inventada. */
+    const BUCKETS_TOKENS = [
+      { chave: 'uncachedInput', preco: 'input', rotulo: 'Entrada (não-cacheada)' },
+      { chave: 'output', preco: 'output', rotulo: 'Saída' },
+      { chave: 'cacheRead', preco: 'cacheRead', rotulo: 'Leitura de cache' },
+      { chave: 'cacheWrite', preco: 'cacheWrite', rotulo: 'Escrita de cache' },
+    ];
+    const ICONE_ATIVIDADE = {
+      'trabalho-inicio': 'play', 'trabalho-fim': 'check', modelo: 'context',
+      'subagente-inicio': 'team', 'subagente-fim': 'return', 'turno-concluido': 'check',
+      'turno-erro': 'alert', 'turno-interrompido': 'close', ferramenta: 'code',
+      'ferramenta-erro': 'alert', pergunta: 'hand', 'pergunta-respondida': 'check',
+      aprovacao: 'hand', 'aprovacao-decidida': 'check', retry: 'return',
+      compactacao: 'context', 'contexto-alto': 'alert', titulo: 'file',
+      // Da conversa (histórico lido do alvo 'chat' quando o celular a abre):
+      pedido: 'file', resposta: 'check', 'ferramenta-a-correr': 'code',
+    };
+    const fmtNumero = (n, casas = 0) => new Intl.NumberFormat('pt-BR', {
+      minimumFractionDigits: casas, maximumFractionDigits: casas,
+    }).format(n);
+    // 53300 → "53,3k"; 128000 → "128k" (como a demo); janelas de 1M+ → "1,05M".
+    const formatoK = (n) => (num(n) >= 1e6
+      ? `${new Intl.NumberFormat('pt-BR', { maximumFractionDigits: 2 }).format(num(n) / 1e6)}M`
+      : `${new Intl.NumberFormat('pt-BR', { maximumFractionDigits: 1 }).format(num(n) / 1000)}k`);
+    // Custo com cêntimos; abaixo de 1 dólar, 4 casas (os buckets de uma conversa
+    // custam frações de cêntimo — "US$ 0,00" esconderia o gasto real).
+    const formatoUSD = (v) => `US$ ${fmtNumero(v, 2)}`;
+    const formatoUSDFino = (v) => (v > 0 && v < 1 ? `US$ ${fmtNumero(v, 4)}` : formatoUSD(v));
+    const dois = (n) => String(n).padStart(2, '0');
+    function horaDe(at) {
+      if (!Number.isFinite(Number(at))) return '—';
+      const d = new Date(Number(at));
+      return `${dois(d.getHours())}:${dois(d.getMinutes())}:${dois(d.getSeconds())}`;
+    }
+
+    // Hora de um item do histórico: "14:05:09" hoje; "Ontem 18:02", "22 de set. 11:40"…
+    function horaDoHistorico(at, agora) {
+      if (!Number.isFinite(Number(at))) return '—';
+      const ms = Number(at);
+      if (inicioDoDia(ms) === inicioDoDia(agora)) return horaDe(ms);
+      const r = rotuloData(ms, agora);
+      return `${r.dia} ${r.hora}`;
+    }
+
+    /**
+     * Modelo de dados da barra lateral de uma pessoa.
+     * @param {object} p pessoa (personView + speed)
+     * @param {{ layout?: object, precos?: Map|object, historico?: Array, agora?: number }} opcoes
+     *   layout da sala (mesa, delegação, arquivada), tabela de preços (USD/token)
+     *   e o histórico da conversa (historicoDaConversa) para a Atividade
+     */
+    function modeloSidebar(p, opcoes = {}) {
+      if (!p) return null;
+      const layout = opcoes.layout ?? null;
+      const info = estadoDemo(p);
+
+      // Onde se senta: a mesa com o lugar (string) e se o lugar de casa ficou reservado.
+      let modulo = null;
+      let reservado = false;
+      for (const m of (layout ? layout.modules : [])) {
+        for (const s of m.seats) {
+          if (s === p.id && !modulo) modulo = m;
+          else if (s && typeof s === 'object' && s.reservado === p.id) reservado = true;
+        }
+      }
+      const equipa = modulo && layout.equipas ? layout.equipas.get(modulo.teamId) : null;
+      const arquivada = !!(layout && layout.arquivadas instanceof Set && layout.arquivadas.has(p.id));
+      const mesa = !modulo ? null
+        : modulo.kind === 'delegation' ? 'mesa de equipe'
+          : modulo.kind === 'expansion' ? 'mesa expandida' : 'mesa principal';
+      const local = modulo
+        ? `${equipa ? equipa.name : 'Equipa'} · ${mesa}${arquivada ? ' · arquivada' : ''}`
+        : (p.subagent ? 'Subagente · fora da sala' : 'Fora da sala · escondida pelos filtros');
+
+      // Contexto: só a projeção real (usado / janela).
+      const janela = p.ctx && num(p.ctx.window) > 0 ? num(p.ctx.window) : null;
+      const usado = p.ctx && p.ctx.used != null && Number.isFinite(Number(p.ctx.used)) ? Number(p.ctx.used) : null;
+      const pct = janela !== null && usado !== null ? Math.round((usado / janela) * 100) : null;
+      const contexto = {
+        usado, janela, pct,
+        usadoTxt: usado === null ? '—' : `~${formatoK(usado)}`,
+        janelaTxt: janela === null ? '—' : formatoK(janela),
+        legenda: pct !== null ? `${pct}% ocupado · projeção contextPressure do DSH`
+          : usado !== null ? 'Janela do modelo desconhecida — só o total ocupado'
+            : 'O DSH ainda não publicou a ocupação desta conversa',
+        largura: pct === null ? 0 : Math.max(pct > 0 ? 1 : 0, Math.min(100, pct)),
+        aviso: usado !== null && usado >= LIMIAR_CTX,
+      };
+
+      // Custo: buckets reais × a NOSSA tabela (estimativa).
+      const preco = precoDe(opcoes.precos, p.model);
+      const t = p.tokens && typeof p.tokens === 'object' ? p.tokens : null;
+      const buckets = BUCKETS_TOKENS.map((b) => {
+        const tokens = t ? num(t[b.chave]) : null;
+        const unitario = preco && Number.isFinite(Number(preco[b.preco])) ? Number(preco[b.preco]) : null;
+        const custo = tokens !== null && unitario !== null ? tokens * unitario : null;
+        return {
+          chave: b.chave, rotulo: b.rotulo, tokens,
+          tokensTxt: tokens === null ? '—' : fmtNumero(tokens),
+          precoTxt: unitario === null ? 'sem preço' : `US$ ${fmtNumero(unitario * 1e6, 2)} / 1M`,
+          custo, custoTxt: custo === null ? '—' : formatoUSDFino(custo),
+        };
+      });
+      const totalTokens = t ? buckets.reduce((s, b) => s + b.tokens, 0) : null;
+      const velocidade = speedDe(p);
+      const custo = {
+        buckets,
+        temTokens: t !== null,
+        totalTokens,
+        totalTokensTxt: totalTokens === null ? '—' : fmtNumero(totalTokens),
+        temPreco: !!preco,
+        custoTxt: typeof p.cost === 'number' && Number.isFinite(p.cost) ? formatoUSDFino(p.cost) : '—',
+        modelo: p.model ? String(typeof p.model === 'string' ? p.model : (p.model.model ?? p.model.provider ?? '—')) : '—',
+        velocidadeTxt: velocidade ? `${velocidade} tok/s` : '—',
+      };
+
+      // Linha do tempo, mais recente primeiro: os eventos AO VIVO (desde que o
+      // Modo jogo abriu) intercalados por hora com o HISTÓRICO da conversa
+      // (pedidos, ferramentas, respostas e erros — `opcoes.historico`, lido
+      // pelo núcleo quando o celular a abre). Os últimos MAX_ATIVIDADE.
+      const aoVivo = (Array.isArray(p.activity) ? p.activity : []).map((a) => ({ ...a, origem: 'ao-vivo' }));
+      const daConversa = Array.isArray(opcoes.historico) ? opcoes.historico : [];
+      const juntos = daConversa.length
+        ? [...daConversa, ...aoVivo].map((a, i) => ({ a, i }))
+          .sort((x, y) => (num(x.a.at) - num(y.a.at)) || (x.i - y.i)).map((x) => x.a)
+        : aoVivo;
+      const agora = Number.isFinite(opcoes.agora) ? opcoes.agora : Date.now();
+      const atividade = juntos.slice(-MAX_ATIVIDADE).reverse().map((a) => ({
+        at: a.at, tipo: a.tipo, texto: a.texto, origem: a.origem,
+        hora: a.origem === 'conversa' ? horaDoHistorico(a.at, agora) : horaDe(a.at),
+        icone: ICONE_ATIVIDADE[a.tipo] ?? 'play',
+      }));
+
+      return {
+        id: p.id,
+        nome: p.name ?? 'Pessoa',
+        titulo: p.title ?? null,
+        avatarChave: chaveCorpo(p.avatar, info.preset),
+        local,
+        arquivada,
+        estado: {
+          rotulo: info.label,
+          cor: info.color,
+          emDelegacao: reservado,
+          texto: `${reservado ? 'Em delegação · ' : ''}${info.label}`,
+        },
+        pergunta: p.question ?? null,
+        subagentes: num(p.subagents),
+        contexto,
+        custo,
+        atividade,
+      };
+    }
+
+    /* ================================================================
+     * 4b. Celular — a conversa REAL da pessoa, no estilo iMessage
+     * ================================================================
+     * Receita (DSH 0.1.6-alpha.2 — docs/contratos-plugin.md §7, "Celular"):
+     *   ctx.sessions.retain(id, {source:'dshWorkGame'}) → ref.binding.session
+     *   (SessionFace: running, ecos, erros) + `await ref.ready` → alvo 'chat'
+     *   do uiConversation (as mensagens já montadas, como o ui-chat as lê) e a
+     *   projeção 'inbox' (a fila) → session.beginSubmission + session.prompt
+     *   → release. Sem uiConversation, dobram-se os eventos crus do
+     *   binding.eventSource (itensDoFluxo).
+     * A parte pura (itens do chat → bolhas, agrupamento, cauda, separadores de
+     * hora, ferramentas resumidas, recibos, "a escrever…") é testável em Node;
+     * o controlador (criarConversaTelefone) só guarda a referência viva e
+     * liberta-a SEMPRE: fechar o celular, trocar de pessoa, desmontar o
+     * painel, HMR.
+     * SEGURANÇA: o texto das mensagens só chega ao ecrã como nós de texto React
+     * (escape automático) — nunca por innerHTML/dangerouslySetInnerHTML. */
+
+    // SessionReferenceSource PRÓPRIO. 'mainView' faria o DSH tomar a conversa
+    // do celular pela principal (painel de conversa, destaque na barra, título
+    // do documento, "não lidas" apagadas); 'sidebarChat' é do ui-subagent.
+    const FONTE_TELEFONE = 'dshWorkGame';
+    const MAX_ITENS_TELEFONE = 200; // DOM limitado: só as últimas N linhas (as antigas, a pedido)
+    const SILENCIO_DATA_MS = 15 * 60 * 1000; // separador de hora depois de 15 min sem mensagens
+    const TEXTO_LONGO = 1600; // acima disto a bolha abre-se com "Ler mais"
+    // Moldura do DSH (processo dobrado, rodapé do turno, prompt de sistema): fica fora do iMessage.
+    const MOLDURA_CHAT = new Set(['turn-process', 'turn-tail', 'system-prompt']);
+    const ROTULOS_SISTEMA = {
+      'turn-max-tokens': 'Resposta cortada: limite de tokens de saída',
+      compaction: 'Contexto compactado',
+      'manual-compaction': 'Contexto compactado (/compact)',
+      'submitted-plan': 'Plano submetido',
+      'workflow-run': 'Workflow em execução',
+      'command-input': 'Comando enviado',
+    };
+
+    const mensagemDeErro = (e) => {
+      if (!e) return 'erro desconhecido';
+      if (typeof e === 'string') return e;
+      const m = e.message ?? (e.error && e.error.message) ?? e.code;
+      return typeof m === 'string' && m ? m : String(e);
+    };
+
+    /** ContentBlock[] (tipos com hífen do llm: text/image/file/…) → texto + anexos. */
+    function conteudoDe(content) {
+      const partes = [];
+      const anexos = [];
+      for (const b of Array.isArray(content) ? content : []) {
+        if (!b || typeof b !== 'object') continue;
+        if (b.type === 'text' && typeof b.text === 'string') partes.push(b.text);
+        else if (b.type === 'image') anexos.push({ tipo: 'imagem', nome: (b.attachment && b.attachment.name) || 'imagem' });
+        else if (b.type === 'file') anexos.push({ tipo: 'ficheiro', nome: (b.attachment && b.attachment.name) || 'ficheiro' });
+      }
+      return { texto: partes.join('\n').trim(), anexos };
+    }
+
+    // Texto visível de um passo do assistente: só os blocos 'text' (o
+    // 'reasoning' — o pensamento — fica de fora; as ferramentas têm nós próprios).
+    const textoDoAssistente = (blocos) => (Array.isArray(blocos) ? blocos : [])
+      .filter((b) => b && b.kind === 'text' && typeof b.text === 'string' && b.text.trim())
+      .map((b) => b.text.trim())
+      .join('\n\n');
+
+    // Resumo curto dos argumentos de uma ferramenta ("npm test", "src/a.js"…).
+    const CHAVES_RESUMO = ['command', 'cmd', 'path', 'file_path', 'filePath', 'pattern', 'query', 'url', 'description', 'prompt', 'task', 'name'];
+    function resumoArgs(args) {
+      let v = args;
+      if (typeof v === 'string') {
+        const t = v.trim();
+        if (!t) return '';
+        try { v = JSON.parse(t); } catch { return cortar(t.replace(/\s+/g, ' '), 60); }
+      }
+      if (v == null) return '';
+      if (typeof v !== 'object') return cortar(String(v).replace(/\s+/g, ' ').trim(), 60);
+      if (Array.isArray(v.command)) return cortar(v.command.join(' ').replace(/\s+/g, ' ').trim(), 60);
+      const chave = CHAVES_RESUMO.find((k) => typeof v[k] === 'string' && v[k].trim())
+        ?? Object.keys(v).find((k) => typeof v[k] === 'string' && v[k].trim());
+      if (!chave) return '';
+      let valor = v[chave].replace(/\s+/g, ' ').trim();
+      // "cd /pasta/longa && npm test" → "npm test" (o que interessa é o comando).
+      if (chave === 'command' || chave === 'cmd') valor = valor.replace(/^cd\s+("[^"]*"|'[^']*'|\S+)\s*(?:&&|;)\s*(?=\S)/, '');
+      // Caminhos: o fim é o que identifica o ficheiro.
+      return /path$/i.test(chave) ? cortarInicio(valor, 48) : cortar(valor, 60);
+    }
+
+    // Raiz de um nó 'tool-call': RunningToolCall (sem `kind`) ou ToolResultNode.
+    function ferramentaDe(root, key) {
+      if (!root || typeof root !== 'object') return null;
+      const assente = 'kind' in root;
+      const nome = (assente ? root.call && root.call.name : root.name) || 'ferramenta';
+      const args = assente ? (root.call ? root.call.argsRaw : '') : root.argsRaw;
+      return {
+        key, tipo: 'ferramenta', time: Number.isFinite(root.time) ? root.time : null,
+        nome: String(nome), resumo: resumoArgs(args),
+        estado: !assente ? 'a-correr' : root.isError ? 'erro' : 'ok',
+      };
+    }
+
+    /**
+     * ChatSnapshot do alvo 'chat' (ui-chat) → itens do celular, pela ordem visível.
+     * Relê nodes.get(key) a cada chamada: no streaming `order` não muda, os nós sim.
+     * @returns {Array<{key, tipo:'msg'|'ferramenta'|'sistema', time, …}>}
+     */
+    function itensDoChat(chat) {
+      if (!chat || !Array.isArray(chat.order) || !chat.nodes || typeof chat.nodes.get !== 'function') return [];
+      const itens = [];
+      for (const key of chat.order) {
+        let n = null;
+        try { n = chat.nodes.get(key); } catch { n = null; }
+        if (!n || n.visibility === 'hidden' || MOLDURA_CHAT.has(n.kind)) continue;
+        const d = n.data && typeof n.data === 'object' ? n.data : {};
+        const time = Number.isFinite(d.time) ? d.time : null;
+        switch (n.kind) {
+          case 'user':
+          case 'steering': {
+            const c = conteudoDe(d.content);
+            if (!c.texto && !c.anexos.length) break;
+            const src = d.source && typeof d.source === 'object' ? d.source : {};
+            itens.push({
+              key, tipo: 'msg', lado: 'eu', time, texto: c.texto, anexos: c.anexos,
+              rpcId: typeof src.rpcId === 'string' ? src.rpcId : null, estado: 'ok',
+            });
+            break;
+          }
+          case 'assistant-step': {
+            const texto = textoDoAssistente(d.blocks);
+            if (!texto) break; // só pensamento/ferramentas: o "a escrever…" cobre-o
+            itens.push({
+              key, tipo: 'msg', lado: 'ele', time, texto, anexos: [],
+              estado: d.status === 'running' ? 'a-transmitir' : d.status === 'interrupted' ? 'interrompida' : 'ok',
+            });
+            break;
+          }
+          case 'tool-call': {
+            const f = ferramentaDe(d.root, key);
+            if (f) itens.push(f);
+            break;
+          }
+          case 'context': {
+            // Injeções que não são do utilizador (AGENTS.md, skills, avisos):
+            // uma linha discreta com o produtor ("@scope/" fora).
+            const rotulo = d.producer && typeof d.producer.label === 'string' && d.producer.label.trim()
+              ? cortar(d.producer.label.trim().replace(/^@[^/\s]+\//, ''), 40) : 'injetado';
+            itens.push({ key, tipo: 'sistema', variante: 'info', time, contexto: rotulo, texto: `Contexto · ${rotulo}` });
+            break;
+          }
+          case 'turn-error': {
+            const detalhe = typeof d.message === 'string' && d.message.trim() ? `: ${cortar(d.message.trim(), 120)}` : d.code ? ` (${d.code})` : '';
+            itens.push({ key, tipo: 'sistema', variante: 'erro', time, texto: `Erro no turno${detalhe}` });
+            break;
+          }
+          case 'model-retry': {
+            const atual = d.current && typeof d.current === 'object' ? d.current : {};
+            itens.push({ key, tipo: 'sistema', variante: 'info', time: Number.isFinite(atual.time) ? atual.time : time, texto: 'O modelo falhou — nova tentativa' });
+            break;
+          }
+          case 'command': {
+            const nome = typeof d.name === 'string' && d.name ? `/${d.name.replace(/^\//, '')}` : 'comando';
+            itens.push({ key, tipo: 'sistema', variante: 'info', time, texto: `Comando ${nome}` });
+            break;
+          }
+          default:
+            // Kinds conhecidos viram uma linha discreta; os de plugins desconhecidos
+            // ficam de fora (nada se inventa).
+            if (ROTULOS_SISTEMA[n.kind]) itens.push({ key, tipo: 'sistema', variante: 'info', time, texto: ROTULOS_SISTEMA[n.kind] });
+        }
+      }
+      return itens;
+    }
+
+    /**
+     * Fallback sem uiConversation: dobra a janela crua do binding.eventSource
+     * ({entries:[{type:'event'|'transient', event}]}) nos mesmos itens.
+     */
+    function itensDoFluxo(janela) {
+      const entradas = Array.isArray(janela) ? janela : (janela && Array.isArray(janela.entries) ? janela.entries : []);
+      const itens = [];
+      const ferramentas = new Map(); // callId → item (o resultado muda o estado)
+      const aoVivo = new Map();      // attemptId → bolha em transmissão
+      for (const e of entradas) {
+        const ev = e && e.event;
+        if (!ev || typeof ev !== 'object') continue;
+        const d = ev.data && typeof ev.data === 'object' ? ev.data : {};
+        const time = Number.isFinite(ev.time) ? ev.time : null;
+        if (e.type === 'transient') {
+          const chunk = d.chunk;
+          if (ev.type !== 'assistant/live-chunk' || !chunk || chunk.type !== 'text-delta') continue;
+          const id = String(d.attemptId ?? `${d.turn}:${d.step}`);
+          let item = aoVivo.get(id);
+          if (!item) {
+            item = { key: `ao-vivo:${id}`, tipo: 'msg', lado: 'ele', time, texto: '', anexos: [], estado: 'a-transmitir' };
+            aoVivo.set(id, item);
+            itens.push(item);
+          }
+          item.texto += String(chunk.text ?? '');
+          continue;
+        }
+        const key = `ev:${ev.seq ?? itens.length}`;
+        switch (ev.type) {
+          case 'user/message': {
+            const src = d.source && typeof d.source === 'object' ? d.source : {};
+            if (src.kind !== 'user') {
+              itens.push({ key, tipo: 'sistema', variante: 'info', time, texto: `Contexto · ${src.kind ?? 'injetado'}` });
+              break;
+            }
+            const c = conteudoDe(d.content);
+            if (c.texto || c.anexos.length) {
+              itens.push({ key, tipo: 'msg', lado: 'eu', time, texto: c.texto, anexos: c.anexos, rpcId: typeof src.rpcId === 'string' ? src.rpcId : null, estado: 'ok' });
+            }
+            break;
+          }
+          case 'assistant/message': {
+            const c = conteudoDe(d.message && d.message.content);
+            if (c.texto) itens.push({ key, tipo: 'msg', lado: 'ele', time, texto: c.texto, anexos: [], estado: d.interrupted ? 'interrompida' : 'ok' });
+            break;
+          }
+          case 'tool/call': {
+            const item = { key, tipo: 'ferramenta', time, nome: String(d.name ?? 'ferramenta'), resumo: resumoArgs(d.arguments), estado: 'a-correr' };
+            ferramentas.set(String(d.callId), item);
+            itens.push(item);
+            break;
+          }
+          case 'tool/result': {
+            const blocos = d.message && Array.isArray(d.message.content) ? d.message.content : [];
+            const bloco = blocos.find((b) => b && b.type === 'tool-result');
+            const item = bloco ? ferramentas.get(String(bloco.toolCallId)) : null;
+            if (item) item.estado = bloco.isError || d.error ? 'erro' : 'ok';
+            break;
+          }
+          case 'turn/end': {
+            const motivo = d.reason && d.reason.kind;
+            if (motivo === 'error') itens.push({ key, tipo: 'sistema', variante: 'erro', time, texto: 'Erro no turno' });
+            else if (motivo === 'max-tokens') itens.push({ key, tipo: 'sistema', variante: 'info', time, texto: ROTULOS_SISTEMA['turn-max-tokens'] });
+            break;
+          }
+          default: break;
+        }
+      }
+      return itens.filter((i) => i.tipo !== 'msg' || i.texto || i.anexos.length);
+    }
+
+    // Projeção 'inbox' (forma wire: {'next-turn': UserMessage[], 'next-step': …}):
+    // as mensagens do utilizador ainda à espera de entrar num turno.
+    function mensagensDaCaixa(caixa) {
+      if (!caixa || typeof caixa !== 'object') return [];
+      const out = [];
+      for (const alvo of ['next-step', 'next-turn']) {
+        for (const m of Array.isArray(caixa[alvo]) ? caixa[alvo] : []) {
+          const src = m && m.source && typeof m.source === 'object' ? m.source : {};
+          if (src.kind !== 'user') continue;
+          const c = conteudoDe(m.content);
+          out.push({
+            id: String(m.id ?? `${alvo}:${out.length}`), texto: c.texto, anexos: c.anexos,
+            rpcId: typeof src.rpcId === 'string' ? src.rpcId : null, alvo,
+          });
+        }
+      }
+      return out;
+    }
+
+    /**
+     * Itens do celular (itensDoChat / itensDoFluxo) → o HISTÓRICO da conversa
+     * para a Atividade da barra lateral: os pedidos do utilizador, as
+     * ferramentas (✓ / ✕ / a correr), as respostas do agente e os erros do
+     * turno, cada um com a sua hora. Uma resposta ainda a transmitir fica de
+     * fora (só entra quando assenta: o histórico não muda a cada pedaço).
+     * @returns {Array<{at, tipo, texto, origem:'conversa'}>} os últimos MAX_ATIVIDADE, do mais antigo ao mais recente
+     */
+    function historicoDaConversa(itens) {
+      const out = [];
+      let ultimaHora = null;
+      // Resumo numa linha e sem as marcas do Markdown (títulos, **, `, |, réguas).
+      const resumo = (t) => cortar(String(t ?? '')
+        .replace(/```[^\n]*/g, ' ')
+        .replace(/(^|\n)\s*(?:#{1,6}\s+|[-*_]{3,}\s*(?=\n|$)|[-*+]\s+(?=\S))/g, '$1')
+        .replace(/\*\*|__|`/g, '')
+        .replace(/\s*\|\s*/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim(), 60);
+      for (const i of Array.isArray(itens) ? itens : []) {
+        if (!i || typeof i !== 'object') continue;
+        if (Number.isFinite(i.time)) ultimaHora = i.time;
+        const at = Number.isFinite(i.time) ? i.time : ultimaHora;
+        if (i.tipo === 'msg' && i.lado === 'eu') {
+          const t = resumo(i.texto) || (Array.isArray(i.anexos) && i.anexos.length ? `${i.anexos.length} anexo(s)` : '');
+          if (t) out.push({ at, tipo: 'pedido', texto: `Pediu: ${t}`, origem: 'conversa' });
+        } else if (i.tipo === 'msg' && i.lado === 'ele' && i.estado !== 'a-transmitir') {
+          const t = resumo(i.texto);
+          if (t) out.push({ at, tipo: 'resposta', texto: `${i.estado === 'interrompida' ? 'Resposta interrompida' : 'Respondeu'}: ${t}`, origem: 'conversa' });
+        } else if (i.tipo === 'ferramenta') {
+          const tipo = i.estado === 'erro' ? 'ferramenta-erro' : i.estado === 'a-correr' ? 'ferramenta-a-correr' : 'ferramenta';
+          const verbo = i.estado === 'erro' ? 'Falhou' : i.estado === 'a-correr' ? 'A usar' : 'Usou';
+          out.push({ at, tipo, texto: `${verbo} ${i.nome}${i.resumo ? ` · ${i.resumo}` : ''}`, origem: 'conversa' });
+        } else if (i.tipo === 'sistema' && i.variante === 'erro') {
+          out.push({ at, tipo: 'turno-erro', texto: i.texto, origem: 'conversa' });
+        }
+      }
+      return out.slice(-MAX_ATIVIDADE);
+    }
+
+    // Identidades de prompt já desenhadas por material durável (nós do
+    // utilizador + fila): o eco com esse requestId esconde-se no mesmo render —
+    // sem bolha dupla nem buraco (a mesma regra do ChatView do DSH).
+    function rpcIdsVistos(itens, fila) {
+      const vistos = new Set();
+      for (const i of itens) if (i.tipo === 'msg' && i.lado === 'eu' && i.rpcId) vistos.add(i.rpcId);
+      for (const m of fila) if (m.rpcId) vistos.add(m.rpcId);
+      return vistos;
+    }
+
+    /**
+     * Texto → segmentos: blocos ``` (fonte mono), `código` inline, **negrito** e
+     * texto simples. Markdown LEVE (o que os agentes escrevem): títulos "## …"
+     * a negrito, itens "- " com "•", réguas "---" fora (sem deixar buracos:
+     * no máximo uma linha vazia seguida), tabelas "| a | b |" em "a · b" (o
+     * cabeçalho a negrito, o separador "|---|" fora, células vazias como "—";
+     * um "|" em `código` ou escapado "\|" não parte a célula — celulasDaTabela)
+     * — tudo continua a ser texto puro (nós de texto React, nunca HTML).
+     */
+    function segmentosDeTexto(texto) {
+      const s = String(texto ?? '');
+      const out = [];
+      const empurrar = (tipo, t) => {
+        if (!t) return;
+        const ultimo = out[out.length - 1];
+        if (ultimo && ultimo.tipo === tipo && tipo === 'texto') ultimo.texto += t;
+        else out.push({ tipo, texto: t });
+      };
+      const inline = (t) => {
+        if (!t) return;
+        const brutas = t.split('\n');
+        const linhas = [];
+        brutas.forEach((linha, k) => {
+          if (/^\s*([-*_])\1{2,}\s*$/.test(linha)) { linhas.push(''); return; } // régua "---"
+          if (ehSeparadorDeTabela(linha)) return; // "|---|:--:|" fora
+          // Tabela: "| a | b |" → "a · b" (o cabeçalho, seguido do separador, a
+          // negrito). As células vazias ficam "—" (as colunas não desalinham).
+          const celulas = /^\s*\|.*\|\s*$/.test(linha) ? celulasDaTabela(linha) : null;
+          if (celulas) {
+            const texto = celulas.some(Boolean) ? celulas.map((c) => c || '—').join(' · ') : '';
+            const cabecalho = texto && k + 1 < brutas.length && ehSeparadorDeTabela(brutas[k + 1]);
+            linhas.push(cabecalho ? `**${texto.replace(/\*\*/g, '')}**` : texto);
+            return;
+          }
+          const titulo = linha.match(/^\s*#{1,6}\s+(.*?)\s*#*\s*$/);
+          if (titulo) { linhas.push(titulo[1] ? `**${titulo[1].replace(/\*\*/g, '')}**` : ''); return; }
+          linhas.push(linha.replace(/^(\s*)[-*+]\s+/, '$1• '));
+        });
+        const juntas = linhas.join('\n')
+          .replace(/\n{3,}/g, '\n\n')                               // réguas/linhas vazias seguidas: um só espaço
+          .replace(/\*\*`([^`\n]+)`\*\*/g, '`$1`')              // **`x`** → `x`
+          .replace(/\[([^\]\n]+)\]\(([^)\s]+)\)/g, '$1');           // [rótulo](url) → rótulo
+        partesDeCodigo(juntas).forEach((p) => {
+          if (p.codigo) { empurrar('codigo', p.texto); return; }
+          p.texto.split(/\*\*(?=\S)([^\n]*?\S)\*\*/).forEach((q, j) => (j % 2
+            ? empurrar('negrito', q)
+            : empurrar('texto', q.replace(/\*\*/g, '')))); // "**" sem par (ex.: cortado por "Ler mais")
+        });
+      };
+      const re = /```[^\n`]*\n?([\s\S]*?)(?:```|$)/g; // um bloco sem fecho (a transmitir) vai até ao fim
+      let i = 0;
+      let m;
+      while ((m = re.exec(s)) !== null) {
+        inline(s.slice(i, m.index).replace(/\n$/, ''));
+        out.push({ tipo: 'bloco', texto: m[1].replace(/\n$/, '') });
+        i = re.lastIndex;
+        if (s[i] === '\n') i += 1;
+        re.lastIndex = i;
+      }
+      inline(s.slice(i));
+      // Sem linhas vazias no início nem no fim da bolha.
+      const primeiro = out[0];
+      if (primeiro && primeiro.tipo === 'texto') primeiro.texto = primeiro.texto.replace(/^\n+/, '');
+      const ultimo = out[out.length - 1];
+      if (ultimo && ultimo.tipo === 'texto') ultimo.texto = ultimo.texto.replace(/\n+$/, '');
+      return out.filter((seg) => seg.tipo === 'bloco' || seg.texto);
+    }
+    // Spans de `código` numa linha de texto, como no CommonMark: uma sequência
+    // de n crases abre um span que fecha na próxima sequência de EXATAMENTE n
+    // crases (na mesma linha) — ``a|b`` e ``x`y`` são código; um espaço de
+    // cada lado sai (`` `a` `` → `a`); "\`" fora do código é uma crase
+    // literal (não abre nem fecha); sem fecho, as crases são texto.
+    // → [{ codigo: boolean, texto }]
+    function partesDeCodigo(t) {
+      const partes = [];
+      let texto = '';
+      let i = 0;
+      while (i < t.length) {
+        const c = t[i];
+        if (c === '\\' && t[i + 1] === '`') { texto += '`'; i += 2; continue; }
+        if (c !== '`') { texto += c; i += 1; continue; }
+        let n = 1;
+        while (t[i + n] === '`') n += 1;
+        let j = i + n;
+        let fecho = -1;
+        while (j < t.length && t[j] !== '\n') {
+          if (t[j] !== '`') { j += 1; continue; }
+          let m = 1;
+          while (t[j + m] === '`') m += 1;
+          if (m === n) { fecho = j; break; }
+          j += m;
+        }
+        if (fecho < 0) { texto += t.slice(i, i + n); i += n; continue; }
+        let codigo = t.slice(i + n, fecho);
+        if (codigo.length > 1 && codigo[0] === ' ' && codigo[codigo.length - 1] === ' ' && codigo.trim()) codigo = codigo.slice(1, -1);
+        if (texto) partes.push({ codigo: false, texto });
+        texto = '';
+        if (codigo) partes.push({ codigo: true, texto: codigo });
+        i = fecho + n;
+      }
+      if (texto) partes.push({ codigo: false, texto });
+      return partes;
+    }
+    // Linha separadora de uma tabela Markdown ("|---|:--:|", "--- | ---").
+    function ehSeparadorDeTabela(linha) {
+      return /^[\s|:-]+$/.test(linha) && /-{3,}/.test(linha) && linha.includes('|');
+    }
+    // Células de uma linha de tabela Markdown ("| a | `b|c` | d \| e | |"),
+    // já aparadas e pela ordem, INCLUINDO as vazias. Um "|" dentro de um span
+    // de `código` (crases emparelhadas, como no CommonMark) ou escapado ("\|")
+    // não separa colunas — o "\|" mostra-se "|", também dentro do código,
+    // como no GFM. null se a linha não começa por "|".
+    function celulasDaTabela(linha) {
+      const s = String(linha ?? '').trim();
+      if (s.length < 2 || s[0] !== '|') return null;
+      const celulas = [];
+      let atual = '';
+      let i = 1;
+      while (i < s.length) {
+        const c = s[i];
+        if (c === '\\' && s[i + 1] === '|') { atual += '|'; i += 2; continue; }
+        // "\`" é uma crase literal (CommonMark): não abre um span de código.
+        // Fica escapada na célula — o texto (partesDeCodigo) mostra-a "`".
+        if (c === '\\' && s[i + 1] === '`') { atual += '\\`'; i += 2; continue; }
+        if (c === '`') {
+          // Uma sequência de n crases abre um span que fecha na próxima
+          // sequência de EXATAMENTE n crases; sem fecho, são crases literais.
+          let n = 1;
+          while (s[i + n] === '`') n += 1;
+          let j = i + n;
+          let fecho = -1;
+          while (j < s.length) {
+            if (s[j] !== '`') { j += 1; continue; }
+            let m = 1;
+            while (s[j + m] === '`') m += 1;
+            if (m === n) { fecho = j; break; }
+            j += m;
+          }
+          if (fecho < 0) { atual += s.slice(i, i + n); i += n; continue; }
+          atual += s.slice(i, fecho + n).replace(/\\\|/g, '|');
+          i = fecho + n;
+          continue;
+        }
+        if (c === '|') { celulas.push(atual.trim()); atual = ''; i += 1; continue; }
+        atual += c;
+        i += 1;
+      }
+      // Depois do último "|" (numa linha "| … |", nada) não há célula.
+      if (atual.trim()) celulas.push(atual.trim());
+      return celulas;
+    }
+
+    // Cache das bolhas já segmentadas: durante o streaming só o texto da
+    // mensagem a transmitir muda — as outras (até 200) não se re-segmentam a
+    // cada atualização. Limitada; os segmentos devolvidos são só de leitura.
+    const cacheSegmentos = new Map();
+    function segmentosEmCache(texto) {
+      const chave = String(texto ?? '');
+      let segs = cacheSegmentos.get(chave);
+      if (!segs) {
+        segs = segmentosDeTexto(chave);
+        if (cacheSegmentos.size >= 600) cacheSegmentos.delete(cacheSegmentos.keys().next().value);
+        cacheSegmentos.set(chave, segs);
+      }
+      return segs;
+    }
+
+    // Separadores de hora no estilo do iMessage: "Hoje 14:32", "Ontem 09:10",
+    // "Segunda-feira 18:05", "22 de set. 11:40" (o ano só quando não é o atual).
+    const DIAS_SEMANA = ['Domingo', 'Segunda-feira', 'Terça-feira', 'Quarta-feira', 'Quinta-feira', 'Sexta-feira', 'Sábado'];
+    const MESES_CURTOS = ['jan.', 'fev.', 'mar.', 'abr.', 'mai.', 'jun.', 'jul.', 'ago.', 'set.', 'out.', 'nov.', 'dez.'];
+    const inicioDoDia = (ms) => { const d = new Date(ms); d.setHours(0, 0, 0, 0); return d.getTime(); };
+    const horaCurta = (ms) => { const d = new Date(ms); return `${dois(d.getHours())}:${dois(d.getMinutes())}`; };
+    function rotuloData(ms, agora = Date.now()) {
+      const d = new Date(ms);
+      const dias = Math.round((inicioDoDia(agora) - inicioDoDia(ms)) / 86400000);
+      let dia;
+      if (dias === 0) dia = 'Hoje';
+      else if (dias === 1) dia = 'Ontem';
+      else if (dias > 1 && dias < 7) dia = DIAS_SEMANA[d.getDay()];
+      else dia = `${d.getDate()} de ${MESES_CURTOS[d.getMonth()]}${d.getFullYear() !== new Date(agora).getFullYear() ? ` de ${d.getFullYear()}` : ''}`;
+      return { dia, hora: horaCurta(ms) };
+    }
+
+    /**
+     * O agente está "a escrever…"? A correr, à espera do 1.º turno, com uma
+     * ferramenta a correr ou entre steps — mas, como no iMessage, NÃO enquanto
+     * a resposta dele já aparece a crescer (a última bolha é dele, a
+     * transmitir, com texto): a bolha é o sinal, os três pontos saem.
+     */
+    function aEscrever(conv) {
+      if (!conv || conv.removida || conv.fase === 'erro' || conv.fase === 'sem-canal') return false;
+      const itens = Array.isArray(conv.itens) ? conv.itens : [];
+      const ultimo = itens[itens.length - 1];
+      const aCrescer = !!(ultimo && ultimo.tipo === 'msg' && ultimo.lado === 'ele' && ultimo.estado === 'a-transmitir'
+        && String(ultimo.texto ?? '').trim());
+      if (aCrescer) return false;
+      if (conv.aCorrer || conv.aguardaPrimeiroTurno) return true;
+      return !!(ultimo && (ultimo.estado === 'a-transmitir' || (ultimo.tipo === 'ferramenta' && ultimo.estado === 'a-correr')));
+    }
+
+    /**
+     * Linhas do celular (pura): bolhas agrupadas com cauda, separadores de hora,
+     * ferramentas seguidas numa linha só, recibos ("Entregue", "na fila", "Não
+     * entregue") e o "a escrever…". Guarda só as últimas `max` linhas.
+     * @param {object} conv snapshot do controlador (criarConversaTelefone)
+     * @param {{ agora?: number, max?: number }} opcoes relógio (testes) e limite do DOM
+     * @returns {{ linhas: object[], escondidas: number, total: number }}
+     */
+    function linhasDoTelefone(conv, opcoes = {}) {
+      const agora = Number.isFinite(opcoes.agora) ? opcoes.agora : Date.now();
+      const max = Number.isFinite(opcoes.max) && opcoes.max > 0 ? Math.floor(opcoes.max) : MAX_ITENS_TELEFONE;
+      if (!conv) return { linhas: [], escondidas: 0, total: 0 };
+
+      // 1) duráveis, com as ferramentas seguidas numa só linha (e as injeções
+      //    de contexto seguidas também: "Contexto · AGENTS.md, skill-catalog")
+      const base = [];
+      for (const i of Array.isArray(conv.itens) ? conv.itens : []) {
+        const ant = base[base.length - 1];
+        if (i.tipo === 'ferramenta') {
+          if (ant && ant.tipo === 'ferramentas') { ant.itens.push(i); continue; }
+          base.push({ tipo: 'ferramentas', key: `f:${i.key}`, time: i.time, itens: [i] });
+        } else if (i.tipo === 'sistema' && i.contexto) {
+          if (ant && ant.tipo === 'sistema' && Array.isArray(ant.contextos)) {
+            if (!ant.contextos.includes(i.contexto)) ant.contextos.push(i.contexto);
+            ant.texto = cortar(`Contexto · ${ant.contextos.join(', ')}`, 96);
+            continue;
+          }
+          base.push({ ...i, contextos: [i.contexto] });
+        } else base.push({ ...i });
+      }
+      // 2) o que ainda não é durável fica no fim: ecos, fila e envios falhados
+      for (const e of Array.isArray(conv.ecos) ? conv.ecos : []) {
+        base.push({ key: `eco:${e.requestId}`, tipo: 'msg', lado: 'eu', time: Number.isFinite(e.time) ? e.time : null, texto: String(e.texto ?? ''), anexos: [], estado: e.placement === 'queued' ? 'fila' : 'pendente' });
+      }
+      for (const f of Array.isArray(conv.fila) ? conv.fila : []) {
+        base.push({ key: `fila:${f.id}`, tipo: 'msg', lado: 'eu', time: null, texto: String(f.texto ?? ''), anexos: f.anexos ?? [], estado: 'fila' });
+      }
+      for (const f of Array.isArray(conv.falhados) ? conv.falhados : []) {
+        base.push({ key: `falhou:${f.id}`, id: f.id, tipo: 'msg', lado: 'eu', time: Number.isFinite(f.time) ? f.time : null, texto: String(f.texto ?? ''), anexos: [], estado: 'falhou', erro: f.erro ?? null });
+      }
+      if (conv.erroAgente) base.push({ key: 'erro-agente', tipo: 'sistema', variante: 'erro', time: null, texto: `Erro do agente: ${cortar(conv.erroAgente, 140)}` });
+
+      // 3) DOM limitado: só as últimas `max`
+      const total = base.length;
+      const escondidas = Math.max(0, total - max);
+      const visiveis = escondidas ? base.slice(escondidas) : base;
+
+      // 4) separadores de hora (início, 15 min de silêncio ou outro dia)
+      const linhas = [];
+      let anterior = null;
+      for (const item of visiveis) {
+        if (Number.isFinite(item.time)) {
+          if (anterior === null || item.time - anterior > SILENCIO_DATA_MS || inicioDoDia(item.time) !== inicioDoDia(anterior)) {
+            linhas.push({ tipo: 'data', key: `data:${item.key}`, ...rotuloData(item.time, agora) });
+          }
+          anterior = item.time;
+        }
+        linhas.push(item);
+      }
+
+      // 5) grupos (bolhas seguidas do mesmo lado) e a cauda na última de cada grupo
+      let ultimaEntregue = -1;
+      for (let i = 0; i < linhas.length; i += 1) {
+        const l = linhas[i];
+        if (l.tipo !== 'msg') continue;
+        const ant = linhas[i - 1];
+        const seg = linhas[i + 1];
+        l.inicioGrupo = !(ant && ant.tipo === 'msg' && ant.lado === l.lado);
+        l.cauda = !(seg && seg.tipo === 'msg' && seg.lado === l.lado);
+        // Os longos ("Ler mais") segmentam-se no componente: só o que se mostra.
+        l.segmentos = l.texto.length > TEXTO_LONGO ? null : segmentosEmCache(l.texto);
+        l.recibo = l.estado === 'falhou' ? 'Não entregue'
+          : l.estado === 'fila' && !(seg && seg.tipo === 'msg' && seg.estado === 'fila') ? 'na fila'
+            : l.estado === 'interrompida' ? 'Interrompida' : null;
+        if (l.lado === 'eu' && l.estado === 'ok') ultimaEntregue = i;
+      }
+      if (ultimaEntregue >= 0) linhas[ultimaEntregue].recibo = 'Entregue';
+
+      // 6) o agente a trabalhar: três pontos numa bolha cinza, sempre no fim
+      if (aEscrever(conv)) linhas.push({ tipo: 'a-escrever', key: 'a-escrever' });
+      return { linhas, escondidas, total };
+    }
+
+    const conversaVazia = (sessionId, fase = 'a-abrir', erro = null) => ({
+      sessionId: sessionId ?? null, fase, erro, itens: [], ecos: [], fila: [], falhados: [],
+      aCorrer: false, aguardaPrimeiroTurno: false, temMais: false, aCarregarAntigas: false,
+      removida: false, subagente: false, erroEnvio: null, erroAgente: null, fonte: null,
+      inerte: false,
+    });
+
+    // Referências do celular vivas (diagnóstico headless: window.__wgTelefoneRefs;
+    // o verificador ao vivo exige 0 depois de fechar — nada de retains pendurados).
+    let refsTelefoneVivas = 0;
+    const contarRefTelefone = (delta) => {
+      refsTelefoneVivas = Math.max(0, refsTelefoneVivas + delta);
+      diagnostico('__wgTelefoneRefs', refsTelefoneVivas);
+    };
+
+    /**
+     * Controlador de UMA conversa aberta no celular (a receita da secção 4b).
+     * @param {object} ctx contexto do plugin (ctx.sessions; ctx.get('uiConversation'))
+     * @param {string} sessionId conversa a abrir
+     * @param {{ agora?: () => number }} opcoes relógio injetável (testes)
+     * @returns {{ sessionId, getSnapshot(), subscribe(fn), enviar(texto), reenviar(id), maisAntigas(), libertar() }}
+     */
+    function criarConversaTelefone(ctx, sessionId, opcoes = {}) {
+      const agora = typeof opcoes.agora === 'function' ? opcoes.agora : () => Date.now();
+      const ouvintes = new Set();
+      let estado = conversaVazia(sessionId);
+      let vivo = true;
+      const avisar = () => { for (const fn of [...ouvintes]) { try { fn(); } catch { /* ouvinte partido */ } } };
+      // Sem sessão viva (sem canal, id desconhecido, sem binding): o celular
+      // mostra o motivo e a caixa de texto fica desativada — nada se escreve
+      // para se perder em silêncio.
+      const inerte = (fase, erro) => {
+        vivo = false;
+        estado = { ...conversaVazia(sessionId, fase, erro), inerte: true };
+        return {
+          sessionId,
+          getSnapshot: () => estado,
+          subscribe: () => () => {},
+          enviar: async () => ({ ok: false, motivo: fase }),
+          reenviar: async () => ({ ok: false, motivo: fase }),
+          maisAntigas: async () => {},
+          libertar: () => {},
+        };
+      };
+
+      let sessoes = null;
+      try { sessoes = (ctx && ctx.sessions) || servicoDe(ctx, 'sessions'); } catch { sessoes = null; }
+      if (!sessoes || typeof sessoes.retain !== 'function') {
+        return inerte('sem-canal', 'O DSH não expõe as conversas a este plugin (ctx.sessions).');
+      }
+      const corte = typeof AbortController === 'function' ? new AbortController() : null;
+      let ref = null;
+      try {
+        // Lança logo se o id é desconhecido ou o controlador já foi descartado.
+        ref = sessoes.retain(sessionId, { source: FONTE_TELEFONE, signal: corte ? corte.signal : undefined });
+      } catch (erro) {
+        return inerte('erro', mensagemDeErro(erro));
+      }
+      let sessao = null;
+      try { sessao = ref.binding.session; } catch { sessao = null; }
+      if (!sessao || typeof sessao.getSnapshot !== 'function') {
+        try { ref.release(); } catch { /* já libertada */ }
+        return inerte('erro', 'A conversa não tem sessão ligada no DSH.');
+      }
+      contarRefTelefone(+1);
+      trace('telefone-retain', sessionId);
+
+      const desligar = [];
+      const assinar = (fonte) => {
+        if (!fonte || typeof fonte.subscribe !== 'function') return;
+        try {
+          const soltar = fonte.subscribe(publicar);
+          if (typeof soltar === 'function') desligar.push(soltar);
+        } catch { /* fonte sem subscrição */ }
+      };
+      let caixa = null;
+      try {
+        caixa = sessao.projections && typeof sessao.projections.faceOf === 'function' ? sessao.projections.faceOf('inbox') : null;
+      } catch { caixa = null; }
+      let alvoChat = null; // ObservableSnapshot<ChatSnapshot|undefined> do uiConversation
+      let fluxo = null;    // fallback cru: binding.eventSource
+      const falhados = [];
+      const locais = [];   // ecos locais dos subagentes (o DSH ignora o requestId deles)
+      let erroEnvio = null;
+      let seq = 0;
+
+      function publicar() {
+        if (!vivo) return;
+        let s;
+        try { s = sessao.getSnapshot(); } catch { return; }
+        if (!s) return;
+        let itens = [];
+        try {
+          if (alvoChat) itens = itensDoChat(alvoChat.getSnapshot());
+          else if (fluxo) itens = itensDoFluxo(fluxo.getSnapshot());
+        } catch { itens = []; }
+        let fila = [];
+        try { fila = caixa ? mensagensDaCaixa(caixa.getSnapshot()) : []; } catch { fila = []; }
+        const vistos = rpcIdsVistos(itens, fila);
+        const pendentes = Array.isArray(s.pendingSubmissions) ? s.pendingSubmissions : [];
+        estado = {
+          sessionId,
+          fase: s.openState === 'error' ? 'erro' : s.openState === 'open' ? 'aberta' : 'a-abrir',
+          erro: s.openState === 'error' ? mensagemDeErro(s.openError) : null,
+          itens,
+          ecos: [
+            ...pendentes.filter((p) => p && !vistos.has(p.requestId))
+              .map((p) => ({ requestId: String(p.requestId), texto: p.text, time: p.time, placement: p.placement })),
+            ...locais,
+          ],
+          fila,
+          falhados: falhados.slice(),
+          aCorrer: s.running === true,
+          aguardaPrimeiroTurno: s.awaitingFirstTurn === true,
+          temMais: s.hasMore === true,
+          aCarregarAntigas: s.loadingOlder === true,
+          removida: s.removed === true,
+          subagente: s.subagent != null,
+          erroEnvio,
+          erroAgente: typeof s.lastAgentError === 'string' && s.lastAgentError ? s.lastAgentError : null,
+          fonte: alvoChat ? 'chat' : fluxo ? 'eventos' : null,
+        };
+        avisar();
+      }
+
+      assinar(sessao);
+      assinar(caixa);
+      Promise.resolve(ref.ready).then((binding) => {
+        if (!vivo) return;
+        const uiConv = servicoDe(ctx, 'uiConversation');
+        if (uiConv && typeof uiConv.binding === 'function') {
+          try {
+            const alvo = uiConv.binding(binding || ref.binding).target('chat');
+            assinar(alvo); // o 1.º subscribe ATIVA o alvo 'chat' (antes disso o snapshot é undefined)
+            alvoChat = alvo;
+          } catch (erro) {
+            trace('telefone-sem-chat', mensagemDeErro(erro));
+            alvoChat = null;
+          }
+        }
+        if (!alvoChat) {
+          const fonte = (binding && binding.eventSource) || null;
+          if (fonte && typeof fonte.getSnapshot === 'function') {
+            assinar(fonte);
+            fluxo = fonte;
+          }
+        }
+        publicar();
+      }, (erro) => {
+        // Só rejeita em erros de montagem, abort ou release (a abertura falhada resolve).
+        if (!vivo) return;
+        estado = { ...estado, fase: 'erro', erro: mensagemDeErro(erro) };
+        avisar();
+      });
+      publicar(); // estado inicial: openState 'loading', ainda sem mensagens
+
+      const falhar = (texto, erro) => {
+        seq += 1;
+        falhados.push({ id: `f${seq}`, texto, time: agora(), erro });
+        erroEnvio = erro;
+        publicar();
+      };
+
+      async function enviar(bruto) {
+        const texto = String(bruto ?? '');
+        if (!vivo) return { ok: false, motivo: 'fechada' };
+        if (!texto.trim()) return { ok: false, motivo: 'vazio' };
+        let s;
+        try { s = sessao.getSnapshot(); } catch { s = null; }
+        if (!s || s.removed) return { ok: false, motivo: 'removida' };
+        // Sempre 'queue' (como o DSH com a conversa parada): parada, inicia um
+        // turno; a correr, entra na fila e aparece "na fila" até ser admitida.
+        const modo = 'queue';
+        const conteudo = [{ type: 'text', text: texto }];
+        erroEnvio = null;
+        if (s.subagent != null) {
+          // Subagente: o prompt vai por outro caminho e ignora o requestId —
+          // sem beginSubmission (o eco ficaria preso); eco local até resolver.
+          seq += 1;
+          const local = { requestId: `local-${seq}`, texto, time: agora(), placement: s.running ? 'queued' : 'transcript' };
+          locais.push(local);
+          publicar();
+          const tirar = () => { const i = locais.indexOf(local); if (i >= 0) locais.splice(i, 1); };
+          try {
+            const r = await sessao.prompt(conteudo, modo);
+            tirar();
+            if (!r || r.ok === false) falhar(texto, mensagemDeErro(r && r.error));
+            else publicar();
+            return r;
+          } catch (erro) {
+            tirar();
+            falhar(texto, mensagemDeErro(erro));
+            return { ok: false, error: erro };
+          }
+        }
+        let envio = null;
+        try {
+          envio = sessao.beginSubmission({ mode: modo, text: texto, attachments: [] }); // eco local síncrono
+        } catch (erro) {
+          falhar(texto, mensagemDeErro(erro));
+          return { ok: false, error: erro };
+        }
+        trace('telefone-enviar', { sessionId, requestId: envio && envio.requestId });
+        try {
+          const r = await sessao.prompt(conteudo, modo, undefined, envio.requestId);
+          if (!r || r.ok === false) falhar(texto, mensagemDeErro(r && r.error)); // o DSH já retirou o eco
+          return r;
+        } catch (erro) {
+          try { envio.abandon(); } catch { /* já assente */ }
+          falhar(texto, mensagemDeErro(erro));
+          return { ok: false, error: erro };
+        }
+      }
+
+      function libertar() {
+        if (!vivo) return;
+        vivo = false;
+        // Ordem da receita: tirar TODOS os ouvintes → abortar → release (uma vez).
+        for (const soltar of desligar.splice(0)) { try { soltar(); } catch { /* já solto */ } }
+        try { if (corte) corte.abort(); } catch { /* já abortado */ }
+        try { ref.release(); } catch { /* já libertada */ }
+        ouvintes.clear();
+        alvoChat = null;
+        fluxo = null;
+        contarRefTelefone(-1);
+        trace('telefone-release', sessionId);
+      }
+
+      return {
+        sessionId,
+        getSnapshot: () => estado,
+        subscribe(fn) {
+          if (typeof fn !== 'function' || !vivo) return () => {};
+          ouvintes.add(fn);
+          return () => { ouvintes.delete(fn); };
+        },
+        enviar,
+        reenviar(id) {
+          const i = falhados.findIndex((f) => f.id === id);
+          if (i < 0) return Promise.resolve({ ok: false, motivo: 'desconhecido' });
+          const [f] = falhados.splice(i, 1);
+          publicar();
+          return enviar(f.texto);
+        },
+        maisAntigas() {
+          if (!vivo) return Promise.resolve();
+          let s;
+          try { s = sessao.getSnapshot(); } catch { return Promise.resolve(); }
+          if (!s || s.openState !== 'open' || !s.hasMore || s.loadingOlder || typeof sessao.loadOlder !== 'function') return Promise.resolve();
+          try { return Promise.resolve(sessao.loadOlder()).catch(() => {}); } catch { return Promise.resolve(); }
+        },
+        libertar,
+      };
     }
 
     /* ================================================================
@@ -1690,43 +3550,265 @@ window.__ModuleLoader__.load({
      * ================================================================ */
 
     const CSS_PAINEL = [
-      '.wg-painel{position:relative;display:flex;flex-direction:column;height:100%;min-height:0;font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;color:#23272b;background:#f7f5ef}',
+      // O painel é um contentor de consultas (@container wg-painel): a largura
+      // que conta é a do painel, não a da janela (a barra do DSH abre e fecha).
+      // --wg-sb = largura da barra lateral da pessoa (as mesmas @media abaixo).
+      '.wg-painel{position:relative;display:flex;flex-direction:column;height:100%;min-height:0;font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;color:#23272b;background:#f7f5ef;container:wg-painel/inline-size;--wg-sb:345px}',
       '.wg-sprite,.wg-sprite svg{position:absolute;width:0;height:0;overflow:hidden;pointer-events:none}',
-      '.wg-toolbar{display:flex;align-items:center;gap:6px;padding:8px 12px;border-bottom:1px solid #e2ddd0}',
+      '.wg-toolbar{position:relative;z-index:5;display:flex;align-items:center;gap:6px;padding:8px 12px;border-bottom:1px solid #e2ddd0;min-width:0}',
       '.wg-toolbar h1{font-size:14px;font-weight:600;margin:0 10px 0 0;white-space:nowrap}',
-      '.wg-toolbar .wg-conta{font-size:12px;color:#64707c;margin-left:auto;white-space:nowrap}',
+      '.wg-toolbar .wg-conta{font-size:12px;color:#64707c;margin-left:auto;padding-left:8px;white-space:nowrap;min-width:0;overflow:hidden;text-overflow:ellipsis}',
       '.wg-toolbar button{min-width:30px;height:26px;border:1px solid #cfc9b8;border-radius:6px;background:#fffdf6;cursor:pointer;font-size:14px;line-height:1}',
       '.wg-toolbar button:hover{background:#f1ecdd}',
-      '.wg-tela{flex:1;min-height:0;position:relative;overflow:hidden;background:#efece2;touch-action:none;cursor:grab}',
+      '.wg-corpo{flex:1;min-height:0;display:flex;position:relative}',
+      '.wg-tela{flex:1;min-width:0;position:relative;overflow:hidden;background:#efece2;touch-action:none;cursor:grab}',
       '.wg-tela:active{cursor:grabbing}',
       '.wg-mundo{position:absolute;top:0;left:0;transform-origin:0 0;will-change:transform}',
-      '.wg-svg svg{display:block;width:auto;max-width:none}',
+      '.wg-svg svg{display:block;width:auto;max-width:none;overflow:visible}',
       '.wg-banner{position:absolute;left:16px;right:16px;top:12px;z-index:1;padding:8px 12px;border-radius:8px;background:#fff8e1;border:1px solid #e5cf8a;color:#7a6530;font-size:13px}',
       '.wg-rodape{display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:8px 12px;border-top:1px solid #e2ddd0;font-size:13px;min-height:36px}',
-      '.wg-chip{padding:2px 10px;border-radius:11px;background:#eef1f5;color:#3d4854;font-size:12.5px;white-space:nowrap}',
-      '.wg-chip-verde{background:#e9f2ea;color:#2f5d36}',
-      '.wg-chip-titulo{max-width:360px;overflow:hidden;text-overflow:ellipsis}',
-      '.wg-chip-alerta{background:#f9e5de;border-color:#e2b6a6;color:#a2543a;font-weight:600}',
       '.wg-rodape .wg-dica{color:#8b958e;font-size:12px}',
-      '.wg-zoom{display:flex;align-items:center;gap:6px;margin-left:14px}',
-      '.wg-botao{display:inline-flex;align-items:center;gap:5px;height:30px;padding:0 11px;border:1px solid #d3d8cf;border-radius:8px;background:#f6f7f1;color:#38434d;font-size:13px;font-weight:600;cursor:pointer}',
+      '.wg-zoom{display:flex;align-items:center;gap:6px;margin-left:14px;flex:none}',
+      // nowrap + flex:none: com o painel estreito, os botões nunca partem o
+      // texto em duas linhas ("＋" / "Zoom"); quem encolhe é a contagem.
+      '.wg-botao{display:inline-flex;align-items:center;gap:5px;height:30px;padding:0 11px;border:1px solid #d3d8cf;border-radius:8px;background:#f6f7f1;color:#38434d;font-size:13px;font-weight:600;cursor:pointer;white-space:nowrap;flex:none}',
       '.wg-botao:hover:not(:disabled){background:#e9eee6}',
       '.wg-botao:disabled{opacity:.45;cursor:default}',
       '.wg-zoom-valor{min-width:46px;text-align:center;font-size:12.5px;color:#5d6a62;font-variant-numeric:tabular-nums}',
-      '.wg-inspetor{display:flex;align-items:center;gap:12px;padding:9px 12px;border-top:1px solid #e2ddd0;background:#f7f8f2}',
-      '.wg-inspetor-avatar{display:inline-flex;align-items:center;justify-content:center;width:44px;height:44px;border-radius:50%;background:#e6eae2;border:1px solid #d3d8cf;overflow:hidden;flex:none}',
-      '.wg-inspetor-avatar svg{display:block}',
-      '.wg-inspetor-iniciais{font-size:18px;font-weight:700;color:#5d6a62}',
-      '.wg-inspetor-corpo{flex:1;min-width:0;display:flex;flex-direction:column;gap:5px}',
-      '.wg-inspetor-topo{display:flex;align-items:center;gap:10px}',
-      '.wg-inspetor-nome{font-size:15px;color:#23272b}',
-      '.wg-abrir-conversa{height:26px;padding:0 10px;font-size:12.5px}',
-      '.wg-inspetor-chips{display:flex;flex-wrap:wrap;gap:6px}',
-      '.wg-ctx-linha{display:flex;align-items:center;gap:9px}',
-      '.wg-ctx-barra{flex:1;max-width:280px;height:6px;border-radius:3px;background:#e3e6ea;overflow:hidden}',
-      '.wg-ctx-barra>span{display:block;height:100%;background:#4a90d9;border-radius:3px}',
-      '.wg-ctx-barra>span.wg-ctx-cheio{background:#c2603f}',
-      '.wg-ctx-texto{font-size:11.5px;color:#64707c}',
+      // Filtros da sala: botão na toolbar + menu com interruptores (paleta e
+      // cantos da demo: #fffefa, #dcded3, azul #2869a6).
+      '.wg-filtros{position:relative;display:inline-flex;align-items:center;gap:8px;margin-left:8px;flex:none}',
+      '.wg-toolbar .wg-filtros-botao[aria-expanded="true"]{background:#e9eee6;border-color:#bac7c8}',
+      '.wg-filtros-numero{display:inline-grid;place-items:center;min-width:17px;height:17px;padding:0 5px;border-radius:9px;background:#2869a6;color:#fff;font-size:10.5px;font-weight:800}',
+      '.wg-toolbar .wg-escondidas{height:24px;min-width:0;padding:0 10px;border-radius:12px;border:1px solid #e6e8dc;background:#f5f6ee;color:#6d7a72;font-size:11.5px;font-weight:700;white-space:nowrap}',
+      '.wg-toolbar .wg-escondidas:hover{background:#edf1e8;color:#243b50}',
+      '.wg-filtros-menu{position:absolute;top:calc(100% + 8px);left:0;z-index:20;width:318px;background:#fffefa;border:1px solid #dcded3;border-radius:12px;box-shadow:0 14px 34px rgba(36,59,80,.14),0 2px 6px rgba(36,59,80,.06);padding:14px 16px 12px;color:#243b50;font-family:"Nunito","Trebuchet MS",ui-rounded,"Segoe UI",sans-serif;cursor:default}',
+      '.wg-filtros-menu *{box-sizing:border-box}',
+      '.wg-filtros-titulo{display:block;font-size:9px;font-weight:800;letter-spacing:1.3px;color:#96a094;margin:0 0 4px}',
+      '.wg-filtro-linha{display:flex;align-items:center;gap:12px;padding:10px 0;border-bottom:1px solid #eeefe6;cursor:pointer}',
+      '.wg-filtro-texto{flex:1;min-width:0}',
+      '.wg-filtro-texto strong{display:block;font-size:12px;font-weight:800;color:#243b50}',
+      '.wg-filtro-texto small{display:block;font-size:10px;color:#8a969c;line-height:1.5;margin-top:2px}',
+      '.wg-toolbar .wg-interruptor{position:relative;flex:none;width:34px;min-width:34px;height:20px;padding:0;border:0;border-radius:10px;background:#dfe3dc;transition:background .15s}',
+      '.wg-toolbar .wg-interruptor:hover{background:#d2d9d0}',
+      '.wg-toolbar .wg-interruptor::after{content:"";position:absolute;top:3px;left:3px;width:14px;height:14px;border-radius:50%;background:#fffefa;box-shadow:0 1px 2px rgba(36,59,80,.25);transition:transform .15s}',
+      '.wg-toolbar .wg-interruptor[aria-checked="true"]{background:#2869a6}',
+      '.wg-toolbar .wg-interruptor[aria-checked="true"]::after{transform:translateX(14px)}',
+      '.wg-toolbar .wg-interruptor:focus-visible,.wg-toolbar .wg-filtros-repor:focus-visible{outline:3px solid #5b9cd0;outline-offset:2px}',
+      '.wg-filtros-rodape{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-top:10px;font-size:10px;color:#a8aea6}',
+      '.wg-toolbar .wg-filtros-repor{flex:none;height:auto;min-width:0;padding:4px 6px;border:0;background:none;color:#2869a6;font-size:11px;font-weight:700;white-space:nowrap}',
+      '.wg-toolbar .wg-filtros-repor:hover{background:#eef3f7}',
+      '.wg-toolbar .wg-filtros-repor:disabled{color:#a3aaa4;background:none;cursor:default}',
+      // O DSH dá `corner-shape: superellipse(1.5)` a tudo: o botão do interruptor,
+      // o chip e o número têm de ser círculos/pílulas de verdade.
+      '.wg-interruptor,.wg-interruptor::after,.wg-escondidas,.wg-filtros-numero{corner-shape:round}',
+      // Painel estreito (DSH a 1024–1180 px com a barra dele aberta): o chip
+      // fica "6 escondidas" (o detalhe continua no tooltip e no menu) e, mais
+      // estreito ainda, a contagem sai — os botões nunca quebram.
+      '@container wg-painel (max-width:1000px){.wg-toolbar .wg-escondidas-mais{display:none}}',
+      '@container wg-painel (max-width:780px){.wg-toolbar .wg-conta{display:none}.wg-toolbar h1{margin-right:4px}}',
+      // Barra lateral da pessoa = o inspetor da demo (styles.css: .inspector,
+      // .agent-heading, .inspector-tabs…), com o prefixo wg- e só dados reais.
+      '.wg-sidebar{width:345px;flex-shrink:0;background:#fffefa;border-left:1px solid #e6e7e1;overflow-y:auto;scrollbar-width:thin;scrollbar-color:#d6ddd7 transparent;z-index:3;color:#243b50;font-family:"Nunito","Trebuchet MS",ui-rounded,"Segoe UI",sans-serif;font-size:14px;-webkit-font-smoothing:antialiased;cursor:default}',
+      '.wg-sidebar *{box-sizing:border-box}',
+      '.wg-sidebar button{font:inherit;color:inherit;border:0;background:none;padding:0;margin:0;cursor:pointer}',
+      '.wg-sidebar button:focus-visible{outline:3px solid #5b9cd0;outline-offset:3px}',
+      '.wg-sidebar svg{display:block;flex-shrink:0;pointer-events:none}',
+      '.wg-sidebar .wg-inspector-top{padding:18px 20px 0;display:flex;align-items:center;justify-content:space-between}',
+      '.wg-sidebar .wg-inspector-top>span{font-size:9px;font-weight:800;letter-spacing:1.3px;color:#96a094}',
+      '.wg-sidebar .wg-icon-button{width:31px;height:31px;border-radius:7px;display:grid;place-items:center;color:#8b969c}',
+      '.wg-sidebar .wg-icon-button:hover{background:#eef1e9;color:#243b50}',
+      '.wg-sidebar .wg-icon-button svg{height:17px;width:17px}',
+      '.wg-sidebar .wg-agent-heading{display:flex;gap:12px;align-items:center;padding:11px 22px 18px}',
+      '.wg-sidebar .wg-agent-heading>div:last-child{min-width:0}',
+      '.wg-sidebar .wg-inspector-avatar{height:71px;width:67px;flex-shrink:0;overflow:hidden;border-radius:17px;background:#f3ecdf}',
+      '.wg-sidebar .wg-inspector-avatar svg{width:70px;height:76px;transform:translate(-1px,4px)}',
+      '.wg-sidebar .wg-inspector-iniciais{display:grid;place-items:center;font-size:26px;font-weight:800;color:#8a969c}',
+      '.wg-sidebar .wg-agent-heading h2{margin:0 0 5px;font-size:22px;font-weight:700;letter-spacing:-.5px;line-height:1.15;color:#243b50}',
+      '.wg-sidebar .wg-agent-heading p{font-size:11px;color:#8a969c;margin:0 0 6px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
+      '.wg-sidebar .wg-small-status{font-size:10px;display:flex;align-items:center;gap:5px;font-weight:700}',
+      '.wg-sidebar .wg-live-dot{display:inline-block;height:6px;width:6px;flex:none}',
+      '.wg-sidebar .wg-conversa-card{margin:0 22px 18px;padding:11px 12px 12px;background:#f5f6ee;border:1px solid #e6e8dc;border-radius:11px}',
+      '.wg-sidebar .wg-conversa-card small{display:block;font-size:9px;font-weight:800;letter-spacing:1.1px;text-transform:uppercase;color:#96a094}',
+      '.wg-sidebar .wg-conversa-card strong{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;margin:4px 0 10px;font-size:12.5px;font-weight:700;line-height:1.45;color:#2c3a33;word-break:break-word}',
+      '.wg-sidebar .wg-conversa-card strong.wg-sem-titulo{color:#a3aaa4;font-weight:600}',
+      '.wg-sidebar .wg-conversa-acoes{display:flex;gap:8px}',
+      '.wg-sidebar .wg-conversa-acoes .wg-button{flex:1 1 0}',
+      '.wg-sidebar .wg-button{display:inline-flex;gap:7px;align-items:center;justify-content:center;min-height:36px;border-radius:8px;padding:8px 12px;font-size:11px;font-weight:700;white-space:nowrap;transition:background .15s,transform .15s,border-color .15s}',
+      '.wg-sidebar .wg-button:active{transform:translateY(1px)}',
+      '.wg-sidebar .wg-button-primary{background:#2869a6;color:#fff;border:1px solid #2869a6}',
+      '.wg-sidebar .wg-button-primary:hover,.wg-sidebar .wg-button-primary[aria-pressed="true"]{background:#205b94}',
+      '.wg-sidebar .wg-button-light{background:#fffefb;border:1px solid #dce1de}',
+      '.wg-sidebar .wg-button-light:hover{background:#f0f3ee;border-color:#bac7c8}',
+      '.wg-sidebar .wg-inspector-tabs{display:flex;border-bottom:1px solid #e6e7e1;padding:0 21px;gap:20px}',
+      '.wg-sidebar .wg-inspector-tabs button{padding:12px 0;font-size:11px;font-weight:700;color:#a0a8a7;border-bottom:2px solid transparent;display:flex;gap:6px;align-items:center}',
+      '.wg-sidebar .wg-inspector-tabs button:hover{color:#6d7f8c}',
+      '.wg-sidebar .wg-inspector-tabs button svg{height:14px;width:14px}',
+      '.wg-sidebar .wg-inspector-tabs button.active{color:#2869a6;border-color:#2869a6}',
+      '.wg-sidebar .wg-inspector-content{padding:22px 23px}',
+      '.wg-sidebar .wg-section-heading{display:flex;justify-content:space-between;align-items:center;margin-bottom:10px}',
+      '.wg-sidebar .wg-section-heading h3{font-size:12px;margin:0;font-weight:800;color:#243b50}',
+      '.wg-sidebar .wg-estimated-tag{font-size:9px;color:#a3a69b;background:#f2f3eb;padding:3px 5px;border-radius:4px;white-space:nowrap}',
+      '.wg-sidebar .wg-tag-real{color:#4f8a74;background:#e7f2ec}',
+      '.wg-sidebar .wg-context-total{display:flex;align-items:baseline;gap:6px;margin-top:17px}',
+      '.wg-sidebar .wg-context-total strong{font-size:31px;letter-spacing:-1px;line-height:1;font-weight:800;color:#243b50}',
+      '.wg-sidebar .wg-context-total span{font-size:11px;color:#929ea5}',
+      '.wg-sidebar .wg-context-caption{font-size:10px;color:#a5aca6;margin:8px 0 18px}',
+      '.wg-sidebar .wg-context-bar{display:flex;height:12px;background:#edf0e7;border-radius:5px;gap:2px;overflow:hidden}',
+      '.wg-sidebar .wg-context-bar span{height:100%;min-width:0;border-radius:5px 0 0 5px}',
+      '.wg-sidebar .wg-context-scale{display:flex;justify-content:space-between;font-size:9px;color:#a3aaa4;margin-top:7px}',
+      '.wg-sidebar .wg-context-message{display:flex;align-items:flex-start;gap:8px;margin-top:22px;padding:12px;background:#f0f5ee;border-radius:7px;color:#6d8a73;font-size:10px;line-height:1.65}',
+      '.wg-sidebar .wg-context-message svg{height:15px;width:15px;margin-top:1px}',
+      '.wg-sidebar .wg-inspector-rule{height:1px;background:#e6e7e1;margin:24px 0}',
+      '.wg-sidebar .wg-ctx-warning{display:flex;align-items:center;gap:9px;background:#fdf1da;border:1px solid #e8c88a;color:#7a5a20;border-radius:11px;padding:10px 13px;font-size:13px;margin:0 0 12px}',
+      '.wg-sidebar .wg-ctx-warning svg{width:19px;height:19px}',
+      '.wg-sidebar .wg-telemetry-grid{display:grid;grid-template-columns:1fr 1fr;gap:9px;margin:0 0 10px}',
+      '.wg-sidebar .wg-telemetry-cell{background:#f5f6ee;border:1px solid #e6e8dc;border-radius:11px;padding:10px 12px;display:flex;flex-direction:column;gap:3px;min-width:0}',
+      '.wg-sidebar .wg-telemetry-cell small{font-size:10px;letter-spacing:.06em;text-transform:uppercase;color:#8b958e}',
+      '.wg-sidebar .wg-telemetry-cell strong{font-size:15px;color:#2c3a33;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
+      '.wg-sidebar .wg-telemetry-cell.wg-cell-larga{grid-column:1/-1}',
+      '.wg-sidebar .wg-telemetry-cell.wg-cell-larga strong{font-size:13px}',
+      '.wg-sidebar .wg-cost-table{border:1px solid #e6e8dc;border-radius:11px;overflow:hidden;margin:0 0 10px}',
+      '.wg-sidebar .wg-cost-row{display:grid;grid-template-columns:1fr auto;align-items:center;column-gap:8px;row-gap:2px;padding:8px 11px;font-size:12px;border-bottom:1px solid #eeefe6}',
+      '.wg-sidebar .wg-cost-row:last-child{border-bottom:0}',
+      '.wg-sidebar .wg-cost-row span{color:#5d6a62}',
+      '.wg-sidebar .wg-cost-row strong{color:#2c3a33;font-variant-numeric:tabular-nums}',
+      '.wg-sidebar .wg-cost-row code{grid-column:1/-1;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:10.5px;color:#8b958e}',
+      '.wg-sidebar .wg-cost-total{background:#f9faf3}',
+      '.wg-sidebar .wg-cost-total span{font-weight:800;color:#243b50}',
+      '.wg-sidebar .wg-activity{margin:18px 0 0;padding:0;list-style:none}',
+      '.wg-sidebar .wg-activity li{display:grid;grid-template-columns:21px 1fr;gap:8px;position:relative;padding:0 0 20px;margin:0}',
+      '.wg-sidebar .wg-activity li:not(:last-child)::after{content:"";width:1px;background:#e3e8df;position:absolute;top:19px;bottom:3px;left:8px}',
+      '.wg-sidebar .wg-activity svg{height:16px;width:16px;color:#729c87}',
+      '.wg-sidebar .wg-activity .wg-feito-alerta svg{color:#bd7961}',
+      '.wg-sidebar .wg-activity strong{font-size:11px;display:block;font-weight:700;color:#243b50;word-break:break-word}',
+      '.wg-sidebar .wg-activity small{font-size:10px;color:#9ea8a6;display:block;line-height:1.6;margin-top:4px;font-variant-numeric:tabular-nums}',
+      '.wg-sidebar .wg-activity .wg-origem{color:#b2b5a8}',
+      '.wg-sidebar .wg-empty-context{border:1px dashed #dde2d7;padding:17px;border-radius:8px;margin-top:16px;color:#9ba79f;font-size:11px;line-height:1.8}',
+      '.wg-sidebar .wg-simulation-label{font-size:9px;color:#a8aea6;line-height:1.7;margin:10px 0 0}',
+      '.wg-sidebar .wg-pergunta-card{display:flex;align-items:flex-start;gap:9px;background:#fdf1da;border:1px solid #e8c88a;color:#7a5a20;border-radius:11px;padding:10px 13px;font-size:12px;line-height:1.5;margin:0 0 12px}',
+      '.wg-sidebar .wg-pergunta-card svg{width:17px;height:17px;margin-top:1px}',
+      '.wg-sidebar .wg-inspector-note{font-size:9px;color:#b2b5a8;text-align:center;line-height:1.6;margin:15px 0 0}',
+      '@media(min-width:1700px){.wg-sidebar{width:375px}.wg-painel{--wg-sb:375px}}',
+      '@media(max-width:1120px){.wg-sidebar{width:310px}.wg-sidebar .wg-inspector-content{padding:21px 18px}.wg-painel{--wg-sb:310px}}',
+      '@media(max-width:800px){.wg-sidebar{position:absolute;right:0;top:0;bottom:0;width:320px;border-left:1px solid #d9ded4}}',
+      // Celular (iPhone + iMessage): flutua sobre a sala (.wg-palco), à esquerda
+      // da barra lateral, sem a cobrir. Moldura escura fina, Dynamic Island,
+      // bolhas #0B84FE / #E9E9EB com cauda na última de cada grupo.
+      // z-index:1 = contexto de empilhamento próprio ABAIXO da barra lateral
+      // (z 3): a sombra do celular não pinta por cima dela.
+      '.wg-palco{flex:1;min-width:0;position:relative;display:flex;z-index:1}',
+      '.wg-telefone{position:absolute;top:14px;right:18px;z-index:6;height:min(760px,calc(100% - 28px));aspect-ratio:390/844;width:auto;min-width:0;box-sizing:border-box;padding:9px;border-radius:46px;background:#1d1d1f;box-shadow:inset 0 0 0 1.5px #56565b,inset 0 0 0 3px #0b0b0c,0 28px 60px rgba(20,28,36,.34),0 6px 16px rgba(20,28,36,.2);font-family:-apple-system,BlinkMacSystemFont,"SF Pro Text","Helvetica Neue",system-ui,sans-serif;-webkit-font-smoothing:antialiased;color:#000;cursor:default;animation:wg-tel-entrar .34s cubic-bezier(.2,.8,.2,1) both;transform-origin:70% 60%}',
+      '.wg-telefone *{box-sizing:border-box}',
+      '.wg-telefone::before,.wg-telefone::after{content:"";position:absolute;width:3px;border-radius:2px;background:#2c2c2e}',
+      '.wg-telefone::before{left:-3px;top:18%;height:7%;box-shadow:0 62px 0 #2c2c2e}',
+      '.wg-telefone::after{right:-3px;top:25%;height:11%}',
+      '.wg-tel-ecra{position:relative;width:100%;height:100%;border-radius:37px;overflow:hidden;background:#fff;display:flex;flex-direction:column;isolation:isolate}',
+      '.wg-tel-ilha{position:absolute;top:10px;left:50%;z-index:6;width:31%;height:27px;border-radius:14px;background:#000;transform:translateX(-50%)}',
+      '.wg-tel-topo{position:absolute;top:0;left:0;right:0;z-index:5;background:rgba(247,247,249,.86);-webkit-backdrop-filter:saturate(180%) blur(20px);backdrop-filter:saturate(180%) blur(20px);border-bottom:.5px solid rgba(60,60,67,.26)}',
+      '.wg-tel-estado{display:grid;grid-template-columns:1fr 34% 1fr;align-items:center;height:46px;padding:5px 14px 0;font-size:14px;font-weight:600;letter-spacing:-.2px;color:#000}',
+      '.wg-tel-hora{justify-self:center;font-variant-numeric:tabular-nums}',
+      '.wg-tel-icones{justify-self:center;display:flex;align-items:center;gap:5px}',
+      '.wg-tel-icones svg{display:block;fill:currentColor}',
+      '.wg-tel-nav{position:relative;display:flex;flex-direction:column;align-items:center;height:86px;padding:1px 70px 0}',
+      '.wg-tel-voltar{position:absolute;left:4px;top:10px;display:flex;align-items:center;gap:3px;height:30px;padding:0 6px;border:0;border-radius:8px;background:none;color:#007aff;font:inherit;font-size:15px;letter-spacing:-.2px;cursor:pointer}',
+      '.wg-tel-voltar svg{width:10px;height:18px}',
+      '.wg-tel-voltar:hover{background:rgba(0,122,255,.08)}',
+      '.wg-telefone button:focus-visible,.wg-tel-lista:focus-visible{outline:2px solid #0b84fe;outline-offset:2px}',
+      '.wg-tel-avatar{width:46px;height:46px;flex:none;border-radius:50%;overflow:hidden;background:linear-gradient(180deg,#eef0f4,#cdd2da)}',
+      '.wg-tel-avatar svg{display:block;width:54px;height:57px;transform:translate(-4px,2px)}',
+      '.wg-tel-avatar.wg-tel-iniciais{display:grid;place-items:center;color:#fff;font-size:19px;font-weight:600;background:linear-gradient(180deg,#a5abb6,#858b96)}',
+      '.wg-tel-nome{display:flex;align-items:center;gap:3px;max-width:100%;margin-top:4px;font-size:11.5px;color:#000}',
+      '.wg-tel-nome span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
+      '.wg-tel-nome svg{width:5px;height:9px;flex:none;color:#a1a1a6}',
+      '.wg-tel-subtitulo{max-width:100%;margin-top:1px;font-size:9.5px;color:#8e8e93;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
+      '.wg-tel-lista{flex:1;min-height:0;overflow-y:auto;overscroll-behavior:contain;display:flex;flex-direction:column;padding:140px 13px 10px;scrollbar-width:none;outline:none}',
+      '.wg-tel-lista::-webkit-scrollbar{display:none}',
+      '.wg-tel-msg{display:flex;flex-direction:column;margin-top:2px;flex:none}',
+      '.wg-tel-msg.wg-tel-inicio{margin-top:9px}',
+      '.wg-tel-eu{align-items:flex-end}',
+      '.wg-tel-ele{align-items:flex-start}',
+      '.wg-tel-linha{display:flex;align-items:flex-end;gap:6px;width:100%}',
+      '.wg-tel-eu .wg-tel-linha{justify-content:flex-end}',
+      '.wg-tel-bolha{position:relative;z-index:0;max-width:76%;padding:7px 12px;border-radius:18px;font-size:14.5px;line-height:1.32;letter-spacing:-.1px;white-space:pre-wrap;overflow-wrap:anywhere}',
+      '.wg-tel-eu .wg-tel-bolha{background:#0b84fe;color:#fff}',
+      '.wg-tel-ele .wg-tel-bolha{background:#e9e9eb;color:#000}',
+      '.wg-tel-cauda .wg-tel-bolha::before,.wg-tel-cauda .wg-tel-bolha::after{content:"";position:absolute;bottom:0;height:17px;z-index:-1}',
+      '.wg-tel-eu.wg-tel-cauda .wg-tel-bolha::before{right:-7px;width:20px;background:#0b84fe;border-bottom-left-radius:16px 14px}',
+      '.wg-tel-eu.wg-tel-cauda .wg-tel-bolha::after{right:-26px;width:26px;background:#fff;border-bottom-left-radius:10px}',
+      '.wg-tel-ele.wg-tel-cauda .wg-tel-bolha::before{left:-7px;width:20px;background:#e9e9eb;border-bottom-right-radius:16px 14px}',
+      '.wg-tel-ele.wg-tel-cauda .wg-tel-bolha::after{left:-26px;width:26px;background:#fff;border-bottom-right-radius:10px}',
+      '.wg-tel-est-pendente .wg-tel-bolha,.wg-tel-est-fila .wg-tel-bolha{opacity:.55}',
+      '.wg-tel-bolha pre{margin:5px 0;padding:7px 9px;border-radius:9px;background:rgba(0,0,0,.06);font:12px/1.42 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;letter-spacing:0;white-space:pre;overflow-x:auto}',
+      '.wg-tel-eu .wg-tel-bolha pre{background:rgba(255,255,255,.18)}',
+      '.wg-tel-bolha code{padding:1px 4px;border-radius:5px;background:rgba(0,0,0,.07);font:12.5px ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;letter-spacing:0}',
+      '.wg-tel-eu .wg-tel-bolha code{background:rgba(255,255,255,.2)}',
+      '.wg-tel-bolha strong{font-weight:600}',
+      '.wg-tel-anexo{display:block;font-size:12.5px;opacity:.85}',
+      '.wg-tel-ler-mais{display:block;margin-top:4px;padding:0;border:0;background:none;color:#0b84fe;font:inherit;font-size:13px;font-weight:600;cursor:pointer}',
+      '.wg-tel-eu .wg-tel-ler-mais{color:#fff;text-decoration:underline}',
+      '.wg-tel-recibo{margin:3px 4px 1px;font-size:10.5px;font-weight:500;color:#8e8e93}',
+      '.wg-tel-erro{color:#ff3b30}',
+      '.wg-tel-alerta{flex:none;width:19px;height:19px;margin-bottom:1px;padding:0;border:0;border-radius:50%;background:#ff3b30;color:#fff;font:800 12px/19px -apple-system,system-ui,sans-serif;cursor:pointer}',
+      '.wg-tel-data{align-self:center;margin:14px 0 4px;font-size:10.5px;color:#8e8e93;text-align:center;flex:none}',
+      '.wg-tel-data strong{font-weight:600}',
+      '.wg-tel-sistema{align-self:center;max-width:86%;margin:8px 0 2px;font-size:10.5px;line-height:1.35;color:#8e8e93;text-align:center;flex:none}',
+      '.wg-tel-sistema.wg-tel-erro{color:#ff3b30}',
+      '.wg-tel-ferramentas{align-self:center;max-width:92%;margin:7px 0 1px;text-align:center;flex:none}',
+      '.wg-tel-ferramentas>button{max-width:100%;padding:2px 7px;border:0;border-radius:8px;background:none;color:#8e8e93;font:inherit;font-size:10.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;cursor:pointer}',
+      '.wg-tel-ferramentas>button:hover{background:#f2f2f7}',
+      '.wg-tel-ferramentas.wg-tel-com-erro>button{color:#c4453c}',
+      '.wg-tel-ferramentas ol{margin:4px 0 0;padding:6px 10px;border-radius:12px;background:#f2f2f7;list-style:none;text-align:left}',
+      '.wg-tel-ferramentas li{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#3c3c43;font:10.5px/1.6 ui-monospace,SFMono-Regular,Menlo,monospace}',
+      '.wg-tel-ferramentas li.wg-tel-erro{color:#ff3b30}',
+      '.wg-tel-escrevendo{position:relative;z-index:0;display:flex;align-items:center;gap:4px;padding:11px 13px;border-radius:18px;background:#e9e9eb}',
+      '.wg-tel-escrevendo::before,.wg-tel-escrevendo::after{content:"";position:absolute;border-radius:50%;background:#e9e9eb}',
+      '.wg-tel-escrevendo::before{left:-1px;bottom:-1px;width:11px;height:11px}',
+      '.wg-tel-escrevendo::after{left:-6px;bottom:-6px;width:5.5px;height:5.5px}',
+      '.wg-tel-escrevendo span{width:7.5px;height:7.5px;border-radius:50%;background:#8e8e93;opacity:.4;animation:wg-tel-ponto 1.3s ease-in-out infinite}',
+      '.wg-tel-escrevendo span:nth-child(2){animation-delay:.18s}',
+      '.wg-tel-escrevendo span:nth-child(3){animation-delay:.36s}',
+      '.wg-tel-vazio{margin:auto;padding:0 24px;font-size:12px;line-height:1.5;color:#8e8e93;text-align:center}',
+      '.wg-tel-antigas{align-self:center;flex:none;margin:4px 0 6px;padding:3px 8px;border:0;border-radius:8px;background:none;color:#007aff;font:inherit;font-size:11px;font-weight:600;cursor:pointer}',
+      '.wg-tel-antigas:disabled{color:#8e8e93;cursor:default}',
+      '.wg-tel-entrada{position:relative;z-index:5;flex:none;display:flex;align-items:flex-end;gap:7px;padding:6px 10px 27px;background:#fff}',
+      '.wg-tel-mais{flex:none;display:grid;place-items:center;width:31px;height:31px;margin-bottom:1px;padding:0;border:0;border-radius:50%;background:#e9e9eb;color:#8e8e93;cursor:default}',
+      '.wg-tel-mais:disabled{opacity:.75}',
+      '.wg-tel-mais svg{width:13px;height:13px}',
+      '.wg-tel-campo{position:relative;flex:1;min-width:0;display:flex;border:1px solid #d1d1d6;border-radius:17px;background:#fff}',
+      '.wg-tel-campo:focus-within{border-color:#c4c4ca}',
+      '.wg-tel-campo textarea{flex:1;min-width:0;height:32px;max-height:112px;margin:0;padding:6px 36px 6px 12px;border:0;outline:0;resize:none;background:transparent;color:#000;font:inherit;font-size:14.5px;line-height:19px;overflow-y:auto;scrollbar-width:none}',
+      // O placeholder afasta-se 3 px do cursor: no WebKit o cursor (largo) fica
+      // em x 12 e tapava o "i" ("|Message") com a caixa em foco; só o
+      // placeholder anda — o texto escrito e a cápsula ficam onde estavam.
+      '.wg-tel-campo textarea::placeholder{color:#b4b4b9;text-indent:3px}',
+      '.wg-tel-campo textarea:disabled{background:transparent}',
+      '.wg-tel-enviar{position:absolute;right:3px;bottom:3px;display:grid;place-items:center;width:26px;height:26px;padding:0;border:0;border-radius:50%;background:#0b84fe;color:#fff;cursor:pointer;transition:opacity .15s,transform .1s}',
+      '.wg-tel-enviar svg{width:14px;height:14px}',
+      '.wg-tel-microfone{position:absolute;right:9px;bottom:8px;display:grid;place-items:center;width:16px;height:16px;color:#8e8e93;pointer-events:none}',
+      '.wg-tel-video{position:absolute;right:14px;top:17px;display:flex;color:#0b84fe;opacity:.9;pointer-events:none}',
+      '.wg-tel-enviar:disabled{opacity:.3;cursor:default}',
+      '.wg-tel-enviar:active:not(:disabled){transform:scale(.92)}',
+      '.wg-tel-home{position:absolute;left:50%;bottom:8px;width:35%;height:5px;border-radius:3px;background:#000;transform:translateX(-50%)}',
+      // O DSH dá `corner-shape: superellipse(1.5)` a tudo (cantos contínuos, como
+      // o iOS — ótimo para a moldura e as bolhas); círculos, pílulas e as peças
+      // da cauda precisam de `round` para serem círculos de verdade.
+      '.wg-tel-escrevendo span,.wg-tel-escrevendo::before,.wg-tel-escrevendo::after,.wg-tel-avatar,.wg-tel-enviar,.wg-tel-mais,.wg-tel-alerta,.wg-tel-ilha,.wg-tel-home,.wg-tel-cauda .wg-tel-bolha::before,.wg-tel-cauda .wg-tel-bolha::after{corner-shape:round}',
+      '@keyframes wg-tel-entrar{from{opacity:0;transform:translateY(22px) scale(.96)}to{opacity:1;transform:none}}',
+      '@keyframes wg-tel-ponto{0%,60%,100%{opacity:.35;transform:translateY(0)}30%{opacity:.9;transform:translateY(-2px)}}',
+      // Painel estreito (a sala ficaria com < ~600 px ao lado da barra): o
+      // celular passa a flutuar POR CIMA da barra lateral, em vez de tapar a
+      // sala — fechar o celular volta a mostrar a barra.
+      // (o conteúdo da barra esconde-se por baixo dele: nada espreita à volta).
+      '@container wg-painel (max-width:920px){.wg-palco{z-index:4}.wg-telefone{right:calc(18px - var(--wg-sb,345px))}.wg-com-telefone>.wg-sidebar>*{visibility:hidden}}',
+      // Janela ≤ 800 px: a barra flutua por cima da sala (absoluta, à direita)
+      // e o celular fica POR CIMA DELA, também à direita (o palco ocupa a
+      // largura toda: right:18px cai sobre a barra; sem z-index no palco, o
+      // celular — z 6 — passa por cima da barra — z 3 — e a sala fica por
+      // baixo dela). À esquerda sobram ~350 px de sala para a pessoa aberta —
+      // com o celular à esquerda e a barra à direita sobravam ~40 px.
+      '@media(max-width:800px){.wg-palco{z-index:auto}.wg-telefone{right:18px}}',
+      '@media(prefers-reduced-motion:reduce){.wg-telefone{animation:none}.wg-tel-escrevendo span{animation:none;opacity:.6}}',
       // Botão "Modo jogo" do pé: cada ocupante de `sidebar.footer.action`
       // possui a sua própria geometria e hover; cor herdada de currentColor.
       '.wg-jogar{display:inline-flex;align-items:center;gap:6px;height:28px;min-width:28px;padding:0 9px;border:0;background:transparent;border-radius:6px;color:currentColor;cursor:pointer}',
@@ -1734,6 +3816,10 @@ window.__ModuleLoader__.load({
       '.wg-jogar .wg-jogar-rotulo{font-size:13px;color:currentColor}',
       '.wg-svg .office-scene{font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}',
       '.wg-svg .seat{cursor:pointer}',
+      // O foco do lugar sinaliza-se no CARTÃO (:focus-visible, abaixo) — o
+      // contorno por omissão do <g> atravessava a cara do boneco (a caixa do
+      // grupo começa em y 271) quando o Esc devolve o foco ao lugar.
+      '.wg-svg .seat:focus{outline:none}',
       '.wg-svg .seat .seat-card{transition:stroke .12s,fill .12s;stroke:#e7d8c6;stroke-width:1.3;fill:#fff8ee}',
       '.wg-svg .seat:hover .seat-card, .wg-svg .seat:focus-visible .seat-card{stroke:#6b99b9;stroke-width:3;fill:#fffdf5}',
       '.wg-svg .seat.selected .seat-card{stroke:#3b7caf;stroke-width:3;fill:#fffdf9}',
@@ -1754,6 +3840,8 @@ window.__ModuleLoader__.load({
       '.wg-svg .slot-reserved .seat-card{fill:#f6ede3}',
       '.wg-svg .slot-reserved .seat-card-name{fill:#879099}',
       '.wg-svg .slot-reserved .seat-card-role{fill:#a2a4a0}',
+      '.wg-svg .seat.arquivada .seat-card-name{fill:#7d8a93}',
+      '.wg-svg .seat.arquivada .seat-card-role{fill:#a2a4a0}',
       '.wg-svg .desk-label{font-size:37px;font-weight:800;fill:#fffaf2;letter-spacing:-.5px}',
       '.wg-svg .desk-subtitle{font-size:17px;fill:#e1e9eb}',
       '.wg-svg .desk-counter{font-size:14px;fill:#e6e7ed}',
@@ -1784,18 +3872,575 @@ window.__ModuleLoader__.load({
       '@keyframes bubble-in{from{opacity:0;transform:translateY(9px) scale(.82)}to{opacity:1;transform:translateY(0) scale(1)}}',
       '@keyframes bubble-out{from{opacity:1;transform:translateY(0) scale(1)}to{opacity:0;transform:translateY(-10px) scale(.94)}}',
       '@keyframes flag-pulse{0%{transform:scale(1);opacity:.7}70%{transform:scale(1.75);opacity:0}100%{transform:scale(1.75);opacity:0}}',
-      '@media(prefers-reduced-motion:reduce){.wg-svg .question-flag-pulse{animation:none}}',
+      // Quem trabalha balança (só o boneco: cadeira e portátil ficam quietos);
+      // quem dorme solta "zzz". Fases por pessoa: ver faseDe. Em
+      // DEGRAUS de PASSO_ANIM_S (steps(1,end) entre quadros-chave amostrados),
+      // em PAUSA: o relógio da cena (criarRelogioCena) põe-nas todas no mesmo
+      // degrau 5×/s — nada de estilo nem pintura a 60 fps.
+      // Cada "z" está em (0,0) do seu <g translate>: transform-box:view-box +
+      // origem 0 0 = a própria letra, igual no Chrome e no Safari (o WebKit
+      // ignora o x/y do <text> com fill-box).
+      `.wg-svg .character.wg-balanca{transform-box:fill-box;animation:wg-balanco ${segundos(BALANCO_S)} steps(1,end) infinite paused}`,
+      '.wg-svg .wg-zzz{pointer-events:none}',
+      `.wg-svg .wg-z{font-size:25px;font-weight:800;font-style:italic;fill:#6f8494;stroke:#fffdf6;stroke-width:4.5px;stroke-linejoin:round;paint-order:stroke;opacity:0;transform-box:view-box;transform-origin:0 0;animation:wg-zzz ${segundos(ZZZ_S)} steps(1,end) infinite paused}`,
+      // Mesas fora da vista da câmara (+ margem): sem animação nenhuma — o
+      // relógio só acerta as que se veem (ver mesasAVista / criarRelogioCena).
+      // O pulso da bandeira de pergunta (flag-pulse da demo, contínuo) também
+      // pára fora de vista.
+      '.wg-svg .desk-module.wg-fora .wg-z,.wg-svg .desk-module.wg-fora .character.wg-balanca,.wg-svg .desk-module.wg-fora .question-flag-pulse{animation:none}',
+      // Quem está debaixo do celular (ou da barra, quando tapa a sala) também
+      // não se anima (ver lugaresTapados): não se vê e não obriga a refazer o
+      // desfoque do cabeçalho do celular a cada degrau.
+      '.wg-svg .character-hit.wg-tapado .wg-z,.wg-svg .character-hit.wg-tapado .character.wg-balanca{animation:none}',
+      keyframesBalanco(),
+      keyframesZzz(),
+      '@media(prefers-reduced-motion:reduce){.wg-svg .question-flag-pulse{animation:none}'
+        + '.wg-svg .character.wg-balanca{animation:none}'
+        + '.wg-svg .wg-z{animation:none;opacity:.9}'
+        + '.wg-svg .wg-z:nth-child(1){transform:scale(.75)}'
+        + '.wg-svg .wg-z:nth-child(2){transform:translate(12px,-22px) scale(.95)}'
+        + '.wg-svg .wg-z:nth-child(3){transform:translate(26px,-46px) scale(1.15)}}',
     ].join('');
 
-    // Painel principal: sala SVG com zoom/pan e inspeção por pessoa.
+    // Ícone do sprite (os glifos do furniture.svg da demo): <svg><use/></svg>.
+    const icone = (nome) => h('svg', { className: 'wg-icone', 'aria-hidden': 'true', focusable: 'false' },
+      h('use', { href: `#wg-icon-${nome}` }));
+
+    // "12 escondidas pelos filtros" (+ o detalhe por motivo, no tooltip e no menu).
+    function textoEscondidas(e) {
+      const n = e && e.total ? e.total : 0;
+      return `${n} ${n === 1 ? 'escondida' : 'escondidas'} pelos filtros`;
+    }
+    // O chip da toolbar: "12 escondidas" + " pelos filtros" (que sai com o painel estreito).
+    function textoEscondidasCurto(e) {
+      const n = e && e.total ? e.total : 0;
+      return `${n} ${n === 1 ? 'escondida' : 'escondidas'}`;
+    }
+    function detalheEscondidas(e) {
+      if (!e) return '';
+      const partes = [];
+      if (e.arquivadas) partes.push(`${e.arquivadas} arquivada${e.arquivadas === 1 ? '' : 's'}`);
+      if (e.emBranco) partes.push(`${e.emBranco} em branco`);
+      if (e.semWorkspace) partes.push(`${e.semWorkspace} sem workspace`);
+      if (e.paradas) partes.push(`${e.paradas} parada${e.paradas === 1 ? '' : 's'}`);
+      return partes.join(' · ');
+    }
+
+    /* ── Barra lateral da pessoa (o inspetor da demo) ─────────────────── */
+
+    const ABAS_SIDEBAR = [
+      { id: 'contexto', rotulo: 'Contexto', icone: 'context' },
+      { id: 'custo', rotulo: 'Custo', icone: 'grid' },
+      { id: 'atividade', rotulo: 'Atividade', icone: 'play' },
+    ];
+    const Fragmento = react.Fragment;
+    const etiqueta = (texto, real) => h('span', { className: `wg-estimated-tag${real ? ' wg-tag-real' : ''}` }, texto);
+    const cabecalhoSecao = (titulo, tag, real) => h('div', { className: 'wg-section-heading' }, h('h3', null, titulo), etiqueta(tag, real));
+    const celula = (rotulo, valor, larga) => h('div', { className: `wg-telemetry-cell${larga ? ' wg-cell-larga' : ''}` },
+      h('small', null, rotulo), h('strong', { title: valor }, valor));
+
+    function vistaContexto(m) {
+      const c = m.contexto;
+      return h(Fragmento, null,
+        cabecalhoSecao('Janela de contexto', 'REAL · DSH', true),
+        c.aviso
+          ? h('div', { className: 'wg-ctx-warning', role: 'alert' }, icone('alert'),
+            h('span', null, 'Contexto acima de ', h('strong', null, `${LIMIAR_CTX / 1000}k`), ' — compactação recomendada.'))
+          : null,
+        h('div', { className: 'wg-context-total' }, h('strong', null, c.usadoTxt), h('span', null, `/ ${c.janelaTxt} tokens`)),
+        h('p', { className: 'wg-context-caption' }, c.legenda),
+        h('div', {
+          className: 'wg-context-bar', role: 'meter', 'aria-label': 'Ocupação real da janela de contexto',
+          'aria-valuemin': 0, 'aria-valuemax': c.janela ?? 0, 'aria-valuenow': c.usado ?? 0,
+          'aria-valuetext': c.pct === null ? 'desconhecida' : `${c.pct}%`,
+        }, c.largura > 0 ? h('span', { style: { width: `${c.largura}%`, background: c.aviso ? '#bd7961' : '#729bbb' } }) : null),
+        h('div', { className: 'wg-context-scale' }, h('span', null, '0'), h('span', null, c.janelaTxt)),
+        h('div', { className: 'wg-context-message' }, icone('check'),
+          h('span', null, 'Ocupação real da janela, lida da projeção contextPressure do DSH. O DSH não publica a composição (conversa, ficheiros, ferramentas…), por isso ela não aparece aqui.')),
+        h('div', { className: 'wg-inspector-rule' }),
+        cabecalhoSecao('Agora', 'REAL · DSH', true),
+        m.pergunta ? h('div', { className: 'wg-pergunta-card' }, icone('hand'), h('span', null, m.pergunta)) : null,
+        h('div', { className: 'wg-telemetry-grid' },
+          celula('Modelo', m.custo.modelo, true),
+          celula('Estado', m.estado.rotulo),
+          celula('Subagentes', m.subagentes ? `${m.subagentes} a correr` : '—')),
+      );
+    }
+
+    function vistaCusto(m) {
+      const c = m.custo;
+      return h(Fragmento, null,
+        cabecalhoSecao('Tokens por tipo', 'REAL · DSH', true),
+        c.temTokens
+          ? h('div', { className: 'wg-cost-table' },
+            ...c.buckets.map((b) => h('div', { key: b.chave, className: 'wg-cost-row', 'data-bucket': b.chave },
+              h('span', null, b.rotulo), h('strong', null, b.custoTxt), h('code', null, `${b.tokensTxt} tokens × ${b.precoTxt}`))),
+            h('div', { className: 'wg-cost-row wg-cost-total' }, h('span', null, 'Total'), h('strong', null, c.custoTxt),
+              h('code', null, `${c.totalTokensTxt} tokens`)))
+          : h('div', { className: 'wg-empty-context' }, 'O DSH ainda não publicou consumo de tokens desta conversa (projeção tokenUsage). Sem dado, nada se inventa.'),
+        h('div', { className: 'wg-inspector-rule' }),
+        cabecalhoSecao('Custo e velocidade', 'ESTIMATIVA', false),
+        h('div', { className: 'wg-telemetry-grid' },
+          celula('Custo estimado', c.custoTxt),
+          celula('Velocidade', c.velocidadeTxt),
+          celula('Tokens', c.totalTokensTxt),
+          celula('Preço', c.temPreco ? 'tabela do plugin' : 'sem preço'),
+          celula('Modelo', c.modelo, true)),
+        h('p', { className: 'wg-simulation-label' }, c.temPreco
+          ? 'Estimativa: tokens reais × a tabela de preços do plugin (US$ / 1M tokens) — o DSH não publica preços. Velocidade: tokens de saída do turno em curso a dividir pelo tempo do turno (só enquanto trabalha).'
+          : 'Sem preço conhecido para este modelo: o custo fica "—", nunca zero.'),
+      );
+    }
+
+    function vistaAtividade(m) {
+      const n = m.atividade.length;
+      const daConversa = m.atividade.some((a) => a.origem === 'conversa');
+      return h(Fragmento, null,
+        cabecalhoSecao('Linha do tempo', n ? `${n} ${n === 1 ? 'evento' : 'eventos'}` : 'AO VIVO', true),
+        h('p', { className: 'wg-simulation-label', style: { margin: '0 0 8px' } },
+          daConversa
+            ? `Da conversa no DSH (pedidos, ferramentas, respostas e erros) e eventos ao vivo desde que o Modo jogo abriu — os últimos ${MAX_ATIVIDADE}.`
+            : `Eventos reais recebidos desde que o Modo jogo abriu (os últimos ${MAX_ATIVIDADE}); o histórico da conversa chega com o celular.`),
+        n
+          ? h('ol', { className: 'wg-activity' },
+            ...m.atividade.map((a, i) => h('li', {
+              key: `${a.at}-${i}`, className: a.icone === 'alert' ? 'wg-feito-alerta' : null, 'data-tipo': a.tipo, 'data-origem': a.origem,
+            },
+            icone(a.icone), h('div', null, h('strong', null, a.texto),
+              h('small', null, a.hora, a.origem === 'conversa' ? h('span', { className: 'wg-origem' }, ' · histórico') : null)))))
+          : h('div', { className: 'wg-empty-context' }, 'Ainda sem atividade desta conversa. Aparece aqui o histórico da conversa (pedidos, ferramentas, respostas) quando o celular a abre, e ao vivo: começar e terminar de trabalhar, troca de modelo, subagentes, perguntas…'),
+      );
+    }
+
+    // Balão de conversa em traço (a família dos glifos do furniture.svg:
+    // viewBox 24, stroke currentColor 1.8) — no lugar do emoji a cores.
+    const ICONE_CONVERSA = () => h('svg', { viewBox: '0 0 24 24', width: 15, height: 15, 'aria-hidden': 'true', focusable: 'false' },
+      h('path', {
+        d: 'M4 6.5A2.5 2.5 0 0 1 6.5 4h11A2.5 2.5 0 0 1 20 6.5v8a2.5 2.5 0 0 1-2.5 2.5H11l-4.5 3.5V17A2.5 2.5 0 0 1 4 14.5Z',
+        fill: 'none', stroke: 'currentColor', strokeWidth: 1.8, strokeLinejoin: 'round',
+      }));
+
+    function SidebarPessoa(props) {
+      const { modelo: m, aba, mudarAba, fechar, telefoneAberto, abrirTelefone, abrirConversa } = props;
+      const abasRef = react.useRef(null);
+      // Setas/Home/End mudam de separador (padrão WAI-ARIA de tabs).
+      const teclarAbas = (e) => {
+        const i = ABAS_SIDEBAR.findIndex((a) => a.id === aba);
+        let j = null;
+        if (e.key === 'ArrowRight') j = (i + 1) % ABAS_SIDEBAR.length;
+        else if (e.key === 'ArrowLeft') j = (i - 1 + ABAS_SIDEBAR.length) % ABAS_SIDEBAR.length;
+        else if (e.key === 'Home') j = 0;
+        else if (e.key === 'End') j = ABAS_SIDEBAR.length - 1;
+        if (j === null) return;
+        e.preventDefault();
+        mudarAba(ABAS_SIDEBAR[j].id);
+        const alvo = abasRef.current && abasRef.current.querySelector(`[data-aba="${ABAS_SIDEBAR[j].id}"]`);
+        if (alvo) alvo.focus();
+      };
+      const avatar = m.avatarChave
+        ? h('div', {
+          className: 'wg-inspector-avatar', 'aria-hidden': 'true',
+          dangerouslySetInnerHTML: {
+            __html: `<svg viewBox="0 0 264 280" focusable="false" aria-hidden="true"><use href="#${idSimbolo(...m.avatarChave.split('|'))}" width="264" height="280"/></svg>`,
+          },
+        })
+        : h('div', { className: 'wg-inspector-avatar wg-inspector-iniciais', 'aria-hidden': 'true' }, (String(m.nome).trim()[0] ?? '?').toUpperCase());
+      const conteudo = aba === 'custo' ? vistaCusto(m) : aba === 'atividade' ? vistaAtividade(m) : vistaContexto(m);
+
+      return h('aside', { className: 'wg-sidebar', 'aria-label': `${m.nome}: contexto, custo e atividade`, 'data-session-id': m.id },
+        h('div', { className: 'wg-inspector-top' },
+          h('span', null, 'UMA PESSOA, MUITAS IDEIAS'),
+          h('button', { type: 'button', className: 'wg-icon-button wg-sidebar-fechar', 'aria-label': 'Fechar painel', title: 'Fechar (Esc)', onClick: fechar }, icone('close'))),
+        h('div', { className: 'wg-agent-heading' },
+          avatar,
+          h('div', null,
+            h('h2', null, m.nome),
+            h('p', { title: m.local }, m.local),
+            h('span', { className: 'wg-small-status', style: { color: m.estado.cor } },
+              h('span', { className: 'wg-live-dot', style: { background: m.estado.cor } }), m.estado.texto))),
+        h('div', { className: 'wg-conversa-card' },
+          h('small', null, 'Conversa no DSH'),
+          h('strong', { className: m.titulo ? null : 'wg-sem-titulo', title: m.titulo ?? undefined }, m.titulo ?? 'Sem título ainda'),
+          h('div', { className: 'wg-conversa-acoes' },
+            h('button', {
+              type: 'button', className: 'wg-button wg-button-primary wg-abrir-telefone',
+              'aria-pressed': telefoneAberto ? 'true' : 'false', title: 'Ver as mensagens desta conversa',
+              onClick: abrirTelefone,
+            }, ICONE_CONVERSA(), 'Conversa'),
+            abrirConversa
+              ? h('button', {
+                type: 'button', className: 'wg-button wg-button-light wg-abrir-conversa',
+                title: 'Mostrar esta conversa no DSH', onClick: abrirConversa,
+              }, 'Abrir no DSH')
+              : null)),
+        h('div', { className: 'wg-inspector-tabs', role: 'tablist', 'aria-label': 'Detalhes da pessoa', ref: abasRef, onKeyDown: teclarAbas },
+          ...ABAS_SIDEBAR.map((a) => h('button', {
+            key: a.id, type: 'button', role: 'tab', id: `wg-aba-${a.id}`, 'data-aba': a.id,
+            'aria-selected': aba === a.id ? 'true' : 'false', 'aria-controls': 'wg-aba-painel',
+            tabIndex: aba === a.id ? 0 : -1, className: aba === a.id ? 'active' : '',
+            onClick: () => mudarAba(a.id),
+          }, icone(a.icone), a.rotulo))),
+        h('div', { className: 'wg-inspector-content', role: 'tabpanel', id: 'wg-aba-painel', 'aria-labelledby': `wg-aba-${aba}`, 'data-aba': aba },
+          conteudo,
+          h('p', { className: 'wg-inspector-note' }, 'Dados reais do DSH. O custo é uma estimativa com a tabela de preços do plugin — sem dado, "—".')),
+      );
+    }
+
+    /* ── Menu de filtros (toolbar) ───────────────────────────────────── */
+
+    function MenuFiltros(props) {
+      const { filtros, mudar, repor, escondidas, fechar, botaoRef } = props;
+      const menuRef = react.useRef(null);
+      react.useEffect(() => {
+        // Abrir leva o foco ao 1.º interruptor; clicar fora fecha (sem roubar o clique).
+        const menu = menuRef.current;
+        const primeiro = menu && menu.querySelector('[role="switch"]');
+        if (primeiro) { try { primeiro.focus({ preventScroll: true }); } catch { primeiro.focus(); } }
+        const fora = (e) => {
+          if (!menu || menu.contains(e.target)) return;
+          if (botaoRef && botaoRef.current && botaoRef.current.contains(e.target)) return;
+          fechar(false);
+        };
+        document.addEventListener('pointerdown', fora, true);
+        return () => document.removeEventListener('pointerdown', fora, true);
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+      }, []);
+      const alterados = filtrosAlterados(filtros);
+      return h('div', { id: 'wg-filtros-menu', className: 'wg-filtros-menu', role: 'dialog', 'aria-label': 'Filtros da sala', ref: menuRef },
+        h('span', { className: 'wg-filtros-titulo' }, 'FILTROS DA SALA'),
+        ...FILTROS_UI.map((fu) => h('div', {
+          key: fu.chave, className: 'wg-filtro-linha',
+          onClick: () => mudar(fu.chave, !filtros[fu.chave]),
+        },
+          h('div', { className: 'wg-filtro-texto' },
+            h('strong', { id: `wg-filtro-${fu.chave}` }, fu.rotulo),
+            h('small', { id: `wg-filtro-${fu.chave}-ajuda` }, fu.ajuda)),
+          h('button', {
+            type: 'button', role: 'switch', className: 'wg-interruptor', 'data-filtro': fu.chave,
+            'aria-checked': filtros[fu.chave] ? 'true' : 'false',
+            'aria-labelledby': `wg-filtro-${fu.chave}`, 'aria-describedby': `wg-filtro-${fu.chave}-ajuda`,
+            onClick: (e) => { e.stopPropagation(); mudar(fu.chave, !filtros[fu.chave]); },
+          }))),
+        h('div', { className: 'wg-filtros-rodape' },
+          h('span', { title: detalheEscondidas(escondidas) || undefined },
+            escondidas && escondidas.total ? `${textoEscondidas(escondidas)}${detalheEscondidas(escondidas) ? ` (${detalheEscondidas(escondidas)})` : ''}` : 'Ninguém escondido pelos filtros'),
+          h('button', { type: 'button', className: 'wg-filtros-repor', disabled: alterados === 0, onClick: repor }, 'Repor padrão')),
+      );
+    }
+
+    /* ── Celular com a conversa (iPhone + iMessage) ─────────────────────
+       Flutua sobre a sala, à esquerda da barra lateral. As mensagens vêm do
+       controlador (criarConversaTelefone) e desenham-se SÓ com nós de texto
+       React — o único innerHTML é o <use> do avatar (id gerado pelo plugin). */
+
+    const svgTel = (props, ...filhos) => h('svg', { 'aria-hidden': 'true', focusable: 'false', ...props }, ...filhos);
+    const ICONES_TELEFONE = {
+      sinal: () => svgTel({ viewBox: '0 0 18 12', width: 17, height: 11 },
+        h('rect', { x: 0, y: 7.5, width: 3, height: 4.5, rx: 1 }), h('rect', { x: 5, y: 5, width: 3, height: 7, rx: 1 }),
+        h('rect', { x: 10, y: 2.5, width: 3, height: 9.5, rx: 1 }), h('rect', { x: 15, y: 0, width: 3, height: 12, rx: 1 })),
+      wifi: () => svgTel({ viewBox: '0 0 16 12', width: 15, height: 11 },
+        h('path', { d: 'M8 11.6 5.5 9.1a3.5 3.5 0 0 1 5 0Z' }),
+        h('path', { d: 'M3.2 6.8a6.8 6.8 0 0 1 9.6 0l-1.5 1.5a4.7 4.7 0 0 0-6.6 0Z' }),
+        h('path', { d: 'M.8 4.4a10.2 10.2 0 0 1 14.4 0l-1.5 1.5a8.1 8.1 0 0 0-11.4 0Z' })),
+      bateria: () => svgTel({ viewBox: '0 0 27 13', width: 25, height: 12 },
+        h('rect', { x: 0.5, y: 0.5, width: 23, height: 12, rx: 3.8, fill: 'none', stroke: 'currentColor', opacity: 0.38 }),
+        h('rect', { x: 2, y: 2, width: 17, height: 9, rx: 2.2 }),
+        h('path', { d: 'M25 4.4v4.2c.9-.3 1.5-1.2 1.5-2.1s-.6-1.8-1.5-2.1Z', opacity: 0.4 })),
+      voltar: () => svgTel({ viewBox: '0 0 12 20', className: 'wg-tel-chevron-voltar' },
+        h('path', { d: 'M10 2 2 10l8 8', fill: 'none', stroke: 'currentColor', strokeWidth: 2.6, strokeLinecap: 'round', strokeLinejoin: 'round' })),
+      chevron: () => svgTel({ viewBox: '0 0 6 10' },
+        h('path', { d: 'm1 1 4 4-4 4', fill: 'none', stroke: 'currentColor', strokeWidth: 1.5, strokeLinecap: 'round', strokeLinejoin: 'round' })),
+      mais: () => svgTel({ viewBox: '0 0 14 14' },
+        h('path', { d: 'M7 1v12M1 7h12', fill: 'none', stroke: 'currentColor', strokeWidth: 2.2, strokeLinecap: 'round' })),
+      enviar: () => svgTel({ viewBox: '0 0 14 14' },
+        h('path', { d: 'M7 12.5V2M2.4 6.3 7 1.7l4.6 4.6', fill: 'none', stroke: 'currentColor', strokeWidth: 2.3, strokeLinecap: 'round', strokeLinejoin: 'round' })),
+      // Caixa vazia: o microfone cinzento do iMessage (a seta azul só com texto).
+      microfone: () => svgTel({ viewBox: '0 0 16 16', width: 16, height: 16 },
+        h('rect', { x: 5.2, y: 1, width: 5.6, height: 9, rx: 2.8, fill: 'currentColor' }),
+        h('path', { d: 'M3 7.6a5 5 0 0 0 10 0M8 12.6V15', fill: 'none', stroke: 'currentColor', strokeWidth: 1.5, strokeLinecap: 'round' })),
+      // FaceTime (câmara de vídeo) do cabeçalho — decorativo.
+      video: () => svgTel({ viewBox: '0 0 24 16', width: 23, height: 15 },
+        h('rect', { x: 0.8, y: 1.6, width: 15, height: 12.8, rx: 3.4, fill: 'currentColor' }),
+        h('path', { d: 'M17.4 6.2 22.2 3v10l-4.8-3.2Z', fill: 'currentColor' })),
+    };
+
+    // Segmentos de uma bolha → nós React (texto, `código`, bloco ``` em mono).
+    const conteudoDaBolha = (segmentos) => segmentos.map((s, i) => (
+      s.tipo === 'bloco' ? h('pre', { key: i }, s.texto)
+        : s.tipo === 'codigo' ? h('code', { key: i }, s.texto)
+          : s.tipo === 'negrito' ? h('strong', { key: i }, s.texto)
+            : h('span', { key: i }, s.texto)));
+
+    // Props só com primitivos + a conversa (estável enquanto está aberta) e
+    // `fechar` estável: com React.memo, o celular NÃO se redesenha a cada
+    // evento das outras pessoas da sala — só com a própria conversa.
+    function TelefoneConversa(props) {
+      const { conversa, fechar } = props;
+      const m = props.sessionId == null ? null : {
+        id: props.sessionId, nome: props.nome, avatarChave: props.avatarChave ?? null,
+        titulo: props.titulo ?? null, estado: { rotulo: props.estadoRotulo ?? '' },
+      };
+      const [, setTick] = react.useState(0);
+      react.useEffect(() => {
+        if (!conversa || typeof conversa.subscribe !== 'function') return undefined;
+        return conversa.subscribe(() => setTick((t) => t + 1));
+      }, [conversa]);
+      const conv = conversa && typeof conversa.getSnapshot === 'function'
+        ? conversa.getSnapshot()
+        : conversaVazia(m ? m.id : null, 'sem-canal', 'Sem ligação a esta conversa.');
+      const [texto, setTexto] = react.useState('');
+      const [limite, setLimite] = react.useState(MAX_ITENS_TELEFONE);
+      const [abertos, setAbertos] = react.useState(() => new Set()); // ferramentas / textos longos expandidos
+      const [agora, setAgora] = react.useState(() => Date.now());
+      react.useEffect(() => {
+        const relogio = setInterval(() => setAgora(Date.now()), 20000); // hora da barra de estado
+        return () => clearInterval(relogio);
+      }, []);
+      const listaRef = react.useRef(null);
+      const campoRef = react.useRef(null);
+      const noFundoRef = react.useRef(true);     // o utilizador está no fim da conversa?
+      const forcarFundoRef = react.useRef(true); // ao abrir e ao enviar: rolar para o fim
+      const ancoraRef = react.useRef(null);      // a carregar antigas: manter a posição
+
+      const nome = m ? m.nome : 'Pessoa';
+      // Só se refaz quando a conversa publica (snapshot novo), o limite muda ou
+      // o relógio anda — não a cada render.
+      const { linhas, escondidas, total } = (react.useMemo || ((f) => f()))(
+        () => linhasDoTelefone(conv, { agora, max: limite }), [conv, limite, agora]);
+      const primeira = linhas.length ? linhas[0].key : null;
+      const podeAntigas = escondidas > 0 || (conv.temMais && conv.fase === 'aberta');
+      // Sem sessão viva (controlador inerte: id desconhecido, sem canal) ou
+      // conversa apagada, a caixa desativa-se — nada do que se escreve se perde.
+      const podeEscrever = !!conversa && !conv.removida && !conv.inerte && conv.fase !== 'sem-canal';
+
+      // Rolar: ao abrir e quando chega mensagem nova (só se já estava no fim);
+      // ao carregar antigas no topo, a vista fica onde estava.
+      (react.useLayoutEffect || react.useEffect)(() => {
+        const lista = listaRef.current;
+        if (!lista) return;
+        const a = ancoraRef.current;
+        if (a) {
+          lista.scrollTop = lista.scrollHeight - a.dist;
+          if (primeira !== a.primeira || (!conv.aCarregarAntigas && !conv.temMais && escondidas === 0) || Date.now() - a.t > 10000) {
+            ancoraRef.current = null;
+          }
+          return;
+        }
+        if (forcarFundoRef.current || noFundoRef.current) {
+          lista.scrollTop = lista.scrollHeight;
+          if (linhas.length) forcarFundoRef.current = false;
+        }
+      });
+      // A caixa de texto cresce com o texto (até ~5 linhas).
+      (react.useLayoutEffect || react.useEffect)(() => {
+        const c = campoRef.current;
+        if (!c) return;
+        c.style.height = 'auto';
+        c.style.height = `${Math.min(112, Math.max(32, c.scrollHeight))}px`;
+      }, [texto]);
+      // Abrir o celular NÃO rouba o foco: a caixa só o ganha quando o
+      // utilizador clica na cápsula (ou lá chega com Tab). Com o foco
+      // automático, o cursor largo do WebKit tapava o "i" do placeholder
+      // ("|Message") e o piscar do cursor repintava o celular sem parar.
+
+      const pedirAntigas = () => {
+        const lista = listaRef.current;
+        if (!lista || ancoraRef.current) return;
+        const ancora = { dist: lista.scrollHeight - lista.scrollTop, primeira, t: Date.now() };
+        if (escondidas > 0) {
+          ancoraRef.current = ancora;
+          setLimite((l) => l + MAX_ITENS_TELEFONE);
+        } else if (conv.temMais && !conv.aCarregarAntigas && conv.fase === 'aberta' && conversa) {
+          ancoraRef.current = ancora;
+          setLimite((l) => Math.max(l, total) + 400); // a página antiga (50 mensagens) cabe logo
+          conversa.maisAntigas();
+        }
+      };
+      const aoRolar = () => {
+        const lista = listaRef.current;
+        if (!lista) return;
+        noFundoRef.current = lista.scrollHeight - lista.scrollTop - lista.clientHeight < 40;
+        if (lista.scrollTop < 48 && podeAntigas) pedirAntigas();
+      };
+      const alternar = (chave) => setAbertos((atual) => {
+        const novo = new Set(atual);
+        if (novo.has(chave)) novo.delete(chave); else novo.add(chave);
+        return novo;
+      });
+      const enviar = () => {
+        const t = texto;
+        if (!t.trim() || !podeEscrever) return;
+        setTexto('');
+        forcarFundoRef.current = true;
+        noFundoRef.current = true;
+        Promise.resolve(conversa.enviar(t)).catch(() => {});
+      };
+      // Enter envia; Shift+Enter (ou a compor com IME) muda de linha.
+      const teclar = (e) => {
+        if (e.key !== 'Enter' || e.shiftKey || e.altKey || (e.nativeEvent && e.nativeEvent.isComposing)) return;
+        e.preventDefault();
+        enviar();
+      };
+
+      const linha = (l) => {
+        switch (l.tipo) {
+          case 'data':
+            return h('div', { key: l.key, className: 'wg-tel-data' }, h('strong', null, l.dia), ` ${l.hora}`);
+          case 'sistema':
+            return h('div', { key: l.key, className: `wg-tel-sistema${l.variante === 'erro' ? ' wg-tel-erro' : ''}` }, l.texto);
+          case 'a-escrever':
+            return h('div', { key: l.key, className: 'wg-tel-msg wg-tel-ele wg-tel-inicio wg-tel-a-escrever', role: 'status', 'aria-label': `${nome} está a escrever…` },
+              h('div', { className: 'wg-tel-escrevendo' }, h('span'), h('span'), h('span')));
+          case 'ferramentas': {
+            const aberto = abertos.has(l.key);
+            const [p] = l.itens;
+            const n = l.itens.length;
+            const aCorrer = l.itens.some((i) => i.estado === 'a-correr');
+            const comErro = l.itens.some((i) => i.estado === 'erro');
+            const resumo = `🔧 ${p.nome}${p.resumo ? ` · ${p.resumo}` : ''}${n > 1 ? ` · +${n - 1}` : ''}${aCorrer ? ' …' : ''}`;
+            return h('div', { key: l.key, className: `wg-tel-ferramentas${comErro ? ' wg-tel-com-erro' : ''}`, 'data-n': n },
+              h('button', {
+                type: 'button', 'aria-expanded': aberto ? 'true' : 'false',
+                title: aberto ? 'Esconder as ferramentas' : `${n} ${n === 1 ? 'ferramenta' : 'ferramentas'} — ver todas`,
+                onClick: () => alternar(l.key),
+              }, resumo),
+              aberto
+                ? h('ol', null, ...l.itens.map((i) => h('li', {
+                  key: i.key, className: i.estado === 'erro' ? 'wg-tel-erro' : null, title: `${i.nome}${i.resumo ? ` · ${i.resumo}` : ''}`,
+                }, `${i.estado === 'a-correr' ? '⏳' : i.estado === 'erro' ? '✕' : '✓'} ${i.nome}${i.resumo ? ` · ${i.resumo}` : ''}`)))
+                : null);
+          }
+          case 'msg': {
+            const longo = l.texto.length > TEXTO_LONGO;
+            const curto = longo && !abertos.has(l.key);
+            const segmentos = l.segmentos || segmentosEmCache(curto ? `${l.texto.slice(0, TEXTO_LONGO).trimEnd()}…` : l.texto);
+            const classes = ['wg-tel-msg', `wg-tel-${l.lado}`, `wg-tel-est-${l.estado}`];
+            if (l.inicioGrupo) classes.push('wg-tel-inicio');
+            if (l.cauda) classes.push('wg-tel-cauda');
+            return h('div', { key: l.key, className: classes.join(' '), 'data-lado': l.lado, 'data-estado': l.estado },
+              h('div', { className: 'wg-tel-linha' },
+                l.estado === 'falhou'
+                  ? h('button', {
+                    type: 'button', className: 'wg-tel-alerta', 'aria-label': 'Não entregue — tentar de novo',
+                    title: `Não entregue${l.erro ? `: ${l.erro}` : ''} — clique para tentar de novo`,
+                    onClick: () => { forcarFundoRef.current = true; conversa.reenviar(l.id); },
+                  }, '!')
+                  : null,
+                h('div', { className: 'wg-tel-bolha' },
+                  ...conteudoDaBolha(segmentos),
+                  ...(l.anexos || []).map((a, i) => h('span', { key: `anexo-${i}`, className: 'wg-tel-anexo' }, `${a.tipo === 'imagem' ? '📷' : '📎'} ${a.nome}`)),
+                  longo ? h('button', { type: 'button', key: 'ler', className: 'wg-tel-ler-mais', onClick: () => alternar(l.key) }, curto ? 'Ler mais' : 'Mostrar menos') : null)),
+              l.recibo ? h('div', { className: `wg-tel-recibo${l.estado === 'falhou' ? ' wg-tel-erro' : ''}`, title: l.erro || undefined }, l.recibo) : null);
+          }
+          default:
+            return null;
+        }
+      };
+
+      const vazio = linhas.length === 0
+        ? (conv.fase === 'erro' ? `Não foi possível abrir a conversa: ${conv.erro ?? 'erro desconhecido'}`
+          : conv.fase === 'sem-canal' ? (conv.erro ?? 'Sem ligação a esta conversa.')
+            : conv.fase === 'a-abrir' ? 'A abrir a conversa…'
+              : 'Ainda sem mensagens. Escreva a primeira.')
+        : null;
+      const avatar = m && m.avatarChave
+        ? h('div', {
+          className: 'wg-tel-avatar', 'aria-hidden': 'true',
+          dangerouslySetInnerHTML: {
+            __html: `<svg viewBox="0 0 264 280" focusable="false" aria-hidden="true"><use href="#${idSimbolo(...m.avatarChave.split('|'))}" width="264" height="280"/></svg>`,
+          },
+        })
+        : h('div', { className: 'wg-tel-avatar wg-tel-iniciais', 'aria-hidden': 'true' }, (String(nome).trim()[0] ?? '?').toUpperCase());
+      const subtitulo = conv.removida ? 'Conversa apagada no DSH' : (m && m.titulo) || (m ? m.estado.rotulo : '');
+
+      return h('section', {
+        className: 'wg-telefone', role: 'dialog', 'aria-label': `Conversa com ${nome}`,
+        'data-session-id': conv.sessionId ?? undefined, 'data-fase': conv.fase, 'data-fonte': conv.fonte ?? undefined,
+      },
+        h('div', { className: 'wg-tel-ecra' },
+          h('div', { className: 'wg-tel-ilha', 'aria-hidden': 'true' }),
+          h('header', { className: 'wg-tel-topo' },
+            h('div', { className: 'wg-tel-estado', 'aria-hidden': 'true' },
+              h('span', { className: 'wg-tel-hora' }, horaCurta(agora)), h('span'),
+              h('span', { className: 'wg-tel-icones' }, ICONES_TELEFONE.sinal(), ICONES_TELEFONE.wifi(), ICONES_TELEFONE.bateria())),
+            h('div', { className: 'wg-tel-nav' },
+              h('button', {
+                type: 'button', className: 'wg-tel-voltar', onClick: fechar,
+                title: 'Voltar ao escritório (Esc)', 'aria-label': 'Fechar a conversa e voltar ao escritório',
+              }, ICONES_TELEFONE.voltar(), 'Escritório'),
+              avatar,
+              h('span', { className: 'wg-tel-video', title: 'FaceTime: use o DSH', 'aria-hidden': 'true' }, ICONES_TELEFONE.video()),
+              h('div', { className: 'wg-tel-nome' }, h('span', null, nome), ICONES_TELEFONE.chevron()),
+              h('div', { className: 'wg-tel-subtitulo', title: subtitulo || undefined }, subtitulo))),
+          h('div', {
+            className: 'wg-tel-lista', ref: listaRef, onScroll: aoRolar,
+            // Só as mensagens novas são anunciadas (o texto a transmitir não repete).
+            role: 'log', 'aria-label': `Mensagens com ${nome}`, 'aria-live': 'polite', 'aria-relevant': 'additions', tabIndex: 0,
+          },
+            podeAntigas
+              ? h('button', { type: 'button', className: 'wg-tel-antigas', onClick: pedirAntigas, disabled: conv.aCarregarAntigas },
+                conv.aCarregarAntigas ? 'A carregar…' : 'Mensagens anteriores')
+              : null,
+            vazio ? h('div', { className: 'wg-tel-vazio' }, vazio) : null,
+            ...linhas.map(linha)),
+          h('div', { className: 'wg-tel-entrada' },
+            h('button', { type: 'button', className: 'wg-tel-mais', disabled: true, 'aria-label': 'Anexos (use o DSH)', title: 'Anexos: use o DSH' }, ICONES_TELEFONE.mais()),
+            h('div', {
+              className: 'wg-tel-campo',
+              // Clicar em qualquer ponto da cápsula (borda, microfone) leva o foco à caixa.
+              onClick: (e) => {
+                const c = campoRef.current;
+                if (!c || c.disabled || e.target === c || (e.target && e.target.closest && e.target.closest('button'))) return;
+                try { c.focus({ preventScroll: true }); } catch { c.focus(); }
+              },
+            },
+              h('textarea', {
+                ref: campoRef, rows: 1, value: texto, placeholder: 'iMessage', disabled: !podeEscrever,
+                'aria-label': `Mensagem para ${nome}`, onChange: (e) => setTexto(e.target.value), onKeyDown: teclar,
+              }),
+              texto.trim()
+                ? h('button', {
+                  type: 'button', className: 'wg-tel-enviar', disabled: !podeEscrever,
+                  'aria-label': 'Enviar', title: 'Enviar (Enter)', onClick: enviar,
+                }, ICONES_TELEFONE.enviar())
+                : h('span', { className: 'wg-tel-microfone', 'aria-hidden': 'true' }, ICONES_TELEFONE.microfone())),
+            h('div', { className: 'wg-tel-home', 'aria-hidden': 'true' }))));
+    }
+
+    const TelefoneMemo = typeof react.memo === 'function' ? react.memo(TelefoneConversa) : TelefoneConversa;
+
+    // Painel principal: sala SVG com zoom/pan, filtros e a barra lateral da pessoa.
     function PainelEscritorio(props) {
       const { getView, getSelecao, subscribe, iniciar, parar, selecionar } = props;
       const temCanal = typeof props.temCanal === 'function' ? props.temCanal : () => false;
+      const getFiltros = typeof props.getFiltros === 'function' ? props.getFiltros : () => FILTROS_PADRAO;
+      const getTelefone = typeof props.getTelefone === 'function' ? props.getTelefone : () => ({ aberto: false, sessionId: null });
       const [, setTick] = react.useState(0);
       const [camera, setCamera] = react.useState({ zoom: 0.3, x: 32, y: 64 });
+      const [aba, setAba] = react.useState('contexto');
+      const [filtrosAbertos, setFiltrosAbertos] = react.useState(false);
+      const painelRef = react.useRef(null);
       const telaRef = react.useRef(null);
+      const botaoFiltrosRef = react.useRef(null);
       const cameraRef = react.useRef(camera);
       cameraRef.current = camera;
+      const filtrosAbertosRef = react.useRef(false);
+      filtrosAbertosRef.current = filtrosAbertos;
+      const interagiuRef = react.useRef(false); // o utilizador explorou: sem enquadramento automático
+      const tudoRef = react.useRef(false); // depois de "Enquadrar": manter a sala inteira à vista
+      const focarDepoisRef = react.useRef(null); // lugar a focar depois de fechar a barra lateral
+      // Fechar o celular (‹ Escritório ou Esc): o foco volta ao "Conversa".
+      const fecharTelefoneRef = react.useRef(() => {});
+      fecharTelefoneRef.current = () => {
+        if (typeof props.fecharTelefone === 'function') props.fecharTelefone();
+        const raf = typeof requestAnimationFrame === 'function' ? requestAnimationFrame : (fn) => setTimeout(fn, 0);
+        raf(() => {
+          const botao = painelRef.current && painelRef.current.querySelector('.wg-sidebar .wg-abrir-telefone');
+          if (botao) { try { botao.focus({ preventScroll: true }); } catch { botao.focus(); } }
+        });
+      };
+      // Estável entre renders (o celular é React.memo).
+      const fecharTelefone = (react.useCallback || ((f) => f))(() => fecharTelefoneRef.current(), []);
 
       // Face estável do núcleo: assina e liga o adaptador uma única vez.
       react.useEffect(() => {
@@ -1814,7 +4459,7 @@ window.__ModuleLoader__.load({
         if (!tela) return undefined;
         const onWheel = (e) => {
           e.preventDefault();
-          interagiuRef.current = true; // o utilizador está a explorar: sem enquadramento automático
+          interagiuRef.current = true;
           if (e.ctrlKey || e.metaKey) {
             const rect = tela.getBoundingClientRect();
             const px = e.clientX - rect.left;
@@ -1837,29 +4482,218 @@ window.__ModuleLoader__.load({
       const view = getView();
       const layout = view.layout;
       const selecionada = getSelecao();
+      const filtros = getFiltros();
+      const telefone = getTelefone();
 
-      // Enquadrar (mesma geometria do renderOffice). `tudo` = a sala inteira.
+      // O que flutua POR CIMA da tela, em px desde a esquerda dela: o celular
+      // (à direita; com o painel estreito, por cima da barra) e a barra lateral
+      // (só conta quando se sobrepõe à sala: janela ≤ 800 px). Caixas de
+      // LAYOUT — sem a animação de entrada do celular.
+      const obstaculosDaTela = () => {
+        const tela = telaRef.current;
+        const painel = painelRef.current;
+        if (!tela || !painel) return [];
+        const origem = tela.getBoundingClientRect().left;
+        return [painel.querySelector('.wg-telefone'), painel.querySelector('.wg-sidebar')]
+          .map((el) => caixaDeLayout(el, origem))
+          .filter(Boolean);
+      };
+
+      // Enquadrar (mesma geometria do renderOffice) na largura DISPONÍVEL da
+      // tela — com a barra lateral aberta, a sala encolhe. `tudo` = a sala
+      // inteira. Com uma pessoa selecionada, o zoom não desce do legível
+      // (ZOOM_FOCO) e a câmara centra-a na zona à vista: fora do celular e da
+      // barra lateral, onde quer que estejam (zonaVisivel).
       const caber = (tudo = false) => {
         const tela = telaRef.current;
         if (!tela) return;
-        const mundo = tamanhoMundo(getView().layout.modules.length);
-        setCamera(enquadramento(mundo, { w: tela.clientWidth, h: tela.clientHeight }, tudo));
+        const lay = getView().layout;
+        const mundo = tamanhoMundo(lay.modules.length);
+        const foco = tudo ? null : centroDoLugar(lay, getSelecao());
+        const zona = foco ? zonaVisivel(tela.clientWidth, obstaculosDaTela()) : null;
+        setCamera(enquadramento(mundo, { w: tela.clientWidth, h: tela.clientHeight, zona }, tudo, foco));
+      };
+
+      // A explorar (depois de arrastar/zoom), a sala não salta quando a tela
+      // muda de largura: só se desloca o mínimo para a pessoa selecionada
+      // continuar à vista (ex.: a barra lateral abriu por cima dela).
+      const manterSelecionadaVisivel = () => {
+        const tela = telaRef.current;
+        const id = getSelecao();
+        if (!tela || !id) return;
+        const card = [...tela.querySelectorAll('.wg-svg .seat[data-session-id]:not(.slot-reserved)')]
+          .find((el) => el.getAttribute('data-session-id') === id);
+        const alvo = card && (card.querySelector('.seat-card') || card);
+        if (!alvo) return;
+        const r = alvo.getBoundingClientRect();
+        const t = tela.getBoundingClientRect();
+        // O celular (e, com a janela estreita, a barra lateral) flutua sobre a
+        // sala: a pessoa tem de ficar na zona livre, do lado onde ela estiver.
+        const zona = zonaVisivel(t.width, obstaculosDaTela(), 0, 0);
+        const margem = 24;
+        // Em coordenadas do MUNDO (o DOM mostra a câmara do último render): a
+        // correção compõe-se com um enquadramento automático pedido no mesmo
+        // lote (a câmara nova ainda não está no ecrã).
+        const c0 = cameraRef.current;
+        const wEsq = (r.left - t.left - c0.x) / c0.zoom;
+        const wDir = (r.right - t.left - c0.x) / c0.zoom;
+        setCamera((c) => {
+          const esq = c.x + wEsq * c.zoom;
+          const dir = c.x + wDir * c.zoom;
+          let dx = 0;
+          if (dir > zona.dir - margem) dx = zona.dir - margem - dir;
+          if (esq + dx < zona.esq + margem) dx = zona.esq + margem - esq;
+          return Math.abs(dx) > 0.5 ? { ...c, x: c.x + dx } : c;
+        });
       };
 
       // Enquadramento automático: ao montar e sempre que a sala muda de forma
-      // (nº de mesas/pessoas) — mas nunca depois de o utilizador explorar
+      // (nº de mesas/pessoas, filtros) — mas nunca depois de o utilizador explorar
       // (arrastar, scroll, zoom); o botão Enquadrar devolve-o ao automático.
-      const interagiuRef = react.useRef(false);
-      const tudoRef = react.useRef(false); // depois de "Enquadrar": manter a sala inteira à vista
       const formaRef = react.useRef('');
       const forma = `${layout.modules.length}|${layout.visiveis}`;
       react.useEffect(() => {
         if (forma !== formaRef.current) {
           formaRef.current = forma;
           if (!interagiuRef.current) caber(tudoRef.current);
-          verificarRefs(); // ponto de verificação: nenhuma referência #… sem destino
         }
       });
+      // Ponto de verificação: nenhuma referência #… sem destino — na cena e na
+      // barra lateral (avatar e ícones), sempre que a sala, a pessoa ou o
+      // separador mudam.
+      const verificacaoRef = react.useRef('');
+      const chaveVerificacao = `${forma}|${selecionada ?? ''}|${aba}`;
+      react.useEffect(() => {
+        if (chaveVerificacao !== verificacaoRef.current) {
+          verificacaoRef.current = chaveVerificacao;
+          verificarRefs();
+        }
+      });
+
+      // A tela muda de tamanho (barra lateral abre/fecha, janela redimensionada):
+      // em automático, reenquadra na largura nova; a explorar, só garante que a
+      // pessoa selecionada continua à vista.
+      react.useEffect(() => {
+        const tela = telaRef.current;
+        if (!tela || typeof ResizeObserver !== 'function') return undefined;
+        let largura = tela.clientWidth;
+        let altura = tela.clientHeight;
+        const ro = new ResizeObserver(() => {
+          if (tela.clientWidth === largura && tela.clientHeight === altura) return;
+          largura = tela.clientWidth;
+          altura = tela.clientHeight;
+          // Em automático, o enquadramento já conta com a pessoa selecionada e
+          // com o celular; a explorar, só se garante que ela continua à vista.
+          if (!interagiuRef.current) caber(tudoRef.current);
+          else manterSelecionadaVisivel();
+          // Outra vista: outras mesas a animar (mesmo sem a câmara mexer).
+          atualizarVistaAnimadaRef.current();
+        });
+        ro.observe(tela);
+        return () => ro.disconnect();
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+      }, []);
+
+      // O relógio da cena (um só temporizador, acertado aos degraus; só corre
+      // com algo animado À VISTA e a aba visível) — criado no 1.º uso e parado
+      // ao desmontar o painel.
+      const relogioRef = react.useRef(null);
+      const relogio = () => relogioRef.current || (relogioRef.current = criarRelogioCena());
+      react.useEffect(() => () => {
+        if (relogioRef.current) relogioRef.current.parar();
+        relogioRef.current = null;
+        vistaAnimadaRef.current = { cena: null, chave: '' }; // remontagem: o relógio novo recebe a lista
+      }, []);
+      // Quem se anima: só as mesas que cruzam a vista da câmara (+ ~1 mesa de
+      // margem); as outras levam `wg-fora` (animation:none). Recalcula-se
+      // depois de cada re-montagem da cena (innerHTML novo: as animações dos
+      // elementos novos voltam, antes de pintar, à fase contínua de cada
+      // pessoa — sem saltos), quando a câmara anda e quando a tela muda de
+      // tamanho; o relógio fica com a LISTA dos elementos animados à vista.
+      const vistaAnimadaRef = react.useRef({ cena: null, chave: '' });
+      const atualizarVistaAnimada = () => {
+        const tela = telaRef.current;
+        if (!tela) return;
+        const cena = tela.querySelector('.wg-svg > svg');
+        const mesas = cena ? cena.querySelectorAll('.desk-module') : [];
+        const aVista = mesasAVista(mesas.length, cameraRef.current, { w: tela.clientWidth, h: tela.clientHeight });
+        // O que tapa a sala (o celular; a barra quando está por cima dela): só
+        // conta o que cruza a tela. Quem fica debaixo não se anima.
+        const painel = painelRef.current;
+        const r = tela.getBoundingClientRect();
+        const tapas = painel
+          ? [painel.querySelector('.wg-telefone'), painel.querySelector('.wg-sidebar')]
+            .map((el) => caixaNaTela(el, r))
+            .filter((c) => c && c.dir > 0 && c.esq < r.width && c.fundo > 0 && c.topo < r.height)
+          : [];
+        const tapados = lugaresTapados(getView().layout, cameraRef.current, tapas);
+        const chave = `${aVista.map((v) => (v ? 1 : 0)).join('')}|${[...tapados].sort().join(',')}`;
+        if (cena === vistaAnimadaRef.current.cena && chave === vistaAnimadaRef.current.chave) return;
+        vistaAnimadaRef.current = { cena, chave };
+        const elementos = [];
+        mesas.forEach((m, i) => {
+          if (m.classList.contains('wg-fora') === aVista[i]) m.classList.toggle('wg-fora', !aVista[i]);
+          if (!aVista[i]) return;
+          for (const g of m.querySelectorAll('.character-hit')) {
+            const tapado = tapados.has(g.getAttribute('data-session-id'));
+            if (g.classList.contains('wg-tapado') !== tapado) g.classList.toggle('wg-tapado', tapado);
+            if (!tapado) for (const el of g.querySelectorAll('.character.wg-balanca, .wg-z')) elementos.push(el);
+          }
+        });
+        relogio().definir(elementos, cena);
+      };
+      const atualizarVistaAnimadaRef = react.useRef(atualizarVistaAnimada);
+      atualizarVistaAnimadaRef.current = atualizarVistaAnimada;
+      (react.useLayoutEffect || react.useEffect)(() => {
+        atualizarVistaAnimada();
+        // Depois de fechar a barra lateral, o foco volta ao lugar da pessoa.
+        const id = focarDepoisRef.current;
+        if (id !== null && telaRef.current) {
+          focarDepoisRef.current = null;
+          const lugar = [...telaRef.current.querySelectorAll('.wg-svg .seat[role="button"][data-session-id]:not(.slot-reserved)')]
+            .find((el) => el.getAttribute('data-session-id') === id);
+          if (lugar && typeof lugar.focus === 'function') { try { lugar.focus({ preventScroll: true }); } catch { /* sem foco */ } }
+        }
+      });
+
+      const fecharSidebar = () => {
+        const id = getSelecao();
+        if (!id) return;
+        focarDepoisRef.current = id;
+        selecionar(null);
+      };
+
+      // Esc fecha, por ordem: o menu de filtros, o celular e a barra lateral.
+      // Só quando o foco está no painel (ou em lado nenhum) — nunca rouba o Esc
+      // ao resto do DSH.
+      react.useEffect(() => {
+        const onKey = (e) => {
+          if (e.key !== 'Escape' || e.defaultPrevented) return;
+          const painel = painelRef.current;
+          if (!painel) return;
+          const alvo = e.target;
+          const dentro = painel.contains(alvo) || alvo === document.body || alvo === document.documentElement;
+          if (!dentro) return;
+          if (filtrosAbertosRef.current) {
+            e.preventDefault();
+            setFiltrosAbertos(false);
+            if (botaoFiltrosRef.current) botaoFiltrosRef.current.focus();
+            return;
+          }
+          if (getTelefone().aberto && typeof props.fecharTelefone === 'function') {
+            e.preventDefault();
+            fecharTelefoneRef.current();
+            return;
+          }
+          if (getSelecao()) {
+            e.preventDefault();
+            fecharSidebar();
+          }
+        };
+        window.addEventListener('keydown', onKey);
+        return () => window.removeEventListener('keydown', onKey);
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+      }, []);
 
       const podeAgir = typeof props.podeAgir === 'function' && props.podeAgir();
       const novaSessao = (workspaceId) => { if (workspaceId && typeof props.novaSessao === 'function') props.novaSessao(workspaceId); };
@@ -1898,7 +4732,14 @@ window.__ModuleLoader__.load({
         const acao = el && el.closest ? el.closest('[data-action="nova-sessao"]') : null;
         if (acao) { novaSessao(acao.getAttribute('data-workspace-id')); return true; }
         const alvo = el && el.closest ? el.closest('[data-session-id]') : null;
-        selecionar(alvo ? alvo.getAttribute('data-session-id') : null);
+        const id = alvo ? alvo.getAttribute('data-session-id') : null;
+        // Clicar numa pessoa abre a barra lateral E o celular com a conversa
+        // (o celular primeiro: trocar de pessoa faz retain da nova antes do
+        // release da anterior). Em automático, a câmara passa a seguir a
+        // pessoa (zoom legível) em vez da sala inteira do "Enquadrar".
+        if (id) tudoRef.current = false;
+        if (id && typeof props.abrirTelefone === 'function') props.abrirTelefone(id);
+        selecionar(id);
         return !!alvo;
       };
       const clicar = (e) => {
@@ -1918,60 +4759,31 @@ window.__ModuleLoader__.load({
 
       const svg = renderOffice({ people: view.people, layout, selecionada, recrutar: podeAgir });
       const sel = selecionada && view.people[selecionada] ? view.people[selecionada] : null;
-      const chaveSel = sel ? chaveCorpo(sel.avatar, estadoDemo(sel).preset) : null;
-      const sprite = spriteDoPainel([...layout.chaves, chaveSel]);
-      const ctx = sel ? formatoCtx(sel.ctx) : null;
-      const equipaSel = sel
-        ? [...layout.equipas.values()].find((eq) => layout.modules.some((m) => m.teamId === eq.id
-          && m.seats.some((s) => s === sel.id || (s && s.reservado === sel.id))))
+      const modelo = sel
+        ? modeloSidebar(sel, {
+          layout,
+          precos: typeof props.getPrecos === 'function' ? props.getPrecos() : PRECOS_USD_POR_TOKEN,
+          historico: typeof props.getHistorico === 'function' ? props.getHistorico(sel.id) : null,
+        })
         : null;
+      const sprite = spriteDoPainel([...layout.chaves, modelo ? modelo.avatarChave : null]);
+      // O celular é da pessoa selecionada (a conversa dela, retida pelo núcleo).
+      const telefoneVisivel = !!(telefone.aberto && sel && telefone.sessionId === sel.id);
+      // A pessoa desapareceu (conversa apagada) com o celular aberto: fecha-o
+      // — a referência é libertada, nada fica retido.
+      const telefoneOrfao = !!(telefone.aberto && telefone.sessionId && !view.people[telefone.sessionId]);
+      react.useEffect(() => {
+        if (telefoneOrfao && typeof props.fecharTelefone === 'function') props.fecharTelefone();
+      });
+      // Ao abrir o celular, a pessoa selecionada não pode ficar escondida por baixo dele.
+      const telefoneChave = telefoneVisivel ? telefone.sessionId : '';
+      react.useEffect(() => {
+        if (telefoneChave) manterSelecionadaVisivel();
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+      }, [telefoneChave]);
       const nWorkspaces = [...layout.equipas.keys()].filter((id) => id !== EQUIPA_SEM_WORKSPACE).length;
-
-      const inspetor = sel
-        ? h('div', { className: 'wg-inspetor' },
-          chaveSel
-            ? h('span', {
-              className: 'wg-inspetor-avatar',
-              dangerouslySetInnerHTML: {
-                __html: `<svg viewBox="0 0 264 280" width="44" height="44" aria-hidden="true"><use href="#${idSimbolo(...chaveSel.split('|'))}" width="264" height="280"/></svg>`,
-              },
-            })
-            : h('span', { className: 'wg-inspetor-avatar wg-inspetor-iniciais' }, (String(sel.name ?? '?').trim()[0] ?? '?').toUpperCase()),
-          h('div', { className: 'wg-inspetor-corpo' },
-            h('div', { className: 'wg-inspetor-topo' },
-              h('strong', { className: 'wg-inspetor-nome' }, sel.name ?? 'Pessoa'),
-              podeAgir && typeof props.abrirConversa === 'function'
-                ? h('button', {
-                  type: 'button', className: 'wg-botao wg-abrir-conversa',
-                  title: 'Abrir a conversa desta pessoa no DSH',
-                  onClick: () => props.abrirConversa(sel.id),
-                }, '💬 Abrir conversa')
-                : null,
-            ),
-            h('div', { className: 'wg-inspetor-chips' },
-              sel.title ? h('span', { className: 'wg-chip wg-chip-titulo', title: sel.title }, `💬 ${sel.title}`) : null,
-              equipaSel ? h('span', { className: 'wg-chip', title: equipaSel.path }, `📁 ${equipaSel.name}`) : null,
-              h('span', { className: 'wg-chip' }, `${sel.emoji} ${ROTULOS[sel.status] ?? sel.status}`),
-              h('span', { className: 'wg-chip' }, nomeModelo(sel.model)),
-              h('span', { className: 'wg-chip wg-chip-verde' }, formatoCusto(sel.cost)),
-              sel.speed ? h('span', { className: 'wg-chip' }, `⚡ ${sel.speed} tok/s`) : null,
-              sel.subagents > 0 ? h('span', { className: 'wg-chip' }, `🤝 ${sel.subagents} subagente${sel.subagents === 1 ? '' : 's'} a correr`) : null,
-              sel.ctx && num(sel.ctx.used) > LIMIAR_CTX
-                ? h('span', { className: 'wg-chip wg-chip-alerta' }, '⚠ contexto >200k')
-                : null,
-              sel.question ? h('span', { className: 'wg-chip wg-chip-alerta' }, `❓ ${String(sel.question).slice(0, 40)}`) : null,
-            ),
-            h('div', { className: 'wg-ctx-linha' },
-              h('div', { className: 'wg-ctx-barra', role: 'meter', 'aria-label': 'Ocupação do contexto' },
-                h('span', {
-                  className: sel.ctx && num(sel.ctx.used) > LIMIAR_CTX ? 'wg-ctx-cheio' : '',
-                  style: { width: `${Math.max(0, Math.min(100, sel.ctx ? (num(sel.ctx.used) / Math.max(1, num(sel.ctx.window) || 1)) * 100 : 0))}%` },
-                })),
-              h('span', { className: 'wg-ctx-texto' }, ctx ? ctx.texto : 'CTX —'),
-            ),
-          ),
-        )
-        : h('div', { className: 'wg-rodape' }, h('span', { className: 'wg-dica' }, 'Clique numa pessoa para inspecionar · use ＋/－ Zoom ou o scroll do rato'));
+      const escondidas = layout.escondidas ?? { total: 0 };
+      const alterados = filtrosAlterados(filtros);
 
       const conta = [
         layout.visiveis === 1 ? '1 pessoa' : `${layout.visiveis} pessoas`,
@@ -1979,7 +4791,22 @@ window.__ModuleLoader__.load({
         layout.modules.length === 1 ? '1 mesa' : `${layout.modules.length} mesas`,
       ].join(' · ');
 
-      return h('div', { className: 'wg-painel' },
+      const mudarFiltro = (chave, valor) => {
+        if (typeof props.setFiltros === 'function') props.setFiltros({ [chave]: valor });
+      };
+      const reporFiltros = () => {
+        if (typeof props.setFiltros === 'function') props.setFiltros({ ...FILTROS_PADRAO });
+      };
+
+      const banner = layout.visiveis === 0
+        ? (escondidas.total > 0
+          ? `Os filtros escondem ${escondidas.total === 1 ? 'a única conversa' : `todas as ${escondidas.total} conversas`} (${detalheEscondidas(escondidas)}). Abra Filtros para as mostrar.`
+          : temCanal()
+            ? 'Ligado ao DSH — sem conversas ativas para sentar. Abra (ou retome) uma conversa e ela aparece na mesa do seu workspace. Nada é simulado.'
+            : 'Telemetria indisponível — à espera do host do plugin (nada é simulado)')
+        : null;
+
+      return h('div', { className: 'wg-painel', ref: painelRef },
         h('div', { className: 'wg-sprite', 'aria-hidden': true, dangerouslySetInnerHTML: { __html: sprite } }),
         h('div', { className: 'wg-toolbar' },
           h('h1', null, 'Escritório'),
@@ -2001,25 +4828,69 @@ window.__ModuleLoader__.load({
               onClick: () => { interagiuRef.current = false; tudoRef.current = true; caber(true); },
             }, '⤢ Enquadrar'),
           ),
+          h('div', { className: 'wg-filtros' },
+            h('button', {
+              type: 'button', className: 'wg-botao wg-filtros-botao', ref: botaoFiltrosRef,
+              // O menu é um diálogo não-modal com interruptores (não um menu de
+              // menuitems): 'dialog', não 'true' (= menu) para os leitores de ecrã.
+              title: 'Escolher quem aparece na sala', 'aria-haspopup': 'dialog',
+              'aria-expanded': filtrosAbertos ? 'true' : 'false',
+              'aria-controls': filtrosAbertos ? 'wg-filtros-menu' : undefined,
+              onClick: () => setFiltrosAbertos((a) => !a),
+            }, 'Filtros',
+            alterados ? h('span', { className: 'wg-filtros-numero', title: `${alterados} fora do padrão` }, String(alterados)) : null,
+            ' ▾'),
+            escondidas.total > 0
+              ? h('button', {
+                type: 'button', className: 'wg-escondidas', title: detalheEscondidas(escondidas),
+                onClick: () => setFiltrosAbertos(true),
+              }, textoEscondidasCurto(escondidas), h('span', { className: 'wg-escondidas-mais' }, ' pelos filtros'))
+              : null,
+            filtrosAbertos
+              ? h(MenuFiltros, {
+                filtros, escondidas, botaoRef: botaoFiltrosRef,
+                mudar: mudarFiltro, repor: reporFiltros, fechar: setFiltrosAbertos,
+              })
+              : null,
+          ),
           h('span', { className: 'wg-conta' }, conta),
         ),
-        h('div', {
-          className: 'wg-tela', ref: telaRef,
-          onPointerDown: arrastar, onClick: clicar, onKeyDown: teclar,
-        },
-          layout.visiveis === 0
-            ? h('div', { className: 'wg-banner' }, temCanal()
-              ? 'Ligado ao DSH — sem conversas ativas para sentar. Abra (ou retome) uma conversa e ela aparece na mesa do seu workspace. Nada é simulado.'
-              : 'Telemetria indisponível — à espera do host do plugin (nada é simulado)')
-            : null,
-          h('div', {
-            className: 'wg-mundo',
-            style: { transform: `translate(${camera.x}px, ${camera.y}px) scale(${camera.zoom})` },
-          },
-            h('div', { className: 'wg-svg', dangerouslySetInnerHTML: { __html: svg } }),
+        h('div', { className: `wg-corpo${telefoneVisivel ? ' wg-com-telefone' : ''}` },
+          h('div', { className: 'wg-palco' },
+            h('div', {
+              className: 'wg-tela', ref: telaRef,
+              onPointerDown: arrastar, onClick: clicar, onKeyDown: teclar,
+            },
+              banner ? h('div', { className: 'wg-banner' }, banner) : null,
+              h('div', {
+                className: 'wg-mundo',
+                style: { transform: `translate(${camera.x}px, ${camera.y}px) scale(${camera.zoom})` },
+              },
+                h('div', { className: 'wg-svg', dangerouslySetInnerHTML: { __html: svg } }),
+              ),
+            ),
+            telefoneVisivel
+              ? h(TelefoneMemo, {
+                key: sel.id, conversa: typeof props.getConversa === 'function' ? props.getConversa() : null,
+                sessionId: modelo.id, nome: modelo.nome, avatarChave: modelo.avatarChave,
+                titulo: modelo.titulo, estadoRotulo: modelo.estado.rotulo, fechar: fecharTelefone,
+              })
+              : null,
           ),
+          modelo
+            ? h(SidebarPessoa, {
+              modelo, aba, mudarAba: setAba, fechar: fecharSidebar,
+              telefoneAberto: telefone.aberto && telefone.sessionId === modelo.id,
+              // "Conversa" alterna o celular desta pessoa.
+              abrirTelefone: () => {
+                if (telefone.aberto && telefone.sessionId === modelo.id) fecharTelefone();
+                else if (typeof props.abrirTelefone === 'function') props.abrirTelefone(modelo.id);
+              },
+              abrirConversa: podeAgir && typeof props.abrirConversa === 'function' ? () => props.abrirConversa(modelo.id) : null,
+            })
+            : null,
         ),
-        inspetor,
+        h('div', { className: 'wg-rodape' }, h('span', { className: 'wg-dica' }, 'Clique numa pessoa para abrir a conversa e ver o contexto, o custo e a atividade · arraste para explorar · Ctrl + scroll para zoom')),
       );
     }
 
@@ -2100,12 +4971,64 @@ window.__ModuleLoader__.load({
     };
 
     // Núcleo: estado + adaptador + seleção + expirações (ciclo de vida da fibra).
-    function criarNucleo() {
+    // `opcoes.abrirConversa(id)` — fábrica do controlador do celular (testes);
+    // por omissão, a conversa REAL pelo contexto do plugin (secção 4b).
+    function criarNucleo(opcoes = {}) {
       let estado = createOfficeState(PRECOS_USD_POR_TOKEN);
       const ouvintes = new Set();
       let adaptador = null;
       let timerPurga = null;
       let vistaMemo = null; // vista + layout memorizados por versão do estado
+      let filtros = lerFiltros(); // filtros da sala (localStorage 'dsh-work-game:filtros')
+      // Celular da conversa (estilo iMessage): abre com o clique numa pessoa e
+      // com "Conversa" da barra lateral. `conversa` é o controlador com a
+      // referência viva (retain) — há no máximo UM, e é libertado ao fechar,
+      // ao trocar de pessoa, ao desmontar o painel (parar) e no dispose (HMR).
+      let telefone = { aberto: false, sessionId: null };
+      let conversa = null;
+      const fabricaConversa = typeof opcoes.abrirConversa === 'function'
+        ? opcoes.abrirConversa
+        : (id) => criarConversaTelefone(ctxDoPlugin, id);
+      // Histórico da conversa para a Atividade da barra lateral: derivado dos
+      // itens do celular sempre que a conversa publica, e GUARDADO enquanto a
+      // mesma pessoa estiver selecionada (fechar o celular não o apaga). Só
+      // notifica quando muda (texto a transmitir não conta: ver historicoDaConversa).
+      const HISTORICO_VAZIO = { sessionId: null, itens: [], assinatura: '' };
+      let historico = HISTORICO_VAZIO;
+      let soltarHistorico = null;
+      const desligarHistorico = () => {
+        const s = soltarHistorico;
+        soltarHistorico = null;
+        if (s) { try { s(); } catch { /* já solto */ } }
+      };
+      const lerHistorico = (c) => {
+        if (!c || c !== conversa || typeof c.getSnapshot !== 'function') return false;
+        let snap = null;
+        try { snap = c.getSnapshot(); } catch { snap = null; }
+        if (!snap || !Array.isArray(snap.itens)) return false;
+        const itens = historicoDaConversa(snap.itens);
+        const assinatura = JSON.stringify(itens);
+        if (historico.sessionId === c.sessionId && historico.assinatura === assinatura) return false;
+        // Uma conversa ainda a abrir (sem itens) não apaga o que já se sabia dela.
+        if (!itens.length && historico.sessionId === c.sessionId) return false;
+        historico = { sessionId: c.sessionId, itens, assinatura };
+        return true;
+      };
+      const ligarHistorico = (c) => {
+        desligarHistorico();
+        if (!c || typeof c.subscribe !== 'function') return;
+        try {
+          const soltar = c.subscribe(() => { if (lerHistorico(c)) notificar(); });
+          soltarHistorico = typeof soltar === 'function' ? soltar : null;
+        } catch { soltarHistorico = null; }
+        lerHistorico(c);
+      };
+      const soltarConversa = () => {
+        const c = conversa;
+        conversa = null;
+        desligarHistorico();
+        if (c && typeof c.libertar === 'function') { try { c.libertar(); } catch { /* já libertada */ } }
+      };
 
       const notificar = () => {
         vistaMemo = null;
@@ -2144,11 +5067,45 @@ window.__ModuleLoader__.load({
               ? superficieDSH.velocidadeDe(p.id)
               : null;
           }
-          vista.layout = montarEscritorio(Object.values(vista.people), vista.workspaces);
+          vista.layout = montarEscritorio(Object.values(vista.people), vista.workspaces, filtros);
           vistaMemo = vista;
           return vista;
         },
         temCanal: () => !!superficieDSH,
+        getPrecos: () => estado.precos,
+        getFiltros: () => filtros,
+        setFiltros: (parcial) => {
+          const novos = normalizarFiltros({ ...filtros, ...(parcial ?? {}) });
+          if (JSON.stringify(novos) === JSON.stringify(filtros)) return;
+          filtros = novos;
+          guardarFiltros(filtros);
+          trace('filtros', filtros);
+          notificar();
+        },
+        getTelefone: () => telefone,
+        getConversa: () => conversa,
+        getHistorico: (id) => (id != null && historico.sessionId === id ? historico.itens : null),
+        abrirTelefone: (id) => {
+          if (!id) return;
+          if (telefone.aberto && telefone.sessionId === id && conversa) return;
+          // Trocar de pessoa: retain da NOVA e só depois release da anterior
+          // (como o replaceMain do DSH: a mesma sessão nunca fecha e reabre).
+          const anterior = conversa;
+          conversa = fabricaConversa(id);
+          if (historico.sessionId !== id) historico = HISTORICO_VAZIO;
+          ligarHistorico(conversa);
+          if (anterior && anterior !== conversa) { try { anterior.libertar(); } catch { /* já libertada */ } }
+          telefone = { aberto: true, sessionId: id };
+          trace('telefone-aberto', id);
+          notificar();
+        },
+        fecharTelefone: () => {
+          if (!telefone.aberto && !conversa) return;
+          soltarConversa();
+          telefone = { aberto: false, sessionId: telefone.sessionId };
+          trace('telefone-fechado', telefone.sessionId);
+          notificar();
+        },
         getSelecao: () => estado.selecionada,
         subscribe: (fn) => {
           ouvintes.add(fn);
@@ -2159,14 +5116,18 @@ window.__ModuleLoader__.load({
             const transporte = superficieDSH;
             adaptador = createAdapter({
               onEvent: (evento) => {
-                estado = applyEvent(estado, evento);
+                // Hora de chegada (a linha do tempo da barra lateral); o estado
+                // continua puro e sem relógio.
+                const carimbado = evento && evento.at == null ? { ...evento, at: Date.now() } : evento;
+                estado = applyEvent(estado, carimbado);
                 notificar();
                 agendarPurga();
               },
-              // Catálogo real de sessões + transporte de eventos (feature-detected).
-              sessions: transporte && typeof transporte.catalogo === 'function'
+              // Catálogo real de sessões (relido em cada start: reabrir o painel
+              // não ressuscita conversas apagadas) + transporte de eventos.
+              sessions: () => (transporte && typeof transporte.catalogo === 'function'
                 ? (transporte.catalogo() ?? [])
-                : [],
+                : []),
               projections: {},
               surface: transporte,
             });
@@ -2177,10 +5138,22 @@ window.__ModuleLoader__.load({
         },
         parar: () => {
           if (adaptador) adaptador.stop();
+          // O painel desmontou (outro painel do DSH): o celular fecha e a
+          // referência da conversa é libertada — nada fica retido em fundo.
+          if (telefone.aberto || conversa) {
+            soltarConversa();
+            telefone = { aberto: false, sessionId: telefone.sessionId };
+          }
         },
         selecionar: (id) => {
           if (estado.selecionada !== id) {
             estado = { ...estado, selecionada: id };
+            if (historico.sessionId !== id) historico = HISTORICO_VAZIO;
+            // O celular é da pessoa selecionada: mudar/fechar a barra fecha-o.
+            if (telefone.aberto && telefone.sessionId !== id) {
+              soltarConversa();
+              telefone = { aberto: false, sessionId: telefone.sessionId };
+            }
             notificar();
           }
         },
@@ -2190,6 +5163,9 @@ window.__ModuleLoader__.load({
             timerPurga = null;
           }
           if (adaptador) adaptador.stop();
+          soltarConversa();
+          historico = HISTORICO_VAZIO;
+          telefone = { aberto: false, sessionId: telefone.sessionId };
           ouvintes.clear();
         },
       };
@@ -2284,14 +5260,14 @@ window.__ModuleLoader__.load({
     }
     // Auto-verificação: alguma referência #… do painel sem destino? (ids
     // partidos = bonecos/mobiliário invisíveis). Procura no painel inteiro:
-    // a cena usa os <symbol>s do sprite.
+    // a cena e a barra lateral usam os <symbol>s do sprite.
     function verificarRefs() {
       try {
         if (typeof document === 'undefined') return null;
         const painel = document.querySelector('.wg-painel');
         if (!painel) return null;
         const ids = new Set([...painel.querySelectorAll('[id]')].map((e) => e.id));
-        const refs = [...painel.querySelectorAll('.wg-svg use, .wg-inspetor use')]
+        const refs = [...painel.querySelectorAll('.wg-svg use, .wg-sidebar use, .wg-toolbar use, .wg-telefone use')]
           .map((u) => (u.getAttribute('href') || u.getAttribute('xlink:href') || '').replace(/^#/, ''));
         const partidas = refs.filter((id) => id && !ids.has(id));
         const resumo = { refs: refs.length, partidas: partidas.length, exemplos: [...new Set(partidas)].slice(0, 5) };
@@ -2310,6 +5286,7 @@ window.__ModuleLoader__.load({
     exports.__renderOffice = renderOffice;
     exports.__montarEscritorio = montarEscritorio;
     exports.__enquadramento = enquadramento;
+    exports.__centroDoLugar = centroDoLugar;
     exports.__tamanhoMundo = tamanhoMundo;
     exports.__spriteDoPainel = spriteDoPainel;
     exports.__prepararCorpo = prepararCorpo;
@@ -2319,6 +5296,48 @@ window.__ModuleLoader__.load({
     exports.__officeView = officeView;
     exports.__extrairSuperficie = extrairSuperficie;
     exports.__precoDe = precoDe;
+    exports.__alinharAnimacoes = alinharAnimacoes;
+    exports.__acertarAnimacoes = acertarAnimacoes;
+    exports.__recolherAnimacoes = recolherAnimacoes;
+    exports.__tempoDaCena = tempoDaCena;
+    exports.__criarRelogioCena = criarRelogioCena;
+    exports.__mesasAVista = mesasAVista;
+    exports.__vistaDoMundo = vistaDoMundo;
+    exports.__zonaVisivel = zonaVisivel;
+    exports.__caixaDeLayout = caixaDeLayout;
+    exports.__caixaNaTela = caixaNaTela;
+    exports.__lugaresTapados = lugaresTapados;
+    exports.__SANGRIA = SANGRIA;
+    exports.__ZOOM_MIN_ENQUADRAR = ZOOM_MIN_ENQUADRAR;
+    exports.__LARGURA_MAX_TELA = LARGURA_MAX_TELA;
+    exports.__identidadeDe = identidadeDe;
+    exports.__hashEstavel = hashEstavel;
+    exports.__criarAssociador = criarAssociador;
+    exports.__NOMES = NOMES;
+    exports.__CSS_PAINEL = CSS_PAINEL;
+    exports.__modeloSidebar = modeloSidebar;
+    exports.__FILTROS_PADRAO = FILTROS_PADRAO;
+    exports.__FILTROS_UI = FILTROS_UI;
+    exports.__normalizarFiltros = normalizarFiltros;
+    exports.__lerFiltros = lerFiltros;
+    exports.__guardarFiltros = guardarFiltros;
+    exports.__textoEscondidas = textoEscondidas;
+    exports.__detalheEscondidas = detalheEscondidas;
+    exports.__criarNucleo = criarNucleo;
+    exports.__MAX_ATIVIDADE = MAX_ATIVIDADE;
+    exports.__itensDoChat = itensDoChat;
+    exports.__itensDoFluxo = itensDoFluxo;
+    exports.__mensagensDaCaixa = mensagensDaCaixa;
+    exports.__linhasDoTelefone = linhasDoTelefone;
+    exports.__aEscrever = aEscrever;
+    exports.__segmentosDeTexto = segmentosDeTexto;
+    exports.__celulasDaTabela = celulasDaTabela;
+    exports.__historicoDaConversa = historicoDaConversa;
+    exports.__resumoArgs = resumoArgs;
+    exports.__rotuloData = rotuloData;
+    exports.__criarConversaTelefone = criarConversaTelefone;
+    exports.__FONTE_TELEFONE = FONTE_TELEFONE;
+    exports.__MAX_ITENS_TELEFONE = MAX_ITENS_TELEFONE;
 
     try { window.__wgDiag = (window.__wgDiag || '') + '|factory:fim'; } catch { /* sem window */ }
     return module.exports;

@@ -126,6 +126,7 @@ export async function launchBrowser({ width = 1440, height = 900 } = {}) {
     }
   });
 
+  let filaCapturas = Promise.resolve(); // page.screenshot: uma de cada vez
   const page = {
     consoleErrors,
     networkRequests,
@@ -202,16 +203,36 @@ export async function launchBrowser({ width = 1440, height = 900 } = {}) {
     async setViewport(w, h, mobile = false) {
       await cdp.send('Emulation.setDeviceMetricsOverride', { width: w, height: h, deviceScaleFactor: 1, mobile });
     },
-    /** Grava um PNG do estado atual da página (evidência de sessão). */
-    async screenshot(path) {
-      const shot = await cdp.send('Page.captureScreenshot', { format: 'png' });
-      writeFileSync(path, Buffer.from(shot.data, 'base64'));
-      return path;
+    /** Tecla real via Input do CDP (keydown/keyup nativos no elemento com foco,
+     *  como o keyboard.press do Puppeteer: Enter leva o texto "\r"). */
+    async press(key, { code = key, keyCode = 0, shift = false } = {}) {
+      const texto = key === 'Enter' ? '\r' : undefined;
+      const base = { key, code, windowsVirtualKeyCode: keyCode, nativeVirtualKeyCode: keyCode, modifiers: shift ? 8 : 0 };
+      await cdp.send('Input.dispatchKeyEvent', texto ? { type: 'keyDown', ...base, text: texto, unmodifiedText: texto } : { type: 'rawKeyDown', ...base });
+      await cdp.send('Input.dispatchKeyEvent', { type: 'keyUp', ...base });
+    },
+    /** Grava um PNG do estado atual da página (evidência de sessão); `clip`
+     *  ({x, y, width, height, scale}) recorta uma região, com zoom opcional.
+     *  As capturas vão numa FILA (uma de cada vez): duas Page.captureScreenshot
+     *  em simultâneo — uma com clip, outra sem — corrompem a imagem (um mosaico
+     *  do recorte) sem erro nenhum; assim, mesmo sem await, cada uma sai certa. */
+    screenshot(path, clip) {
+      const vez = filaCapturas.then(async () => {
+        const shot = await cdp.send('Page.captureScreenshot', clip ? { format: 'png', clip: { scale: 1, ...clip } } : { format: 'png' });
+        writeFileSync(path, Buffer.from(shot.data, 'base64'));
+        return path;
+      });
+      filaCapturas = vez.catch(() => {}); // uma captura falhada não trava as seguintes
+      return vez;
     }
   };
 
   return {
     page,
+    /** Sessão CDP crua da página (ex.: Target.createTarget para esconder a aba). */
+    cdp,
+    /** PID do processo principal do browser (medições de CPU da árvore de processos). */
+    pid: proc.pid,
     async close() {
       try { ws.close(); } catch { /* já fechado */ }
       proc.kill('SIGKILL');

@@ -550,3 +550,59 @@ Cada URL é a composição das opções fixas da pessoa (tabelas acima) com o tr
 - `assets/avatars/random/r12/working.svg` — https://avataaars.io/?avatarStyle=Transparent&eyeType=Happy&eyebrowType=DefaultNatural&topType=LongHairStraight2&hairColor=Red&accessoriesType=Wayfarers&facialHairType=MoustacheMagnum&facialHairColor=Blonde&clotheType=BlazerSweater&clotheColor=Pink&mouthType=Twinkle&skinColor=Tanned
 - `assets/avatars/random/r12/success.svg` — https://avataaars.io/?avatarStyle=Transparent&eyeType=Happy&eyebrowType=RaisedExcitedNatural&topType=LongHairStraight2&hairColor=Red&accessoriesType=Wayfarers&facialHairType=MoustacheMagnum&facialHairColor=Blonde&clotheType=BlazerSweater&clotheColor=Pink&mouthType=Smile&skinColor=Tanned
 - `assets/avatars/random/r12/error.svg` — https://avataaars.io/?avatarStyle=Transparent&eyeType=Cry&eyebrowType=AngryNatural&topType=LongHairStraight2&hairColor=Red&accessoriesType=Wayfarers&facialHairType=MoustacheMagnum&facialHairColor=Blonde&clotheType=BlazerSweater&clotheColor=Pink&mouthType=Grimace&skinColor=Tanned
+
+## Dormir (Modo jogo do plugin)
+
+Expressão **"a dormir"** (olhos fechados) das 8 identidades nomeadas, para o plugin *Modo jogo* do DSH mostrar quem não está trabalhando (junto do "zzz"). Gerada em **2026-09-28 (UTC)** pelo mesmo pipeline das outras expressões ([docs/conhecimento/03-pipeline-avataaars.md](../docs/conhecimento/03-pipeline-avataaars.md)): download dev-time do renderer [avataaars.io](https://avataaars.io/) com `avatarStyle=Transparent`, as opções fixas de cada pessoa (tabela "Identidades nomeadas (8)" acima) e um triple novo. **Nada foi redesenhado**: são os desenhos originais da biblioteca Avataaars, só com a recolorização mínima já documentada.
+
+- **Triple:** `eyeType=Close` / `eyebrowType=DefaultNatural` / `mouthType=Serious`.
+- **Porquê `Serious` e não `Default`:** as duas bocas foram descarregadas e comparadas lado a lado. A `Default` do Avataaars é um meio-círculo escuro preenchido — boca **aberta** que, com os olhos fechados, se lê como gargalhada ou bocejo, e ganha destaque no tamanho pequeno da sala. A `Serious` é um traço curto **fechado**: cara serena de quem dorme, e é uma boca que o projeto já usa (preset `focused`). Os downloads com `mouthType=Default` foram descartados; nenhum ficou no repositório.
+- **Não é um 15.º preset** de `window.DSH_EXPRESSIONS` nem entra na demo: fica numa pasta própria, `assets/avatars/sleeping/<pessoa>.svg`, para não alterar as contagens congeladas de `expressions/` (112) e `random/` (48). **8 arquivos, 110.269 bytes.**
+- Os arquivos são carregados localmente (tal como os demais avatares); as URLs abaixo são registro de proveniência, não dependência de execução.
+
+### Prova de reprodutibilidade (feita antes de gerar)
+
+Para cada pessoa foi descarregado de novo o triple do preset `idle` (`Default`/`DefaultNatural`/`Smile`) com as mesmas opções fixas e comparado com `assets/avatars/expressions/<pessoa>/idle.svg`: **8/8 idênticos** depois de reaplicar a recolorização e renumerar os ids `react-*` pela ordem de 1.ª aparição. Os bytes diferem apenas nos números desses ids (o renderer usa um contador global por pedido). Repetido em 3 execuções (24 downloads do `idle`), sempre com o mesmo resultado — só então os arquivos "a dormir" foram gerados.
+
+### Recolorização
+
+A mesma das outras expressões, exatamente **1 `fill` de roupa** por arquivo e só nas quatro pessoas recoloridas: `bia` `#B1E2FF` → `#8357BF`, `pesquisa` `#A7FFC4` → `#3C8652`, `codigo` `#FFDEB5` → `#D47A36`, `maya` `#A7FFC4` → `#2F9A94`. Desfazer a substituição reproduz o SHA-256 do download (coluna "SHA-256 do download" abaixo). `rui`, `lia`, `testes` e `alex` são byte-idênticos ao download.
+
+### Validações executadas
+
+1. **XML bem formado** (`xml.etree.ElementTree` e `xmllint --noout`) em 8/8; raiz `<svg>`, `viewBox="0 0 264 280"`, `width="264px"`, `height="280px"`.
+2. **Sem `<script>`, `foreignObject`, atributos `on*`, DOCTYPE/entidades, `@import`, `javascript:` nem URLs externas**; todos os `href` e `url(...)` são fragmentos `#...`. A única referência sem alvo é o `mask="url(#react-mask-N)"` do grupo `Avataaar` interior — particularidade do `avatarStyle=Transparent` (o `<g id="Mask">` sai vazio) presente em **todos** os 160 avatares existentes; foi mantida como veio.
+3. **Identidade preservada** — diff estrutural contra `expressions/<pessoa>/idle.svg` (ids `react-*` normalizados): fora dos grupos `Eyes/`, `Eyebrow/` e `Mouth/` a árvore é idêntica em 8/8. Dentro deles mudam só `Eyes/Default-😀` → `Eyes/Closed-😌` e `Mouth/Smile` → `Mouth/Serious`; `Eyebrow/Natural/Default-Natural` é idêntico.
+4. **Ids sem colisão:** os ids `react-*` novos (3783448–3783873) não coincidem com nenhum id dos 160 SVGs existentes nem entre os 8 arquivos novos.
+5. **Rasterização** (o `rsvg-convert` não existe no macmini; usado o Chrome headless via `tests/helpers/cdp.mjs`, SVG em `data:` desenhado num canvas 264×280): 8/8 não vazias, cantos transparentes, alfa médio igual ao do `idle` e **todos os pixels diferentes do `idle` ficam dentro da caixa (92,106)–(172,166)** — olhos e boca. Conferência visual: olhos fechados e o resto igual nas 8 pessoas.
+6. **Teste automático:** `tests/static-assets.test.mjs` exige exatamente 8 SVGs em `assets/avatars/sleeping/` (1 por identidade nomeada), válidos, com `Eyes/Closed` e iguais ao `idle.svg` da mesma pessoa fora de olhos/sobrancelha/boca.
+
+### Arquivos e SHA-256
+
+| Arquivo | Bytes | SHA-256 do arquivo final | SHA-256 do download |
+| --- | --- | --- | --- |
+| `assets/avatars/sleeping/alex.svg` | 9652 | `77695c27d960675b5a6c68cae8db43ebcada71a4fdb03429656751869b6b1988` | (idêntico) |
+| `assets/avatars/sleeping/bia.svg` | 9353 | `6935efaabbb00c1afa6464de43fc130d189add4f32a510ffa5ab5535a2cdbd49` | `5b9cbbed2be4a5c5eff8ad019a55fe7c822f85e96466d3996da8e264cbad11de` |
+| `assets/avatars/sleeping/codigo.svg` | 14387 | `451bca09fcff448025cb9c063b9672d205f472604b1e7793e0142581c597c639` | `b98a7c380c49155818f21f870ffa0edf381ea7a767202968e4d53480b3109875` |
+| `assets/avatars/sleeping/lia.svg` | 24339 | `bda58adc04b100eabda7066f0229e1aff32c7a034faeab5c7c4f9863a18ead52` | (idêntico) |
+| `assets/avatars/sleeping/maya.svg` | 8914 | `4a526ebbfe740359b0cb5c67ea78dbc0c538f094027c17dac695a8376c84411b` | `9b51eaeff27cae7a955e3878d837ba14f77294bb7aa8229b7655af5eaaeceb29` |
+| `assets/avatars/sleeping/pesquisa.svg` | 14412 | `d7f9442da6598ec2425172edf67eca762be6619210fd5333971002cdb32ea3e4` | `c01892d3cbebf477a82370ee791597c0977ee7b745475e13662435755996ebea` |
+| `assets/avatars/sleeping/rui.svg` | 17561 | `d5a194daf8710d5ca4f3913b1ad6adefb355051545c760c4c6653632c7166507` | (idêntico) |
+| `assets/avatars/sleeping/testes.svg` | 11651 | `dba4fd55cb34eefcd4c59a34250ef99825376a3884fd6240230750925ed53b17` | (idêntico) |
+
+Como nas outras expressões, os ids internos `react-*` podem variar num download futuro; estes hashes identificam os arquivos entregues.
+
+### URLs exatas
+
+Todas responderam HTTP 200 com `Content-Type: image/svg+xml`.
+
+- `assets/avatars/sleeping/rui.svg` — https://avataaars.io/?avatarStyle=Transparent&eyeType=Close&eyebrowType=DefaultNatural&topType=ShortHairShortCurly&hairColor=Black&accessoriesType=Prescription02&facialHairType=BeardMedium&facialHairColor=Black&clotheType=Hoodie&clotheColor=Black&mouthType=Serious&skinColor=Light
+- `assets/avatars/sleeping/bia.svg` (recolorizado `#B1E2FF` → `#8357BF`) — https://avataaars.io/?avatarStyle=Transparent&eyeType=Close&eyebrowType=DefaultNatural&topType=LongHairCurly&hairColor=Brown&accessoriesType=Blank&facialHairType=Blank&facialHairColor=Brown&clotheType=ShirtCrewNeck&clotheColor=PastelBlue&mouthType=Serious&skinColor=Light
+- `assets/avatars/sleeping/lia.svg` — https://avataaars.io/?avatarStyle=Transparent&eyeType=Close&eyebrowType=DefaultNatural&topType=LongHairCurvy&hairColor=BrownDark&accessoriesType=Blank&facialHairType=Blank&facialHairColor=BrownDark&clotheType=ShirtCrewNeck&clotheColor=Black&mouthType=Serious&skinColor=Light
+- `assets/avatars/sleeping/pesquisa.svg` (recolorizado `#A7FFC4` → `#3C8652`) — https://avataaars.io/?avatarStyle=Transparent&eyeType=Close&eyebrowType=DefaultNatural&topType=ShortHairShortCurly&hairColor=Black&accessoriesType=Prescription02&facialHairType=Blank&facialHairColor=Black&clotheType=CollarSweater&clotheColor=PastelGreen&mouthType=Serious&skinColor=DarkBrown
+- `assets/avatars/sleeping/codigo.svg` (recolorizado `#FFDEB5` → `#D47A36`) — https://avataaars.io/?avatarStyle=Transparent&eyeType=Close&eyebrowType=DefaultNatural&topType=ShortHairShortCurly&hairColor=Brown&accessoriesType=Blank&facialHairType=BeardMedium&facialHairColor=Brown&clotheType=Hoodie&clotheColor=PastelOrange&mouthType=Serious&skinColor=Light
+- `assets/avatars/sleeping/testes.svg` — https://avataaars.io/?avatarStyle=Transparent&eyeType=Close&eyebrowType=DefaultNatural&topType=LongHairStraight2&hairColor=Blonde&accessoriesType=Blank&facialHairType=Blank&facialHairColor=Blonde&clotheType=ShirtCrewNeck&clotheColor=Pink&mouthType=Serious&skinColor=Light
+- `assets/avatars/sleeping/alex.svg` — https://avataaars.io/?avatarStyle=Transparent&eyeType=Close&eyebrowType=DefaultNatural&topType=ShortHairShortFlat&hairColor=BrownDark&accessoriesType=Blank&facialHairType=Blank&facialHairColor=BrownDark&clotheType=ShirtCrewNeck&clotheColor=Blue02&mouthType=Serious&skinColor=Tanned
+- `assets/avatars/sleeping/maya.svg` (recolorizado `#A7FFC4` → `#2F9A94`) — https://avataaars.io/?avatarStyle=Transparent&eyeType=Close&eyebrowType=DefaultNatural&topType=LongHairStraight&hairColor=Black&accessoriesType=Blank&facialHairType=Blank&facialHairColor=Black&clotheType=ShirtCrewNeck&clotheColor=PastelGreen&mouthType=Serious&skinColor=Tanned
+
+URLs da prova de reprodutibilidade: as mesmas, com `eyeType=Default` e `mouthType=Smile` (são as URLs do `idle.svg` de cada pessoa já listadas em "Proveniência — URLs exatas").

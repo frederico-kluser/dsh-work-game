@@ -48,8 +48,11 @@
  *   model  {sessionId, model?, contextWindow?}
  *   ctx    {sessionId, used, window?}                          — projected ?? pressure
  *
- * Velocidade de tokens: calculada aqui (o estado é puro e sem relógio) a partir
- * dos deltas de `output` sobre o tempo — `velocidadeDe(id)` devolve tok/s ou null.
+ * Velocidade de tokens: calculada aqui (o estado é puro e sem relógio) SÓ dentro
+ * do turno — os tokens de `output` do turno a dividir pelo tempo desde que ele
+ * começou (status → running) até à última atualização de usage; o tempo parado
+ * antes do turno não conta. `velocidadeDe(id)` devolve tok/s enquanto a sessão
+ * corre e null fora do turno (nunca fica presa a quem já está parado).
  *
  * Honestidade: nada é inventado. Sem canal (`ctx.sessions` ausente) devolve-se
  * `null` e o painel diz "à espera do host"; sem projeções, os campos ficam
@@ -310,17 +313,18 @@ export function extrairSuperficie(ctx, opts = {}) {
 
   /* estado anterior por sessão para diff (só muda o que mudou) */
   const anterior = new Map();      // id -> { running, usage, modelo, janela, usado, meta, paiAtivo }
-  const velocidades = new Map();   // id -> { saida, at, v }
+  const velocidades = new Map();   // id -> { inicio, saida, v } — só do turno EM CURSO
 
+  /* velocidade: um registo por turno (criado quando a sessão passa a correr,
+     apagado quando pára) — sem turno, nada conta e velocidadeDe dá null */
+  const comecarTurno = (id) => { velocidades.set(id, { inicio: agora(), saida: 0, v: null }); };
+  const acabarTurno = (id) => { velocidades.delete(id); };
   const rastrearVelocidade = (id, deltaSaida) => {
-    const reg = velocidades.get(id) ?? { saida: 0, at: agora(), v: 0 };
-    const t = agora();
-    const dt = Math.max(250, t - reg.at) / 1000;
-    const instante = Math.max(0, num(deltaSaida)) / dt;
-    reg.v = reg.v ? reg.v * 0.6 + instante * 0.4 : instante;
-    reg.saida += Math.max(0, num(deltaSaida));
-    reg.at = t;
-    velocidades.set(id, reg);
+    const reg = velocidades.get(id);
+    const d = Math.max(0, num(deltaSaida));
+    if (!reg || !d) return;
+    reg.saida += d;
+    reg.v = reg.saida / (Math.max(250, agora() - reg.inicio) / 1000);
   };
 
   const difs = (emitir) => {
@@ -370,6 +374,7 @@ export function extrairSuperficie(ctx, opts = {}) {
       const aCorrer = linha.running === true;
       if (antes.running !== aCorrer) {
         antes.running = aCorrer;
+        if (aCorrer) comecarTurno(id); else acabarTurno(id);
         emitir({ type: 'status', sessionId: id, status: aCorrer ? 'running' : 'idle' });
       }
 
@@ -407,7 +412,7 @@ export function extrairSuperficie(ctx, opts = {}) {
         if (!prev) {
           antes.usage = atual;
           if (atual.uncachedInput || atual.output || atual.cacheRead || atual.cacheWrite) {
-            rastrearVelocidade(id, 0);
+            /* o acumulado do 1.º vislumbre não é velocidade (não se sabe quando foi produzido) */
             emitir({
               type: 'usage', sessionId: id, model: modelo ?? undefined,
               uncachedInput: atual.uncachedInput, output: atual.output,
@@ -470,9 +475,10 @@ export function extrairSuperficie(ctx, opts = {}) {
         wsList = null;
       };
     },
+    /** tok/s do turno em curso (só enquanto corre); null fora do turno ou sem produção. */
     velocidadeDe(id) {
       const reg = velocidades.get(String(id));
-      return reg && reg.v >= 1 ? Math.round(reg.v) : null;
+      return reg && reg.v !== null && reg.v >= 1 ? Math.round(reg.v) : null;
     },
   };
 }

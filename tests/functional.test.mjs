@@ -439,6 +439,35 @@ test('mobile 390×844: sem overflow horizontal e diálogos dentro do ecrã', asy
   await page.setViewport(1440, 900, false);
 });
 
+test('driver CDP: capturas disparadas sem await vão numa fila (nenhuma sai corrompida)', async () => {
+  // Duas Page.captureScreenshot em simultâneo — uma com clip, outra sem —
+  // davam um mosaico do recorte sem erro nenhum. Com a fila, cada uma sai
+  // com o seu tamanho e o seu conteúdo.
+  const { mkdtempSync, readFileSync, rmSync } = await import('node:fs');
+  const { tmpdir } = await import('node:os');
+  const pasta = mkdtempSync(join(tmpdir(), 'dwg-capturas-'));
+  const dimensoes = (ficheiro) => { const b = readFileSync(ficheiro); return [b.readUInt32BE(16), b.readUInt32BE(20)]; };
+  try {
+    const inteira = join(pasta, 'inteira.png');
+    const recorte = join(pasta, 'recorte.png');
+    const recorte2 = join(pasta, 'recorte2.png');
+    await Promise.all([
+      page.screenshot(inteira),
+      page.screenshot(recorte, { x: 10, y: 10, width: 200, height: 120, scale: 2 }),
+      page.screenshot(recorte2, { x: 300, y: 200, width: 90, height: 60 }),
+    ]);
+    const [w, h] = await page.eval('[innerWidth, innerHeight]');
+    assert.deepEqual(dimensoes(inteira), [w, h], 'a inteira tem o tamanho da janela');
+    assert.deepEqual(dimensoes(recorte), [400, 240], 'o recorte com zoom 2×');
+    assert.deepEqual(dimensoes(recorte2), [90, 60]);
+    // Uma captura falhada não trava as seguintes.
+    await assert.rejects(page.screenshot(join(pasta, 'nao-existe', 'x.png')));
+    assert.deepEqual(dimensoes(await page.screenshot(inteira)), [w, h]);
+  } finally {
+    rmSync(pasta, { recursive: true, force: true });
+  }
+});
+
 test('offline: zero requisições externas e zero erros de consola', async () => {
   const externasPagina = await page.eval(`performance.getEntriesByType('resource')
     .filter((e) => /^https?:/.test(e.name) && !e.name.startsWith(location.origin)).length`);

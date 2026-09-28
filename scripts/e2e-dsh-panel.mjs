@@ -6,7 +6,7 @@
  *   node scripts/e2e-dsh-panel.mjs <url-base> <pasta> <título-da-conversa (regex)> "<tarefa>" [--delegacao] [--segundos=240]
  *
  * Como um utilizador: abre o Modo jogo, escolhe a pessoa cuja conversa casa com o
- * título, "Abrir conversa", escreve a tarefa no compositor do DSH (input real),
+ * título, "Abrir no DSH" (barra lateral), escreve a tarefa no compositor do DSH (input real),
  * envia e volta ao Modo jogo. Depois observa a sala segundo a segundo e exige:
  *   - a pessoa passa a "Trabalhando" enquanto o turno corre e volta a
  *     "Disponível" no fim;
@@ -16,6 +16,9 @@
  * A tarefa corre no processo do DSH web (o que a sala acompanha ao vivo); uma
  * tarefa lançada por outro processo (ex.: dsh --profile headless) só entra no
  * catálogo do DSH web quando este volta a puxar a lista.
+ * (Clicar na pessoa abre também o celular com a conversa; "Abrir no DSH" sai do
+ * painel e o celular liberta a sessão. Para enviar SEM sair do Modo jogo, pelo
+ * próprio celular, ver scripts/verify-dsh-panel.mjs --enviar.)
  * Capturas e observacao.json na pasta de saída.
  */
 import assert from 'node:assert/strict';
@@ -59,7 +62,7 @@ try {
   assert.ok(alvo, `nenhuma pessoa na sala com a conversa /${tituloTxt}/`);
   ok('pessoa-alvo na sala', `${alvo.nome} (${alvo.id})`);
 
-  // 2) inspetor → Abrir conversa → compositor do DSH
+  // 2) barra lateral → Abrir no DSH → compositor do DSH
   await page.eval(`document.querySelector('.wg-svg .seat[role="button"][data-session-id="${alvo.id}"]').dispatchEvent(new MouseEvent('click', { bubbles: true }))`);
   await sleep(300);
   await page.eval(`document.querySelector('.wg-abrir-conversa').click()`);

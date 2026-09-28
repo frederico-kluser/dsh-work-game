@@ -24,4 +24,9 @@ process.emitWarning = function filtroAvisos(aviso, tipo, codigo) {
 
 const { run } = await import('../lib/commands.js');
 
-process.exit(await run(process.argv.slice(2)));
+const codigo = await run(process.argv.slice(2));
+// Num pipe a escrita do stdout é assíncrona: process.exit() logo a seguir a
+// uma saída grande cortava-a a meio (ex.: `dwg logs --json | …` com o
+// logs/dwg.log acima de 64 KB → última linha JSON truncada). Sair só depois
+// de o stdout esvaziar.
+process.stdout.write('', () => process.exit(codigo));

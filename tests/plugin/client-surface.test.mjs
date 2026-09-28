@@ -266,6 +266,44 @@ test('surface: velocidade de tokens derivada dos deltas com relógio injetado', 
   libertar();
 });
 
+test('surface: velocidade SÓ dentro do turno — 40 s parada antes não contam e nada fica preso depois', () => {
+  // O caso real (DSH 3080): o tokenUsage só muda no fim do turno/step. Antes, a
+  // velocidade era o output a dividir pelo tempo desde a ÚLTIMA atualização
+  // (com a página aberta 40 s antes do envio: ~70 tokens → "1 tok/s") e ficava
+  // para sempre na ficha de quem já estava Disponível.
+  let agora = 0;
+  const tokens = (output) => ({ ...USAGE_A, tokenUsage: { ...USAGE_A.tokenUsage, outputTokens: output } });
+  const sessions = criarSessions(snapshot({ s1: resumo('s1', { running: false, projectionValues: tokens(500) }) }));
+  const s = surface.extrairSuperficie({ sessions }, { agora: () => agora, intervaloWorkspaces: 0 });
+  const { libertar } = eventosDe(s);
+  assert.equal(s.velocidadeDe('s1'), null, 'parada: sem velocidade (o acumulado do 1.º vislumbre não é velocidade)');
+
+  agora = 40000; // 40 s parada; o turno começa
+  sessions.atualizar(snapshot({ s1: resumo('s1', { running: true, projectionValues: tokens(500) }) }));
+  assert.equal(s.velocidadeDe('s1'), null, 'a correr, ainda sem produção');
+  agora = 44000; // um step assentou: +70 tokens em 4 s de turno
+  sessions.atualizar(snapshot({ s1: resumo('s1', { running: true, projectionValues: tokens(570) }) }));
+  assert.equal(s.velocidadeDe('s1'), 18, '70 tokens em 4 s de turno ≈ 17,5 tok/s (não 70 / 44 s)');
+  agora = 48000; // outro step: 140 tokens em 8 s
+  sessions.atualizar(snapshot({ s1: resumo('s1', { running: true, projectionValues: tokens(640) }) }));
+  assert.equal(s.velocidadeDe('s1'), 18, 'média do turno em curso');
+
+  agora = 49000; // o turno acaba (o usage final chega no mesmo snapshot)
+  sessions.atualizar(snapshot({ s1: resumo('s1', { running: false, projectionValues: tokens(700) }) }));
+  assert.equal(s.velocidadeDe('s1'), null, 'Disponível: sem velocidade — nada fica preso na ficha');
+  agora = 90000;
+  sessions.atualizar(snapshot({ s1: resumo('s1', { running: false, projectionValues: tokens(720) }) }));
+  assert.equal(s.velocidadeDe('s1'), null, 'produção fora do turno não conta');
+
+  agora = 100000; // turno novo: começa do zero (nada do anterior)
+  sessions.atualizar(snapshot({ s1: resumo('s1', { running: true, projectionValues: tokens(720) }) }));
+  assert.equal(s.velocidadeDe('s1'), null);
+  agora = 102000;
+  sessions.atualizar(snapshot({ s1: resumo('s1', { running: true, projectionValues: tokens(820) }) }));
+  assert.equal(s.velocidadeDe('s1'), 50, '100 tokens em 2 s do turno novo');
+  libertar();
+});
+
 test('surface: preços — chave exata, por inclusão (namespaces) e desconhecida', () => {
   const precos = new Map([['mimo-v2.6-pro', { input: 1 }]]);
   assert.equal(surface.precoDe(precos, 'mimo-v2.6-pro').input, 1);

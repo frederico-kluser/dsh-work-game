@@ -9,6 +9,8 @@
  *     DOCTYPE, sem imagens remotas; hrefs só locais);
  *   - contagens congeladas dos avatares (160 expressões/aleatórios, 8 bustos,
  *     3 assets raiz);
+ *   - 8 avatares "a dormir" (assets/avatars/sleeping/, 1 por identidade
+ *     nomeada) com a identidade do idle.svg intacta fora da face;
  *   - símbolos obrigatórios de assets/furniture.svg;
  *   - independência e geometria de assets/desk-module.svg;
  *   - higiene do repositório (sem caminhos /home/, sem TODO/FIXME).
@@ -312,6 +314,69 @@ test('assets/avatars/*.svg mantém exatamente 8 bustos base', () => {
     bustos.length, 8,
     `Esperados 8 bustos base em assets/avatars/*.svg, encontrados ${bustos.length}: ${bustos.join(', ')}. ${MSG_CONTAGEM}`
   );
+});
+
+/*
+ * "A dormir" (Modo jogo do plugin): 1 SVG por identidade nomeada, triple
+ * Close/DefaultNatural/Serious (proveniência em assets/AVATARS-EXPRESSIONS.md).
+ * Fora dos grupos Eyes/Eyebrow/Mouth o ficheiro tem de ser o idle.svg da mesma
+ * pessoa (a menos dos ids react-* gerados pelo renderer) — identidade intacta.
+ */
+function semGruposDaFace(texto) {
+  let out = texto;
+  for (const prefixo of ['Eyes/', 'Eyebrow/', 'Mouth/']) {
+    const inicio = out.indexOf(`<g id="${prefixo}`);
+    if (inicio === -1) return null;
+    const re = /<(\/?)g\b[^>]*?(\/?)>/g;
+    re.lastIndex = inicio;
+    let prof = 0;
+    let fim = -1;
+    let m;
+    while ((m = re.exec(out)) !== null) {
+      if (m[1] === '/') prof -= 1;
+      else if (m[2] !== '/') prof += 1;
+      if (prof === 0) { fim = re.lastIndex; break; }
+    }
+    if (fim === -1) return null;
+    out = out.slice(0, inicio) + out.slice(fim);
+  }
+  return out.replace(/react-([a-z]+)-\d+/g, 'react-$1-X');
+}
+
+test('assets/avatars/sleeping/ tem exatamente 8 SVGs válidos "a dormir" (1 por identidade nomeada, olhos fechados)', () => {
+  const SLEEPING_DIR = path.join(ASSETS_DIR, 'avatars', 'sleeping');
+  const nomeadas = subdirs(EXPRESSIONS_DIR);
+  const problemas = [];
+  const entradas = fs.readdirSync(SLEEPING_DIR, { withFileTypes: true });
+  const ficheiros = entradas.filter((e) => e.isFile()).map((e) => e.name).sort();
+  if (entradas.some((e) => e.isDirectory())) problemas.push('sleeping/ não deve ter subpastas');
+  assert.deepEqual(
+    ficheiros, nomeadas.map((id) => `${id}.svg`),
+    `assets/avatars/sleeping/ deve ter exatamente 1 SVG por identidade nomeada (${nomeadas.join(', ')}). ${MSG_CONTAGEM}`
+  );
+  assert.equal(ficheiros.length, 8, `Esperados 8 SVGs "a dormir", encontrados ${ficheiros.length}. ${MSG_CONTAGEM}`);
+  for (const nome of ficheiros) {
+    const svg = svgAnalisados.find((s) => s.relPath === `assets/avatars/sleeping/${nome}`);
+    if (!svg) { problemas.push(`${nome}: não analisado`); continue; }
+    const raiz = svg.tags[0];
+    if (svg.errors.length) problemas.push(`${nome}: XML mal formado (${svg.errors.join('; ')})`);
+    if (!raiz || raiz.name !== 'svg') problemas.push(`${nome}: raiz não é <svg>`);
+    else if (attr(raiz, 'viewBox') !== '0 0 264 280') problemas.push(`${nome}: viewBox ${attr(raiz, 'viewBox')}`);
+    if (/<script[\s/>]|<foreignobject[\s/>]|<!DOCTYPE/i.test(svg.text)) problemas.push(`${nome}: conteúdo proibido`);
+    for (const tag of svg.tags) {
+      for (const a of tag.attrs) {
+        if (/^on/i.test(a.name)) problemas.push(`${nome}: atributo de evento ${a.name}`);
+        if ((a.name === 'href' || a.name === 'xlink:href') && !a.value.startsWith('#')) problemas.push(`${nome}: href ${a.value}`);
+      }
+    }
+    if (!svg.text.includes('<g id="Eyes/Closed')) problemas.push(`${nome}: sem o grupo Eyes/Closed (olhos fechados)`);
+    const idle = fs.readFileSync(path.join(EXPRESSIONS_DIR, nome.replace(/\.svg$/, ''), 'idle.svg'), 'utf8');
+    const a = semGruposDaFace(svg.text);
+    const b = semGruposDaFace(idle);
+    if (a === null || b === null) problemas.push(`${nome}: grupos Eyes/Eyebrow/Mouth não encontrados`);
+    else if (a !== b) problemas.push(`${nome}: difere do idle.svg fora de Eyes/Eyebrow/Mouth (identidade alterada)`);
+  }
+  assert.equal(problemas.length, 0, 'SVGs "a dormir" inválidos:\n' + problemas.join('\n'));
 });
 
 test('assets/ mantém os três assets raiz: furniture.svg, desk-module.svg e favicon.svg', () => {
