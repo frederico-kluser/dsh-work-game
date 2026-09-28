@@ -1,8 +1,13 @@
 # Integração com o DeepSeek Harness (DSH)
 
-> **Estado:** planejado — contrato de implementação (2026-09-27). Nada disto está ligado hoje:
-> a demo atual é simulação em memória, e cada evento/projeção abaixo é o **sinal real** que vai
-> alimentar a sala quando o adaptador existir. Factos DSH verificados no checkout local
+> **Estado (2026-09-28): lado CLIENTE ligado.** A ponte do browser
+> (`dsh-plugin/src/surface.js`, embutida em `client.js`) consome já a superfície REAL
+> `ctx.sessions.list` (catálogo + `projectionValues`), alimentando o escritório com
+> sessões reais, running/idle, modelo, contexto, custo estimado e velocidade de tokens —
+> sem inventar nada (ver §7 de `docs/contratos-plugin.md`). Continua por ligar: os
+> eventos de fio em tempo real (turn/end, tool/*, user-questions, approval/*) via
+> `retain` + `eventSource`, para os quais `src/adapter.js` (lado host) mantém o
+> mapeamento verificado abaixo. Factos DSH verificados no checkout local
 > (`deepseek-harness`, `0.1.6-alpha.2`), arquivo:linha em `docs/conhecimento/07-features-futuras.md`;
 > vocabulário e contratos em `docs/contratos-plugin.md`.
 

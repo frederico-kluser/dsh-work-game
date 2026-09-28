@@ -122,3 +122,43 @@ ssh macmini '<comando>' > logs/macmini-execucao.log 2>&1   # logs sempre em fich
 Rota verificada a funcionar: **`provider: 'openrouter-extra'`, `model: 'deepseek/deepseek-v4-flash-0731'`**
 (1.31M contexto · $0.021/M input · $0.32/M output). Registada em `settings.yaml` nas duas
 máquinas com `reasoningEfforts` (obrigatório no schema pi-ai).
+
+
+## 7. `dsh-plugin/src/surface.js` — ponte REAL do runtime do browser (2026-09-28)
+
+Único ponto que lê o DSH no browser. API verificada no checkout `deepseek-harness`
+(0.1.6-alpha.2) em `packages/api/session-controller/src/client/contract/sessions.ts`
+(`ISessions`) e `client/sessions/service.ts`:
+
+- `ctx.sessions` (ou `ctx.reflect.get('sessions')`) → `ISessions`;
+- `.list` é um `ObservableSnapshot<SessionListState>`: `getSnapshot()` + `subscribe(fn)`
+  (**não** é `list()` — nome de método verificado no `.d.ts`);
+- `SessionListState` = `{ ids, byId: Record<id, SessionSummary>, subagentsByParent }`;
+- `SessionSummary` = `{ id, displayTitle, cwd?, parentId?, origin?, running, updatedAt,
+  projectionValues? }` com `projectionValues` = `tokenUsage` (acumulado),
+  `contextPressure {projectedTokens?, pressureTokens?, contextWindow?}` e
+  `modelSelection {lastUsed, next}`;
+- `subagentsByParent[parent].entries` lista os filhos diretos (`SubagentListEntry`).
+
+`extrairSuperficie(ctx, {agora})` devolve `{catalogo(), assinar(fn), velocidadeDe(id)}`
+ou `null` sem canal (e o painel diz "à espera do host", nunca inventa). Diffa snapshots
+sucessivos e emite o vocabulário §1 com estas regras:
+
+- `usage` leva **deltas** (o estado soma): o 1.º vislumbre emite o acumulado para o
+  custo estimado total aparecer; depois só deltas positivos (anti-dupla-contagem por sessão);
+- `status` só em mudança (running/idle); `model`/`ctx` saem das projeções
+  (`projectedTokens ?? pressureTokens`, janela de `contextPressure`);
+- filhos (`parentId`/`entries`) pareiam `subagent/start|end` com `runId = childId`;
+- velocidade de tokens calculada aqui (o estado é puro e sem relógio) por deltas de
+  `output` sobre o tempo — `velocidadeDe(id)` → tok/s ou `null`;
+- preços são NOSSOS (`PRECOS_USD_POR_TOKEN`, USD/token; resolução por chave exata e
+  por inclusão para ids namespaced) — o DSH não publica preços; sem preço → "custo —".
+
+O bundle (`client.js`) não pode importar irmãos (module table do loader), por isso a
+fonte vive em `surface.js` e está embutida no bundle; o teste de paridade
+`tests/plugin/client-surface.test.mjs` exige que os dois emitam exatamente os mesmos
+eventos para o mesmo cenário (guarda contra drift).
+
+Futuro (lado host, `adapter.js`): eventos de fio em tempo real (turn/end, tool/*,
+user-questions, approval/*) via `SessionReference` + `eventSource` (modelo
+`retain(target, {source})`, como `ui-workspace` faz com `source: 'mainView'`).

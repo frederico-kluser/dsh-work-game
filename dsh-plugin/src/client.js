@@ -181,13 +181,14 @@ window.__ModuleLoader__.load({
 
     const nomeDe = (id) => `Agente ${String(id).slice(-5)}`;
 
-    function criarPessoa(id, modelo, a) {
+    function criarPessoa(id, modelo, a, evento) {
       const asoc = a ?? null; // { name, avatar, style } | null (tarefa 2)
       return {
         id,
         name: asoc ? asoc.name : nomeDe(id),
         avatar: asoc ? asoc.avatar : null, // o painel não inventa URLs
         style: asoc ? asoc.style : null,   // { forma, paleta } do avatar
+        teamId: evento && evento.teamId ? evento.teamId : 'geral',
         status: 'idle',
         emoji: '💤',
         expression: 'idle',
@@ -261,7 +262,7 @@ window.__ModuleLoader__.load({
         case 'session/added':
           if (!pessoas.has(evento.sessionId)) {
             const asoc = associador.para(evento.sessionId, evento);
-            pessoas.set(evento.sessionId, criarPessoa(evento.sessionId, evento.model, asoc));
+            pessoas.set(evento.sessionId, criarPessoa(evento.sessionId, evento.model, asoc, evento));
           }
           break;
         case 'session/removed':
@@ -369,7 +370,7 @@ window.__ModuleLoader__.load({
           const pessoa = p(evento.sessionId);
           if (!pessoa) break;
           pessoa.model = evento.model ?? pessoa.model;
-          const preco = estado.precos.get(pessoa.model);
+          const preco = precoDe(estado.precos, pessoa.model);
           if (!preco) {
             // Sem preço conhecido para o modelo -> custo indisponível.
             pessoa.cost = null;
@@ -472,9 +473,17 @@ window.__ModuleLoader__.load({
 
     // Normaliza um evento bruto do DSH para o vocabulário do contrato §1.
     // Tipos desconhecidos devolvem null (ignorados, nunca fabricados).
+    // Tipos já no vocabulário normalizado (vindos da superfície de snapshots)
+    // passam tal-e-qual; só os eventos brutos do fio são traduzidos.
+    const TIPOS_NORMALIZADOS = new Set([
+      'session/added', 'session/removed', 'status', 'usage', 'model', 'ctx',
+      'subagent/start', 'subagent/end', 'question', 'question/answered',
+      'approval', 'approval/decided', 'retry', 'compaction',
+    ]);
     function normalizarEventoDSH(bruto) {
       if (!bruto || typeof bruto !== 'object') return null;
       const t = String(bruto.type ?? bruto.event ?? '');
+      if (TIPOS_NORMALIZADOS.has(t)) return bruto;
       const sid = bruto.sessionId ?? bruto.session?.id ?? bruto.agent?.session?.id;
       const base = sid ? { sessionId: sid } : {};
       switch (t) {
@@ -517,7 +526,10 @@ window.__ModuleLoader__.load({
           ativo = true;
           // Semente inicial a partir do catálogo de sessões fornecido.
           for (const sessao of sessions) {
-            onEvent({ type: 'session/added', sessionId: sessao.id, model: sessao.model });
+            onEvent({
+              type: 'session/added', sessionId: sessao.id, model: sessao.model,
+              name: sessao.name, teamId: sessao.teamId,
+            });
           }
           // Transporte real: assinar eventos brutos e normalizá-los.
           if (surface && typeof surface.assinar === 'function') {
@@ -677,6 +689,8 @@ window.__ModuleLoader__.load({
     // Ficha do lugar: nome, estado, chips de modelo/custo e barra CTX.
     function renderFicha(p, cx) {
       const ctx = formatoCtx(p.ctx);
+      const excedeu = num(p.ctx && p.ctx.used) > LIMIAR_CTX;
+      const velocidade = p.speed ? ` · ${Math.round(p.speed)} tok/s` : '';
       return [
         '<g class="wg-ficha">',
         `<rect x="${cx - 99}" y="${Y_CARTAO}" width="198" height="114" rx="10" fill="#fbfaf4" stroke="#d8dbcf" stroke-width="1.5"/>`,
@@ -687,8 +701,8 @@ window.__ModuleLoader__.load({
         `<rect x="${cx + 5}" y="${Y_CARTAO + 50}" width="88" height="22" rx="11" fill="#e9f2ea"/>`,
         `<text x="${cx + 49}" y="${Y_CARTAO + 65}" text-anchor="middle" font-size="11" fill="#2f5d36">${esc(formatoCusto(p.cost))}</text>`,
         `<rect x="${cx - 85}" y="${Y_CARTAO + 82}" width="170" height="5" rx="2.5" fill="#e3e6ea"/>`,
-        ctx.largura ? `<rect x="${cx - 85}" y="${Y_CARTAO + 82}" width="${ctx.largura}" height="5" rx="2.5" fill="#4a90d9"/>` : '',
-        `<text x="${cx}" y="${Y_CARTAO + 102}" text-anchor="middle" font-size="11" fill="#8b958e">${ctx.texto}</text>`,
+        ctx.largura ? `<rect x="${cx - 85}" y="${Y_CARTAO + 82}" width="${ctx.largura}" height="5" rx="2.5" fill="${excedeu ? '#c2603f' : '#4a90d9'}"/>` : '',
+        `<text x="${cx}" y="${Y_CARTAO + 102}" text-anchor="middle" font-size="11" fill="${excedeu ? '#a2543a' : '#8b958e'}">${excedeu ? '⚠ ' : ''}${ctx.texto}${velocidade}</text>`,
         '</g>',
       ].join('');
     }
@@ -792,6 +806,7 @@ window.__ModuleLoader__.load({
       '.wg-rodape{display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:8px 12px;border-top:1px solid #e2ddd0;font-size:13px;min-height:36px}',
       '.wg-rodape .wg-chip{padding:2px 10px;border-radius:11px;background:#eef1f5;color:#3d4854}',
       '.wg-rodape .wg-chip-verde{background:#e9f2ea;color:#2f5d36}',
+      '.wg-chip-alerta{background:#f9e5de;border-color:#e2b6a6;color:#a2543a;font-weight:600}',
       '.wg-rodape .wg-dica{color:#8b958e;font-size:12px}',
       // Botão "Modo jogo" do pé (tarefa 1): o contrato de ui-sidebar diz que
       // cada ocupante de `sidebar.footer.action` possui a sua própria
@@ -805,6 +820,7 @@ window.__ModuleLoader__.load({
     // Painel principal: sala SVG com zoom/pan mínimos e inspeção por pessoa.
     function PainelEscritorio(props) {
       const { getView, getSelecao, subscribe, iniciar, parar, selecionar } = props;
+      const temCanal = typeof props.temCanal === 'function' ? props.temCanal : () => false;
       const [tick, setTick] = react.useState(0);
       const [camera, setCamera] = react.useState({ zoom: 0.3, x: 32, y: 64 });
       const telaRef = react.useRef(null);
@@ -891,6 +907,10 @@ window.__ModuleLoader__.load({
           h('span', { className: 'wg-chip' }, nomeModelo(sel.model)),
           h('span', { className: 'wg-chip wg-chip-verde' }, formatoCusto(sel.cost)),
           h('span', { className: 'wg-chip' }, ctx ? ctx.texto : 'CTX —'),
+          sel.speed ? h('span', { className: 'wg-chip' }, `${sel.speed} tok/s`) : null,
+          sel.ctx && num(sel.ctx.used) > LIMIAR_CTX
+            ? h('span', { className: 'wg-chip wg-chip-alerta' }, '⚠ contexto >200k')
+            : null,
           sel.question ? h('span', { className: 'wg-chip' }, `❓ ${String(sel.question).slice(0, 48)}`) : null,
         ]
         : [h('span', { className: 'wg-dica' }, 'Clique numa pessoa para inspecionar')];
@@ -908,7 +928,9 @@ window.__ModuleLoader__.load({
           onPointerDown: arrastar, onClick: clicar,
         },
           pessoas.length === 0
-            ? h('div', { className: 'wg-banner' }, 'Telemetria indisponível — à espera do host do plugin (nada é simulado)')
+            ? h('div', { className: 'wg-banner' }, temCanal()
+              ? 'Ligado ao DSH — sem sessões no catálogo. Abra (ou retome) uma conversa e ela aparece aqui. Nada é simulado.'
+              : 'Telemetria indisponível — à espera do host do plugin (nada é simulado)')
             : null,
           h('div', {
             className: 'wg-mundo',
@@ -975,7 +997,7 @@ window.__ModuleLoader__.load({
 
     // Núcleo: estado + adaptador + seleção + expirações (ciclo de vida da fibra).
     function criarNucleo() {
-      let estado = createOfficeState();
+      let estado = createOfficeState(PRECOS);
       const ouvintes = new Set();
       let adaptador = null;
       let timerPurga = null;
@@ -1008,7 +1030,16 @@ window.__ModuleLoader__.load({
       };
 
       const face = {
-        getView: () => officeView(estado),
+        getView: () => {
+          const vista = officeView(estado);
+          for (const p of Object.values(vista.people)) {
+            p.speed = superficieDSH && typeof superficieDSH.velocidadeDe === 'function'
+              ? superficieDSH.velocidadeDe(p.id)
+              : null;
+          }
+          return vista;
+        },
+        temCanal: () => !!superficieDSH,
         getSelecao: () => estado.selecionada,
         subscribe: (fn) => {
           ouvintes.add(fn);
@@ -1071,50 +1102,234 @@ window.__ModuleLoader__.load({
     // mostra "telemetria indisponível" e nada é inventado.
     let superficieDSH = null;
 
-    // Extrai, com deteção defensiva, o catálogo e o fluxo de eventos que o
-    // runtime do DSH expõe ao cliente (ctx.sessions). Nomes de método variam
-    // entre versões: tentamos as formas conhecidas e ficamos sem canal se
-    // nenhuma existir.
-    function extrairSuperficie(ctx) {
-      // Qualquer acesso a serviço pode lançar (serviço não injetado): aqui a
-      // falha TEM de ser silenciosa, senão o apply morre na 1.ª linha e o
-      // pacote inteiro fica "import failed".
+    /* ── Superfície REAL do runtime do browser ─────────────────────────────
+       Cópia embutida de src/surface.js (o bundle não pode importar irmãos —
+       ver cabeçalho). API verificada no checkout deepseek-harness 0.1.6:
+       ctx.sessions.list = ObservableSnapshot<SessionListState> com
+       getSnapshot()/subscribe(fn); SessionSummary {id, displayTitle, cwd,
+       parentId, running, projectionValues}; projectionValues traz
+       tokenUsage (acumulado), contextPressure {projectedTokens?,
+       pressureTokens?, contextWindow?} e modelSelection {lastUsed,next};
+       subagentsByParent[parent].entries lista os filhos diretos. */
+    const LIMIAR_CTX = 200000; /* aviso humano de contexto: >200k */
+    const PRECOS = { /* USD por token — tabela NOSSA (o DSH não publica preços) */
+      'deepseek-chat': { input: 2.7e-7, output: 1.1e-6, cacheRead: 2.7e-8, cacheWrite: 2.7e-7 },
+      'deepseek-reasoner': { input: 5.5e-7, output: 2.19e-6, cacheRead: 5.5e-8, cacheWrite: 5.5e-7 },
+      'mimo-v2.6-pro': { input: 6e-7, output: 2.4e-6, cacheRead: 6e-8, cacheWrite: 6e-7 },
+    };
+
+    function precoDe(precos, modelo) {
+      if (!precos || !modelo) return undefined;
+      const direto = precos instanceof Map ? precos.get(modelo) : precos[modelo];
+      if (direto) return direto;
+      const alvo = String(modelo);
+      const entradas = precos instanceof Map ? [...precos] : Object.entries(precos ?? {});
+      for (const [chave, preco] of entradas) {
+        if (chave && alvo.includes(chave)) return preco;
+      }
+      return undefined;
+    }
+
+    function normalizarLinha(bruto, parentIdForcado) {
+      if (!bruto || typeof bruto !== 'object') return null;
+      const id = bruto.id ?? bruto.sessionId;
+      if (id == null || id === '') return null;
+      return {
+        id: String(id),
+        displayTitle: typeof bruto.displayTitle === 'string' && bruto.displayTitle
+          ? bruto.displayTitle
+          : (typeof bruto.title === 'string' && bruto.title ? bruto.title : null),
+        running: bruto.running === true,
+        parentId: parentIdForcado ?? (bruto.parentId != null ? String(bruto.parentId) : null),
+        cwd: typeof bruto.cwd === 'string' ? bruto.cwd : null,
+        projectionValues: bruto.projectionValues && typeof bruto.projectionValues === 'object'
+          ? bruto.projectionValues
+          : null,
+      };
+    }
+
+    function linhasDoSnapshot(snap) {
+      if (!snap || typeof snap !== 'object') return [];
+      const linhas = [];
+      const vistos = new Set();
+      const byId = snap.byId && typeof snap.byId === 'object' ? snap.byId : {};
+      for (const bruto of Object.values(byId)) {
+        const linha = normalizarLinha(bruto, null);
+        if (linha && !vistos.has(linha.id)) { vistos.add(linha.id); linhas.push(linha); }
+      }
+      const sub = snap.subagentsByParent && typeof snap.subagentsByParent === 'object'
+        ? snap.subagentsByParent : {};
+      for (const [pai, catalogo] of Object.entries(sub)) {
+        const entradas = Array.isArray(catalogo) ? catalogo
+          : (catalogo && Array.isArray(catalogo.entries) ? catalogo.entries : []);
+        for (const bruto of entradas) {
+          const linha = normalizarLinha(bruto, String(pai));
+          if (linha && !vistos.has(linha.id)) { vistos.add(linha.id); linhas.push(linha); }
+        }
+      }
+      return linhas;
+    }
+
+    function modeloDaLinha(linha) {
+      const sel = linha && linha.projectionValues && linha.projectionValues.modelSelection;
+      const m = sel && ((sel.lastUsed && sel.lastUsed.model) || (sel.next && sel.next.model) || sel.model);
+      return typeof m === 'string' && m ? m : null;
+    }
+
+    function bucketsDaLinha(linha) {
+      const tu = linha && linha.projectionValues && linha.projectionValues.tokenUsage;
+      if (!tu || typeof tu !== 'object') return null;
+      return {
+        uncachedInput: num(tu.uncachedInputTokens),
+        output: num(tu.outputTokens),
+        cacheRead: num(tu.cacheReadTokens),
+        cacheWrite: num(tu.cacheWriteTokens),
+      };
+    }
+
+    function pressaoDaLinha(linha) {
+      const cp = linha && linha.projectionValues && linha.projectionValues.contextPressure;
+      if (!cp || typeof cp !== 'object') return null;
+      const janela = Number.isFinite(Number(cp.contextWindow)) ? Number(cp.contextWindow) : null;
+      const usado = Number.isFinite(Number(cp.projectedTokens)) ? Number(cp.projectedTokens)
+        : (Number.isFinite(Number(cp.pressureTokens)) ? Number(cp.pressureTokens) : null);
+      return { usado, janela };
+    }
+
+    function teamDaLinha(linha) {
+      if (!linha || !linha.cwd) return null;
+      const partes = String(linha.cwd).split(/[\\/]/).filter(Boolean);
+      return partes.length ? partes[partes.length - 1] : null;
+    }
+
+    function extrairSuperficie(ctx, opts = {}) {
+      const agora = typeof opts.agora === 'function' ? opts.agora : () => Date.now();
       let servico = null;
       try {
-        servico = ctx && (ctx.sessions ?? ctx.reflect?.get?.('sessions'));
+        servico = (ctx && ctx.sessions)
+          || (ctx && ctx.reflect && typeof ctx.reflect.get === 'function' ? ctx.reflect.get('sessions') : null);
       } catch {
-        servico = null;
+        servico = null; /* serviço não injetado: falha silenciosa, sem rebentar o apply */
       }
-      if (!servico) return null;
-      const catalogo = () => {
-        try {
-          const lista = typeof servico.list === 'function' ? servico.list() : (servico.sessions ?? []);
-          const itens = Array.isArray(lista) ? lista : (lista && typeof lista === 'object' ? Object.values(lista) : []);
-          return itens
-            .map((s) => ({ id: s.sessionId ?? s.id, model: s.model ?? s.header?.config?.model }))
-            .filter((s) => !!s.id);
-        } catch {
-          return [];
+      const list = servico && servico.list;
+      if (!list || typeof list.getSnapshot !== 'function') return null;
+
+      const ler = () => { try { return list.getSnapshot(); } catch { return null; } };
+
+      const catalogo = () => linhasDoSnapshot(ler()).map((l) => ({
+        id: l.id,
+        model: modeloDaLinha(l),
+        name: l.displayTitle ?? undefined,
+        teamId: teamDaLinha(l) ?? undefined,
+      }));
+
+      const anterior = new Map();      // id -> { running, usage, modelo, janela, usado, parentId }
+      const velocidades = new Map();   // id -> { saida, at, v }
+
+      const rastrearVelocidade = (id, deltaSaida) => {
+        const reg = velocidades.get(id) ?? { saida: 0, at: agora(), v: 0 };
+        const t = agora();
+        const dt = Math.max(250, t - reg.at) / 1000;
+        const instante = Math.max(0, num(deltaSaida)) / dt;
+        reg.v = reg.v ? reg.v * 0.6 + instante * 0.4 : instante;
+        reg.saida += Math.max(0, num(deltaSaida));
+        reg.at = t;
+        velocidades.set(id, reg);
+      };
+
+      const difs = (emitir) => {
+        const snap = ler();
+        if (!snap) return;
+        const linhas = linhasDoSnapshot(snap);
+        const atuais = new Map(linhas.map((l) => [l.id, l]));
+
+        for (const [id, antes] of [...anterior]) {
+          if (atuais.has(id)) continue;
+          anterior.delete(id);
+          velocidades.delete(id);
+          if (antes.parentId) emitir({ type: 'subagent/end', sessionId: antes.parentId, childId: id, runId: id });
+          emitir({ type: 'session/removed', sessionId: id });
+        }
+
+        for (const [id, linha] of atuais) {
+          let antes = anterior.get(id);
+          if (!antes) {
+            antes = { running: null, usage: null, modelo: null, janela: null, usado: null, parentId: null };
+            anterior.set(id, antes);
+            emitir({
+              type: 'session/added', sessionId: id,
+              model: modeloDaLinha(linha) ?? undefined,
+              name: linha.displayTitle ?? undefined,
+              teamId: teamDaLinha(linha) ?? undefined,
+            });
+          }
+          if (linha.parentId && antes.parentId !== linha.parentId) {
+            if (antes.parentId) emitir({ type: 'subagent/end', sessionId: antes.parentId, childId: id, runId: id });
+            antes.parentId = linha.parentId;
+            emitir({ type: 'subagent/start', sessionId: linha.parentId, childId: id, runId: id });
+          }
+          const aCorrer = linha.running === true;
+          if (antes.running !== aCorrer) {
+            antes.running = aCorrer;
+            emitir({ type: 'status', sessionId: id, status: aCorrer ? 'running' : 'idle' });
+          }
+          const modelo = modeloDaLinha(linha);
+          const pressao = pressaoDaLinha(linha);
+          const janela = pressao ? pressao.janela : null;
+          if (modelo !== antes.modelo || janela !== antes.janela) {
+            antes.modelo = modelo;
+            antes.janela = janela;
+            emitir({ type: 'model', sessionId: id, model: modelo ?? undefined, contextWindow: janela ?? undefined });
+          }
+          const usado = pressao ? pressao.usado : null;
+          if (usado !== null && usado !== antes.usado) {
+            antes.usado = usado;
+            emitir({ type: 'ctx', sessionId: id, used: usado, window: janela ?? undefined });
+          }
+          const atual = bucketsDaLinha(linha);
+          const prev = antes.usage;
+          if (atual) {
+            if (!prev) {
+              antes.usage = atual;
+              if (atual.uncachedInput || atual.output || atual.cacheRead || atual.cacheWrite) {
+                rastrearVelocidade(id, 0);
+                emitir({
+                  type: 'usage', sessionId: id, model: modelo ?? undefined,
+                  uncachedInput: atual.uncachedInput, output: atual.output,
+                  cacheRead: atual.cacheRead, cacheWrite: atual.cacheWrite,
+                });
+              }
+            } else if (
+              prev.uncachedInput !== atual.uncachedInput || prev.output !== atual.output
+              || prev.cacheRead !== atual.cacheRead || prev.cacheWrite !== atual.cacheWrite
+            ) {
+              const delta = {
+                uncachedInput: Math.max(0, atual.uncachedInput - prev.uncachedInput),
+                output: Math.max(0, atual.output - prev.output),
+                cacheRead: Math.max(0, atual.cacheRead - prev.cacheRead),
+                cacheWrite: Math.max(0, atual.cacheWrite - prev.cacheWrite),
+              };
+              antes.usage = atual;
+              rastrearVelocidade(id, delta.output);
+              emitir({ type: 'usage', sessionId: id, model: modelo ?? undefined, ...delta });
+            }
+          }
         }
       };
-      const assinar = (fn) => {
-        // Formas conhecidas: servico.on('session/event', handler) ou
-        // servico.events.on(...) ou um eventSource por sessão (retain).
-        try {
-          if (typeof servico.on === 'function') {
-            const h = (a, b) => fn(b ?? a);
-            servico.on('session/event', h);
-            return () => { try { servico.off?.('session/event', h); } catch { /* já libertado */ } };
-          }
-          if (servico.events && typeof servico.events.on === 'function') {
-            const h = (a, b) => fn(b ?? a);
-            servico.events.on('session/event', h);
-            return () => { try { servico.events.off?.('session/event', h); } catch { /* idem */ } };
-          }
-        } catch { /* sem fluxo utilizável */ }
-        return null;
+
+      return {
+        catalogo,
+        assinar(emitir) {
+          if (typeof emitir !== 'function') return null;
+          difs(emitir); /* vislumbre imediato do que já existe */
+          if (typeof list.subscribe !== 'function') return null;
+          try { return list.subscribe(() => difs(emitir)); } catch { return null; }
+        },
+        velocidadeDe(id) {
+          const reg = velocidades.get(String(id));
+          return reg && reg.v >= 1 ? Math.round(reg.v) : null;
+        },
       };
-      return { catalogo, assinar, assinarProjecoes: null };
     }
 
     // 'layout' é o serviço que ui-layout fornece via ctx.reflect.provide:
@@ -1192,6 +1407,10 @@ window.__ModuleLoader__.load({
       ].filter(Boolean);
       ctx.effect(() => () => { for (const libertar of disposers) { try { libertar(); } catch { /* já libertado */ } } }, 'dsh-work-game: botão');
     };
+
+    // Exposto apenas para testes (não faz parte do contrato do runtime).
+    exports.__extrairSuperficie = extrairSuperficie;
+    exports.__precoDe = precoDe;
 
     try { window.__wgDiag = (window.__wgDiag || '') + '|factory:fim'; } catch { /* sem window */ }
     return module.exports;
