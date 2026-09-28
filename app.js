@@ -1572,3 +1572,19 @@ seed();
 render({ fit: true });
 scheduleActivity();
 telemetryTimer = setInterval(telemetryTick, 1000);
+
+/* file:// não carrega referências SVG entre ficheiros (mesas, cadeiras e
+ * avatares desaparecem). Em vez de deixar a cena "partida" sem explicação,
+ * mostra-se como correr a demo em condições — é só abrir o DEMO.command. */
+if (location.protocol === 'file:') {
+  const aviso = document.createElement('div');
+  aviso.id = 'file-warning';
+  aviso.setAttribute('role', 'alert');
+  aviso.style.cssText = 'position:fixed;inset:auto 16px 16px 16px;z-index:99;background:#fff8e1;border:2px solid #e5cf8a;'
+    + 'border-radius:14px;padding:16px 18px;font:15px/1.5 system-ui,sans-serif;color:#5c4a1a;box-shadow:0 12px 30px rgba(60,50,20,.25)';
+  aviso.innerHTML = '<strong>Estás a abrir a demo por <code>file://</code>.</strong><br>'
+    + 'Os browsers bloqueiam os SVGs entre ficheiros neste modo — por isso mesas, cadeiras e bonecos não aparecem. '
+    + '<strong>Nada está destruído.</strong> Para correr a demo completa, dá duplo-clique em <strong>DEMO.command</strong> '
+    + '(ou corre <code>./demo.sh</code> no Linux) — ela sobe sozinha e abre no browser.';
+  document.body.append(aviso);
+}
