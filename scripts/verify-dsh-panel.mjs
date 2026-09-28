@@ -32,7 +32,7 @@ const ok = (nome, detalhe) => console.log(`✔ ${nome}${detalhe ? ` — ${detalh
 const browser = await launchBrowser({ width: 1440, height: 900 });
 const page = browser.page;
 try {
-  await page.goto(base);
+  await page.goto(base, 'document.readyState === "complete" && !!window.__DSH_BOOT__');
   await page.waitFor(
     `typeof window.__wgDiag === 'string' && window.__wgDiag.indexOf('factory:fim') >= 0`,
     20000,

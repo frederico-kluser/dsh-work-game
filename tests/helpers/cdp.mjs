@@ -129,9 +129,9 @@ export async function launchBrowser({ width = 1440, height = 900 } = {}) {
   const page = {
     consoleErrors,
     networkRequests,
-    async goto(url) {
+    async goto(url, ready = 'document.readyState === "complete" && !!document.querySelector("#world svg")') {
       await cdp.send('Page.navigate', { url });
-      await page.waitFor('document.readyState === "complete" && !!document.querySelector("#world svg")');
+      await page.waitFor(ready);
     },
     async reload() {
       await cdp.send('Page.reload', { ignoreCache: true });
