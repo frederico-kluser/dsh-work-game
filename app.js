@@ -580,7 +580,8 @@ function questionFlagSvg(person, cx) {
     <title>❓ ${esc(person.name)} fez uma pergunta — clique para responder</title>
     <circle class="question-flag-dot" cx="${cx - 72}" cy="205" r="17"/>
     <circle class="question-flag-pulse" cx="${cx - 72}" cy="205" r="17"/>
-    <text class="question-flag-glyph" x="${cx - 72}" y="212" text-anchor="middle">?</text></g>`;
+    <text class="question-flag-glyph" x="${cx - 72}" y="212" text-anchor="middle">?</text>
+    <rect x="${cx - 104}" y="173" width="64" height="64" fill="transparent" pointer-events="all"/></g>`;
 }
 function contextWarnSvg(person, cx) {
   return `<g class="context-warn-marker" aria-hidden="true"><title>Contexto acima de ${CONTEXT_WARN_K}k</title>
@@ -602,7 +603,7 @@ function paperStackSvg(person, cx) {
   const sheets = shown.map((t, i) => `<rect class="paper-sheet" x="${-31 + i * 2}" y="${-22 - i * 5}" width="62" height="44" rx="3" transform="rotate(${i % 2 ? 2 : -2} 0 0)"/>`).join('');
   return `<g class="paper-stack" role="button" tabindex="0" data-action="open-papers" data-agent="${person.id}" transform="translate(${cx} 404)" aria-label="Pilha de ${queued.length} tarefa(s) na fila de ${esc(person.name)}. Abrir pilha de papéis.">
     <title>📋 ${queued.length} na fila — clique para ver, editar e submeter</title>
-    <rect class="paper-stack-hit" x="-44" y="-42" width="88" height="72" rx="8" fill="transparent" pointer-events="all"/>
+    <rect class="paper-stack-hit" x="-62" y="-52" width="124" height="96" rx="10" fill="transparent" pointer-events="all"/>
     ${active ? `<rect class="paper-active" x="${-34}" y="${-27}" width="68" height="50" rx="3" transform="rotate(1 0 0)"/>` : ''}
     ${sheets}
     ${queued.length ? `<g class="paper-count"><circle cx="36" cy="-30" r="12"/><text x="36" y="-25" text-anchor="middle">${queued.length}</text></g>` : ''}
@@ -1162,7 +1163,7 @@ function renderPapersDialog() {
         <div class="paper-row-head"><span class="paper-chip">${labels[t.status] || t.status}</span><small>criado ${ago(t.createdAt)}</small></div>
         <textarea class="paper-text" data-paper-edit="${t.id}" maxlength="300" ${t.status === 'queued' ? '' : 'readonly'} aria-label="Prompt do papel">${esc(t.text)}</textarea>
         <div class="paper-row-actions">
-          ${t.status === 'queued' ? `<button class="button button-primary" data-action="submit-paper" data-paper="${t.id}">${icon('play')}Submeter agora</button>
+          ${t.status === 'queued' ? `<button class="button button-violet" data-action="submit-paper" data-paper="${t.id}">${icon('play')}Submeter agora</button>
             <button class="button button-quiet" data-action="remove-paper" data-paper="${t.id}">${icon('close')}Remover</button>` : ''}
           ${t.status === 'active' ? `<span class="paper-note">este papel está a ser executado agora</span>` : ''}
           ${t.status === 'done' ? `<span class="paper-note">tarefa concluída · histórico preservado</span>` : ''}

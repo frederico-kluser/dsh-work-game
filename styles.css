@@ -60,7 +60,7 @@
 .model-row select{flex:1;max-width:210px;padding:8px 10px;border-radius:9px;border:1px solid #d8dbcf;background:#fffef9;font:inherit;font-size:13px}
 .question-flag{cursor:pointer}
 .question-flag-dot{fill:#e8a33d;stroke:#fffdf6;stroke-width:3}
-.question-flag-glyph{fill:#fffdf6;font-size:21px;font-weight:800;pointer-events:none}
+.question-flag-glyph{fill:#5c3f0c;font-size:21px;font-weight:800;pointer-events:none}
 .question-flag-pulse{fill:none;stroke:#e8a33d;stroke-width:2.5;opacity:.7;transform-origin:center;transform-box:fill-box;animation:flag-pulse 1.7s ease-out infinite}
 @keyframes flag-pulse{0%{transform:scale(1);opacity:.7}70%{transform:scale(1.75);opacity:0}100%{transform:scale(1.75);opacity:0}}
 .context-warn-marker circle{fill:#e8a33d;stroke:#fffdf6;stroke-width:2.5}
@@ -76,7 +76,7 @@
 .paper-sheet{fill:#fffdf6;stroke:#cfc9b4;stroke-width:1.5}
 .paper-active{fill:#e7eef8;stroke:#a9c1de;stroke-width:1.5}
 .paper-count circle{fill:#e8a33d;stroke:#fffdf6;stroke-width:2}
-.paper-count text{fill:#fffdf6;font-size:13px;font-weight:800}
+.paper-count text{fill:#5c3f0c;font-size:13px;font-weight:800}
 .paper-stack:hover .paper-sheet{stroke:#8a977f}
 .queue-actions{display:flex;flex-wrap:wrap;gap:8px;margin:9px 0 4px}
 .queue-actions .button{flex:1 1 auto;min-width:132px;justify-content:center}
