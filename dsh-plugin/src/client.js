@@ -1351,10 +1351,12 @@ window.__ModuleLoader__.load({
     // 'layout' é o serviço que ui-layout fornece via ctx.reflect.provide:
     // dá a transição pública de painel (ui-layout/src/client/service.ts).
     // Serviços exigidos ao runner do cliente. NOTA: só pedir nomes de serviço
+    // do catálogo verificado do client-runner (layout, locale, sessions, slots):
+    // 'sessions' TEM de estar declarado para o runner o pôr em ctx.sessions.
     // comprovadamente injetáveis ('sessions', 'slots', 'locale' são os do
     // exemplo oficial) — um nome desconhecido faz a ATIVAÇÃO inteira falhar
     // ("1 entry did not activate / import failed") mesmo com o bundle válido.
-    exports.inject = ['slots', 'layout'];
+    exports.inject = ['slots', 'layout', 'sessions'];
 
     // A função que o runtime do browser chama (padrão dos exemplos oficiais).
     exports.apply = function apply(ctx) {
