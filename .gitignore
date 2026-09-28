@@ -6,6 +6,9 @@ dsh-office-frontend.zip
 logs/
 .browser-profile/
 
+# Dependência opcional do regressivo Playwright (npm i --no-save playwright).
+node_modules/
+
 # Micro-proxectos git de proba (repos anidados con .git propio) e os
 # worktrees efémeros que xera projects/teste-e2e.sh.
 projects/micro-*/

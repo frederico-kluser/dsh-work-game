@@ -155,6 +155,18 @@ node --test 'tests/**/*.test.mjs'   # ou: npm test
 
 Para correr os testes funcionais é preciso um Chrome/Chromium no sistema (`CHROME_PATH` aponta para o executável quando não está no `PATH`).
 
+### Regressivo com Playwright (opcional)
+
+Uma segunda linha de regressão, em Playwright, corre as viagens centrais em **chromium e webkit** — o webkit apanha as armadilhas do Safari (animações CSS criadas só no cálculo de estilo seguinte, `transform-box`, `backdrop-filter`) — nas duas superfícies: a demo estática e o **Modo jogo** num DSH web real.
+
+```bash
+npm i --no-save playwright && npx playwright install chromium webkit
+node scripts/regressivo-playwright.mjs --dsh "http://127.0.0.1:<porta>/?token=<token>"  # demo + Modo jogo
+node scripts/regressivo-playwright.mjs --so-demo                                        # só a demo
+```
+
+Na demo: arranque com a cena-semente, zero requisições externas, inspetor com separadores e mobile 390×844 sem overflow. No Modo jogo: ativação do bundle, workspaces → mesas, bonecos com `<symbol>` resolvido e caixa real, "zzz" junto à cabeça, filtros (com persistência depois de recarregar), barra lateral com os três separadores, celular com bolhas iMessage e libertação da conversa (0 referências). Grava capturas e `relatorio.json`/`relatorio.md` em `logs/regressivo-*`. Exit codes: `0` verde · `1` reprovação · `2` uso inválido · `3` dependência em falta. O `npm test` continua sem dependências.
+
 ## Roadmap
 
 1. **Frontend de demonstração** — a sala, as mesas, os balões, os painéis e as expressões, 100% simulados.
