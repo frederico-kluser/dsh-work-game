@@ -41,6 +41,10 @@ try {
   assert.ok(/factory:react-ok/.test(diag), `React do bundle não carregou: ${diag}`);
   ok('bundle do plugin ativado no DSH', diag.slice(0, 120));
 
+  // Deixar a composição dos slots assentar antes de clicar (o runner monta os
+  // registos dos slots depois do factory do bundle).
+  await sleep(1500);
+
   // Botão "Modo jogo" (slot sidebar.footer.action) → abre o painel do escritório.
   await page.eval(`(() => { const b = document.querySelector('button[aria-label="Modo jogo"]'); if (!b) throw new Error('botão Modo jogo ausente'); b.click(); return true; })()`);
   await sleep(700);
@@ -48,7 +52,13 @@ try {
   assert.ok(/abrir:chamado/.test(diagApos), `clique em "Modo jogo" não chegou ao handler: ${diagApos}`);
   ok('botão "Modo jogo" abriu o painel', diagApos.split('|').slice(-1)[0]);
 
-  await page.waitFor('!!document.querySelector(".wg-painel")', 15000);
+  try {
+    await page.waitFor('!!document.querySelector(".wg-painel")', 15000);
+  } catch (erro) {
+    const diag = await page.eval('window.__wgDiag');
+    console.error(`diagnóstico: __wgDiag=${diag} __wgSnap=${await page.eval('window.__wgSnap ?? null')} erros=${JSON.stringify(page.consoleErrors)}`);
+    throw erro;
+  }
 
   // O catálogo do host carrega de forma assíncrona: dar-lhe tempo e observar.
   let painel = null;
