@@ -1214,7 +1214,14 @@ window.__ModuleLoader__.load({
       const list = servico && servico.list;
       if (!list || typeof list.getSnapshot !== 'function') return null;
 
-      const ler = () => { try { return list.getSnapshot(); } catch { return null; } };
+      try { window.__wgSnap = 'superficie:ok'; } catch { /* sem window */ }
+      const ler = () => {
+        try { return list.getSnapshot(); }
+        catch (erro) {
+          try { window.__wgSnapErr = String(erro && (erro.message || erro)).slice(0, 200); } catch { /* sem window */ }
+          return null;
+        }
+      };
 
       const catalogo = () => linhasDoSnapshot(ler()).map((l) => ({
         id: l.id,
