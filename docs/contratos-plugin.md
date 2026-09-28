@@ -201,6 +201,10 @@ mesmo texto e os mesmos eventos para o mesmo cenário (guarda contra drift).
   **Abrir conversa** (`openSession(id)`); **Nova sessão** e lugares livres das mesas de
   workspace → `startSession(workspaceId)` (reutiliza a conversa em branco do workspace, se
   houver). Arrastar só começa após 6 px e nunca dispara cliques.
+- **Câmara** (`enquadramento`): automático ao montar e quando a sala muda de forma,
+  até o utilizador explorar (arrastar, scroll, zoom). Se caber tudo exigir zoom abaixo de
+  0,3 (ex.: o DSH real do Acer — 78 pessoas, 33 mesas), mostra a largura inteira
+  alinhada ao topo; **Enquadrar** mostra a sala inteira e volta ao automático.
 
 Futuro (lado host, `adapter.js`): eventos de fio em tempo real (turn/end, tool/*,
 user-questions, approval/*) via `SessionReference` + `eventSource` (modelo

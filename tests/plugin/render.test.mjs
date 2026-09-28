@@ -271,6 +271,26 @@ test('recrutar: com uiWorkspace, lugar livre e "Nova sessão" abrem conversa no 
   assert.ok(!sem.includes('Clique para recrutar'));
 });
 
+/* ---------- câmara ---------- */
+
+test('câmara: sala pequena cabe inteira e centrada; sala grande mostra a largura no topo', () => {
+  const tela = { w: 1160, h: 805 };
+  const pequena = B.__enquadramento(B.__tamanhoMundo(3), tela);
+  assert.ok(pequena.zoom >= 0.3, `zoom legível (${pequena.zoom})`);
+  assert.ok(Math.abs(pequena.y - (805 - 830 * pequena.zoom) / 2) < 1e-9, 'centrada na vertical');
+
+  // 33 mesas (o DSH real do Acer: 17 workspaces + 16 de "Sem workspace").
+  const grande = B.__tamanhoMundo(33);
+  const auto = B.__enquadramento(grande, tela);
+  assert.equal(auto.zoom, 1160 / 2900, 'largura inteira (3 colunas) em vez de pessoas minúsculas');
+  assert.equal(auto.y, 12, 'alinhada ao topo: os workspaces vêm primeiro');
+  assert.equal(auto.x, 0);
+
+  const tudo = B.__enquadramento(grande, tela, true);
+  assert.equal(tudo.zoom, 0.12, '"Enquadrar" mostra o máximo possível da sala inteira');
+  assert.equal(tudo.y, 12, 'se nem assim cabe, começa no topo');
+});
+
 /* ---------- REGRA DE OURO: a arte é a da demo ---------- */
 
 test('REGRA DE OURO: cada corpo embutido é byte a byte o SVG da demo (assets/avatars/expressions)', () => {

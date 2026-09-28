@@ -599,11 +599,16 @@ window.__ModuleLoader__.load({
         }
       };
 
-      // Prefere um nome que ainda ninguém usa (menos homónimos na sala).
+      // Prefere um nome que ainda ninguém usa (menos homónimos na sala). O
+      // conjunto dos usados é mantido à parte: com milhares de conversas no
+      // catálogo, recalculá-lo a cada pessoa nova custava O(n²).
+      let usados = null;
       const nomeLivre = () => {
-        const usados = new Set(Object.values(cache).map((a) => a && a.name));
+        if (usados === null) usados = new Set(Object.values(cache).map((a) => a && a.name));
         const livres = NOMES.filter((n) => !usados.has(n));
-        return aleatorioDe(livres.length ? livres : NOMES);
+        const nome = aleatorioDe(livres.length ? livres : NOMES);
+        usados.add(nome);
+        return nome;
       };
 
       return {
@@ -1068,6 +1073,24 @@ window.__ModuleLoader__.load({
         linhas,
         largura: GRID.originX * 2 + GRID.cols * GRID.pitchX,
         altura: GRID.originY + linhas * GRID.pitchY + 60,
+      };
+    }
+
+    // Câmara. `tudo` (botão Enquadrar) mostra a sala inteira. O enquadramento
+    // automático também, desde que os bonecos continuem legíveis; numa sala
+    // grande (dezenas de mesas) em que caber tudo exigiria um zoom abaixo de
+    // ZOOM_LEGIVEL, mostra a largura inteira alinhada ao topo — os workspaces
+    // vêm primeiro e o resto desce com o scroll — em vez de pessoas minúsculas.
+    const ZOOM_LEGIVEL = 0.3;
+    function enquadramento(mundo, tela, tudo = false) {
+      const ajusteTotal = Math.min(tela.w / mundo.largura, tela.h / mundo.altura, 1.2);
+      const cabe = tudo || ajusteTotal >= ZOOM_LEGIVEL;
+      const zoom = Math.max(0.12, cabe ? ajusteTotal : Math.min(tela.w / mundo.largura, 1.2));
+      const alturaVista = mundo.altura * zoom;
+      return {
+        zoom,
+        x: (tela.w - mundo.largura * zoom) / 2,
+        y: cabe && alturaVista <= tela.h ? (tela.h - alturaVista) / 2 : 12,
       };
     }
 
@@ -1791,6 +1814,7 @@ window.__ModuleLoader__.load({
         if (!tela) return undefined;
         const onWheel = (e) => {
           e.preventDefault();
+          interagiuRef.current = true; // o utilizador está a explorar: sem enquadramento automático
           if (e.ctrlKey || e.metaKey) {
             const rect = tela.getBoundingClientRect();
             const px = e.clientX - rect.left;
@@ -1814,27 +1838,25 @@ window.__ModuleLoader__.load({
       const layout = view.layout;
       const selecionada = getSelecao();
 
-      // Enquadrar toda a sala (mesma geometria do renderOffice).
-      const caber = () => {
+      // Enquadrar (mesma geometria do renderOffice). `tudo` = a sala inteira.
+      const caber = (tudo = false) => {
         const tela = telaRef.current;
         if (!tela) return;
-        const { largura, altura } = tamanhoMundo(getView().layout.modules.length);
-        const zoom = Math.max(0.12, Math.min(tela.clientWidth / largura, tela.clientHeight / altura, 1.2));
-        setCamera({
-          zoom,
-          x: (tela.clientWidth - largura * zoom) / 2,
-          y: (tela.clientHeight - altura * zoom) / 2,
-        });
+        const mundo = tamanhoMundo(getView().layout.modules.length);
+        setCamera(enquadramento(mundo, { w: tela.clientWidth, h: tela.clientHeight }, tudo));
       };
 
       // Enquadramento automático: ao montar e sempre que a sala muda de forma
-      // (nº de mesas/pessoas) — nunca durante a exploração do utilizador.
+      // (nº de mesas/pessoas) — mas nunca depois de o utilizador explorar
+      // (arrastar, scroll, zoom); o botão Enquadrar devolve-o ao automático.
+      const interagiuRef = react.useRef(false);
+      const tudoRef = react.useRef(false); // depois de "Enquadrar": manter a sala inteira à vista
       const formaRef = react.useRef('');
       const forma = `${layout.modules.length}|${layout.visiveis}`;
       react.useEffect(() => {
         if (forma !== formaRef.current) {
           formaRef.current = forma;
-          caber();
+          if (!interagiuRef.current) caber(tudoRef.current);
           verificarRefs(); // ponto de verificação: nenhuma referência #… sem destino
         }
       });
@@ -1858,6 +1880,7 @@ window.__ModuleLoader__.load({
           if (!inicio.moveu) {
             if (Math.abs(ev.clientX - inicio.px) + Math.abs(ev.clientY - inicio.py) < 6) return;
             inicio.moveu = true;
+            interagiuRef.current = true;
           }
           setCamera((c) => ({ ...c, x: ev.clientX - inicio.x, y: ev.clientY - inicio.y }));
         };
@@ -1964,17 +1987,18 @@ window.__ModuleLoader__.load({
             h('button', {
               type: 'button', className: 'wg-botao', title: 'Aproximar',
               'aria-label': 'Aproximar (zoom in)', disabled: camera.zoom >= 1.49,
-              onClick: () => setCamera((c) => ({ ...c, zoom: Math.min(1.5, c.zoom * 1.2) })),
+              onClick: () => { interagiuRef.current = true; setCamera((c) => ({ ...c, zoom: Math.min(1.5, c.zoom * 1.2) })); },
             }, '＋ Zoom'),
             h('span', { className: 'wg-zoom-valor', 'aria-live': 'polite' }, `${Math.round(camera.zoom * 100)}%`),
             h('button', {
               type: 'button', className: 'wg-botao', title: 'Afastar',
               'aria-label': 'Afastar (zoom out)', disabled: camera.zoom <= 0.151,
-              onClick: () => setCamera((c) => ({ ...c, zoom: Math.max(0.15, c.zoom / 1.2) })),
+              onClick: () => { interagiuRef.current = true; setCamera((c) => ({ ...c, zoom: Math.max(0.15, c.zoom / 1.2) })); },
             }, '－ Zoom'),
             h('button', {
               type: 'button', className: 'wg-botao', title: 'Enquadrar toda a sala',
-              'aria-label': 'Enquadrar toda a sala', onClick: caber,
+              'aria-label': 'Enquadrar toda a sala',
+              onClick: () => { interagiuRef.current = false; tudoRef.current = true; caber(true); },
             }, '⤢ Enquadrar'),
           ),
           h('span', { className: 'wg-conta' }, conta),
@@ -2285,6 +2309,8 @@ window.__ModuleLoader__.load({
     exports.__trace = trace;
     exports.__renderOffice = renderOffice;
     exports.__montarEscritorio = montarEscritorio;
+    exports.__enquadramento = enquadramento;
+    exports.__tamanhoMundo = tamanhoMundo;
     exports.__spriteDoPainel = spriteDoPainel;
     exports.__prepararCorpo = prepararCorpo;
     exports.__chaveCorpo = chaveCorpo;

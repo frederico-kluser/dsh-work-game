@@ -79,6 +79,7 @@ No **Modo jogo** (pé da barra lateral, ao lado de Settings) a sala mostra:
 - **Estado real**: quem está a correr aparece **Trabalhando**; os outros, **Disponível**. A ficha traz contexto (`CTX`), custo estimado e velocidade de tokens a partir das projeções do DSH (sem dado, mostra `—`).
 - **Delegação em curso**: quando uma conversa corre subagentes, ela senta-se na **mesa violeta "Equipe de …"** com eles e o lugar de casa fica **reservado** ("Em delegação ↗").
 - **Ações reais**: clicar numa pessoa abre o inspetor, com **Abrir conversa**; **Nova sessão** e os **lugares livres** de uma mesa abrem uma conversa nova naquele workspace. Arrastar explora a sala; `Ctrl` + scroll faz zoom.
+- **Câmara**: ao abrir, a sala enquadra-se sozinha; numa sala grande (dezenas de mesas) mostra a largura inteira a partir do topo — os workspaces primeiro, com bonecos legíveis — em vez de encolher tudo. Depois de arrastar ou dar zoom, a câmara fica onde a deixou; **⤢ Enquadrar** mostra a sala inteira.
 
 Validar num DSH web real (Chrome, Chromium ou Brave via `CHROME_PATH`):
 
