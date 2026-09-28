@@ -967,7 +967,7 @@ window.__ModuleLoader__.load({
               h('div', { className: 'wg-ctx-barra', role: 'meter', 'aria-label': 'Ocupação do contexto' },
                 h('span', {
                   className: sel.ctx && num(sel.ctx.used) > LIMIAR_CTX ? 'wg-ctx-cheio' : '',
-                  style: { width: `${Math.max(0, Math.min(100, ctx ? (num(sel.ctx.used) / Math.max(1, sel.ctx.window)) * 100 : 0))}%` },
+                  style: { width: `${Math.max(0, Math.min(100, sel.ctx ? (num(sel.ctx.used) / Math.max(1, num(sel.ctx.window) || 1)) * 100 : 0))}%` },
                 })),
               h('span', { className: 'wg-ctx-texto' }, ctx ? ctx.texto : 'CTX —'),
             ),
