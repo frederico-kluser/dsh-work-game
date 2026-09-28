@@ -552,7 +552,7 @@ window.__ModuleLoader__.load({
           for (const sessao of sessions) {
             onEvent({
               type: 'session/added', sessionId: sessao.id, model: sessao.model,
-              name: sessao.name, teamId: sessao.teamId,
+              name: sessao.name, teamId: sessao.teamId, cwd: sessao.cwd,
             });
           }
           // Transporte real: assinar eventos brutos e normalizá-los.
@@ -819,7 +819,7 @@ window.__ModuleLoader__.load({
     function seatRoleHtml(p) {
       const pct = ctxPct(p);
       const chunks = [`<tspan class="metric-ctx">CTX ${pct === null ? '—' : '~' + pct + '%'}</tspan>`];
-      chunks.push(`<tspan class="metric-cost">${esc(formatoCusto(custoDe(p)))}</tspan>`);
+      chunks.push(`<tspan class="metric-cost">${esc(formatoCusto(p.cost))}</tspan>`);
       if (speedDe(p)) chunks.push(`<tspan class="metric-speed">${speedDe(p)} tok/s</tspan>`);
       return chunks.join(' · ');
     }
