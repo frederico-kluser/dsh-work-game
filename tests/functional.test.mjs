@@ -108,7 +108,7 @@ test('fichas: nome, CTX e estado por texto — sem conceito de cargo', async () 
 
 // ─────────────────────────────── 4–6. Seleção, contexto e computador ───────────────────────────────
 
-test('seleção abre o inspetor com abas Contexto, Computador e Expressões', async () => {
+test('seleção abre o inspetor com abas Contexto, Computador, Atividade e Expressões', async () => {
   await page.click('g.seat[role="button"][data-agent="p-rui"]');
   await page.waitFor('!document.querySelector("#inspector").hidden');
   const info = await page.eval(`(() => ({
@@ -117,7 +117,7 @@ test('seleção abre o inspetor com abas Contexto, Computador e Expressões', as
     selecionado: !!document.querySelector('g.seat.selected')
   }))()`);
   assert.equal(info.nome, 'Rui');
-  assert.deepEqual(info.abas, ['Contexto', 'Computador', 'Expressões']);
+  assert.deepEqual(info.abas, ['Contexto', 'Computador', 'Atividade', 'Expressões']);
   assert.equal(info.selecionado, true, 'a ficha selecionada fica destacada');
 });
 

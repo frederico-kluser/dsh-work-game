@@ -4,14 +4,16 @@
  * com eval/click/type/teclado/arraste/mobilidade. Sem dependências npm.
  */
 import { spawn, execFileSync } from 'node:child_process';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 const CANDIDATES = [
   process.env.CHROME_PATH,
   'google-chrome-stable', 'google-chrome', 'chromium', 'chromium-browser',
-  'brave-browser', 'brave', 'microsoft-edge'
+  'brave-browser', 'brave', 'microsoft-edge',
+  '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+  '/Applications/Chromium.app/Contents/MacOS/Chromium'
 ].filter(Boolean);
 
 export function findChrome() {
@@ -189,6 +191,12 @@ export async function launchBrowser({ width = 1440, height = 900 } = {}) {
     },
     async setViewport(w, h, mobile = false) {
       await cdp.send('Emulation.setDeviceMetricsOverride', { width: w, height: h, deviceScaleFactor: 1, mobile });
+    },
+    /** Grava um PNG do estado atual da página (evidência de sessão). */
+    async screenshot(path) {
+      const shot = await cdp.send('Page.captureScreenshot', { format: 'png' });
+      writeFileSync(path, Buffer.from(shot.data, 'base64'));
+      return path;
     }
   };
 

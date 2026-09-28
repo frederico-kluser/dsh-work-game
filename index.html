@@ -21,6 +21,8 @@
       </a>
       <div class="header-stats" id="header-stats" aria-live="polite"><span class="live-dot"></span><span id="stats-people">0 pessoas</span><span class="stats-divider">·</span><span id="stats-teams">0 times</span><span class="stats-divider">·</span><span id="stats-tables">0 mesas</span></div>
       <div class="header-actions">
+        <button class="button button-quiet" id="pending-questions" hidden><svg aria-hidden="true"><use href="assets/furniture.svg#icon-hand"/></svg><span>1 a aguardar de ti</span></button>
+        <button class="button button-quiet" id="archive-button" aria-label="Arquivo de agentes eliminados"><svg aria-hidden="true"><use href="assets/furniture.svg#icon-folder"/></svg><span>Arquivo</span> <b id="archive-count">0</b></button>
         <button class="button button-quiet" id="reset-demo" title="Restaurar a cena inicial"><svg aria-hidden="true"><use href="assets/furniture.svg#icon-return"/></svg><span>Recomeçar</span></button>
         <button class="button button-light" id="new-workspace"><svg aria-hidden="true"><use href="assets/furniture.svg#icon-plus"/></svg>Novo time</button>
         <button class="button button-primary" id="recruit-agent"><svg aria-hidden="true"><use href="assets/furniture.svg#icon-team"/></svg>Recrutar pessoa</button>
@@ -38,6 +40,14 @@
           <button id="zoom-in" aria-label="Aumentar zoom" title="Aumentar zoom"><svg aria-hidden="true"><use href="assets/furniture.svg#icon-plus"/></svg></button>
           <span></span><button id="fit-scene" aria-label="Enquadrar a sala" title="Enquadrar a sala"><svg aria-hidden="true"><use href="assets/furniture.svg#icon-fit"/></svg></button>
         </div>
+        <aside id="live-feed" class="live-feed" aria-label="Ações em tempo real de todos os agentes">
+          <header class="live-feed-head">
+            <span class="live-dot"></span><strong>Ações em tempo real</strong>
+            <small id="live-feed-count">0</small>
+            <button class="icon-button" data-action="toggle-feed" aria-label="Recolher o feed de ações" title="Recolher/expandir"><svg aria-hidden="true"><use href="assets/furniture.svg#icon-fit"/></svg></button>
+          </header>
+          <ol id="live-feed-list" class="live-feed-list" aria-live="polite"></ol>
+        </aside>
       </section>
       <aside id="inspector" class="inspector" aria-label="Computador, contexto e expressões da pessoa selecionada" hidden></aside>
     </main>
@@ -88,6 +98,54 @@
       <div class="modal-actions"><button type="button" class="button button-light" data-close-dialog>Cancelar</button><button class="button button-violet" type="submit">Montar equipe <svg aria-hidden="true"><use href="assets/furniture.svg#icon-arrow"/></svg></button></div>
     </form>
   </dialog>
+
+  <dialog id="papers-dialog" class="modal modal-papers">
+    <div class="papers-body">
+      <button class="modal-close icon-button" type="button" data-close-dialog aria-label="Fechar"><svg aria-hidden="true"><use href="assets/furniture.svg#icon-close"/></svg></button>
+      <span class="eyebrow">PIPELINE DE TAREFAS</span>
+      <h2 id="papers-title">A pilha de papéis</h2>
+      <p class="modal-description" id="papers-subtitle">Cada papel é um prompt na fila.</p>
+      <ol id="papers-list" class="papers-list"></ol>
+      <div class="papers-footer">
+        <label for="paper-input" class="field-optional">Mais um papel para o topo da pilha</label>
+        <textarea id="paper-input" class="task-textarea" maxlength="300" placeholder="Escreva a próxima tarefa…" aria-label="Novo prompt para a pilha"></textarea>
+        <div class="queue-actions">
+          <button class="button button-light" data-action="paper-queue"><svg aria-hidden="true"><use href="assets/furniture.svg#icon-file"/></svg>Colocar na mesa</button>
+          <button class="button button-violet" data-action="paper-submit-now"><svg aria-hidden="true"><use href="assets/furniture.svg#icon-play"/></svg>Submeter agora</button>
+        </div>
+      </div>
+    </div>
+  </dialog>
+
+  <dialog id="archive-dialog" class="modal modal-archive">
+    <div class="papers-body">
+      <button class="modal-close icon-button" type="button" data-close-dialog aria-label="Fechar"><svg aria-hidden="true"><use href="assets/furniture.svg#icon-close"/></svg></button>
+      <span class="eyebrow">NADA SE PERDE</span>
+      <h2>Arquivo — agentes eliminados</h2>
+      <p class="modal-description">Quem saiu da sala continua aqui: gastos, tokens, ações e tarefas preservados.</p>
+      <div id="archive-list" class="archive-list"></div>
+    </div>
+  </dialog>
+
+  <div id="question-overlay" class="question-overlay" hidden></div>
+  <section id="question-sheet" class="question-sheet" role="dialog" aria-modal="true" aria-labelledby="question-title" hidden>
+    <form id="question-form">
+      <div class="question-head">
+        <span class="eyebrow" id="question-header">PERGUNTA</span>
+        <h2 id="question-title">—</h2>
+        <p class="modal-description" id="question-detail"></p>
+      </div>
+      <fieldset id="question-options" class="question-options"><legend>Escolha uma opção</legend></fieldset>
+      <label for="question-custom">Outra resposta</label>
+      <input id="question-custom" placeholder="Ou escreva a sua resposta…" autocomplete="off">
+      <div class="question-actions">
+        <button type="button" class="button button-light" data-action="cancel-question"><svg aria-hidden="true"><use href="assets/furniture.svg#icon-close"/></svg>Cancelar pergunta</button>
+        <button type="button" class="button button-quiet" data-action="close-question-sheet">Responder depois</button>
+        <button type="submit" class="button button-primary"><svg aria-hidden="true"><use href="assets/furniture.svg#icon-check"/></svg>Responder</button>
+      </div>
+      <div class="question-asker" id="question-asker"></div>
+    </form>
+  </section>
 
   <div id="toast" class="toast" role="status" aria-live="polite"></div>
 </body>

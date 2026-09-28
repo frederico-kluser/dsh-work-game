@@ -23,7 +23,6 @@ const rand = (min, max) => min + Math.random() * (max - min);
 
 const FURNITURE = 'assets/furniture.svg';
 const GRID = { cols: 3, pitchX: 940, pitchY: 730, originX: 40, originY: 40 };
-const CAPACITY = 128;
 const W = 900;
 const THEMES = {
   blue: { color: '#2869a6', panel: '#25629b', stroke: '#244e72' },
@@ -39,6 +38,73 @@ const STATUS = {
   error: { label: 'Precisa de atenção', color: '#bd7961', icon: 'alert', preset: 'error' },
   done: { label: 'Concluído', color: '#299875', icon: 'check', preset: 'success' }
 };
+
+/* ---------- telemetry: models, prices, turn endings (everything SIMULATED) ----------
+   Vocabulary mirrors the real DSH signals documented in docs/conhecimento/07-features-futuras.md:
+   TokenUsage buckets (input = uncached), turn/end reason kinds, user-questions payloads. */
+const CONTEXT_WARN_K = 200; /* the human-facing warning threshold: above 200k of context */
+const MODELS = {
+  'deepseek-chat': { id: 'deepseek-chat', label: 'deepseek-chat', provider: 'deepseek', contextWindowK: 200, prices: { input: 0.27, output: 1.10, cacheRead: 0.027, cacheWrite: 0.27 } },
+  'deepseek-reasoner': { id: 'deepseek-reasoner', label: 'deepseek-reasoner', provider: 'deepseek', contextWindowK: 200, prices: { input: 0.55, output: 2.19, cacheRead: 0.055, cacheWrite: 0.55 } },
+  'mimo-v2.6-pro': { id: 'mimo-v2.6-pro', label: 'mimo-v2.6-pro', provider: 'xiaomi', contextWindowK: 256, prices: { input: 0.60, output: 2.40, cacheRead: 0.06, cacheWrite: 0.60 } }
+};
+const MODEL_IDS = Object.keys(MODELS);
+const PRICE_UNIT = 'US$ / 1M tokens';
+
+/* turn/end reason.kind → the visual finish signal (NEVER inferred from silence). */
+const FINISH_REASONS = {
+  completed: { kind: 'completed', label: 'Concluído', note: 'resultado pronto', icon: 'check', color: '#299875' },
+  aborted: { kind: 'aborted', label: 'Interrompido', note: 'turno cancelado', icon: 'return', color: '#c08c45' },
+  interrupted: { kind: 'interrupted', label: 'Interrompido', note: 'prefixo entregue', icon: 'return', color: '#c08c45' },
+  error: { kind: 'error', label: 'Erro no turno', note: 'precisa de atenção', icon: 'alert', color: '#bd7961' },
+  blocked: { kind: 'blocked', label: 'Bloqueado', note: 'sem como continuar', icon: 'hand', color: '#bd7961' },
+  'max-tokens': { kind: 'max-tokens', label: 'Máx. tokens', note: 'limite atingido', icon: 'alert', color: '#bd7961' }
+};
+
+/* Question payloads mirror AskUserQuestionItem: question, detail, options, multiSelect. */
+const QUESTION_POOL = [
+  {
+    header: 'DECISÃO',
+    question: 'Qual é o próximo passo desta tarefa?',
+    detail: 'O agente parou e ficou à espera de uma decisão sua antes de continuar.',
+    options: [{ label: 'Continuar como está' }, { label: 'Rever o plano antes de avançar', description: 'pausa e mostra o plano' }, { label: 'Cancelar esta tarefa' }]
+  },
+  {
+    question: 'Posso alterar o arquivo de configuração?',
+    detail: 'A mudança afeta o comportamento do projeto inteiro.',
+    multiSelect: true,
+    options: [{ label: 'Sim, pode alterar' }, { label: 'Só com a minha aprovação depois' }, { label: 'Não altere nada' }]
+  },
+  {
+    question: 'Qual modelo devo usar nesta rodada?',
+    detail: 'A escolha muda a capacidade de contexto e o custo estimado.',
+    options: [{ label: 'deepseek-chat' }, { label: 'deepseek-reasoner' }, { label: 'mimo-v2.6-pro' }]
+  },
+  {
+    question: 'Os testes que falharam devem ser corrigidos agora?',
+    detail: 'Há 2 testes a falhar no último relatório.',
+    options: [{ label: 'Corrigir agora' }, { label: 'Deixar para a próxima tarefa' }, { label: 'Ignorar por enquanto' }]
+  }
+];
+
+const modelOf = (person) => MODELS[person.model] || MODELS['deepseek-chat'];
+const windowOf = (person) => modelOf(person).contextWindowK;
+function costOf(person) {
+  const prices = modelOf(person).prices;
+  const u = person.usage || { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
+  return (u.input * prices.input + u.output * prices.output + u.cacheRead * prices.cacheRead + u.cacheWrite * prices.cacheWrite) / 1e6;
+}
+function formatUSD(n) {
+  return 'US$ ' + new Intl.NumberFormat('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(n);
+}
+function ago(ts) {
+  const s = Math.max(0, Math.round((Date.now() - ts) / 1000));
+  if (s < 5) return 'agora';
+  if (s < 60) return `há ${s}s`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `há ${m} min`;
+  return `há ${Math.floor(m / 60)} h`;
+}
 
 /* Fallback used only while expressions.js is absent; same contract as the real module. */
 const FALLBACK_EXPRESSIONS = {
@@ -82,11 +148,11 @@ const DATA = window.DSH_DEMO_DATA || {
 
 /* ---------- tiny store ---------- */
 const state = {
-  teams: [], modules: [], people: [],
+  teams: [], modules: [], people: [], archived: [],
   selected: null, tab: 'context', zoom: 0.5, pan: { x: 0, y: 0 },
-  bubbles: new Map()
+  bubbles: new Map(), feed: [], feedOpen: true
 };
-let seq = 20, toastTimer, activityTimer, recruitRoll = null, delegateTarget = null, dragging = null;
+let seq = 20, toastTimer, activityTimer, telemetryTimer, recruitRoll = null, delegateTarget = null, papersTarget = null, questionTarget = null, dragging = null;
 let worldSize = { width: 2820, height: 730 };
 
 const uid = (p) => `${p}-${++seq}`;
@@ -98,7 +164,8 @@ const icon = (n, cls = '') => `<svg class="icon ${cls}" aria-hidden="true"><use 
 const use = (id, x, y, w, h, extra = '') => `<use href="${FURNITURE}#${id}" x="${x}" y="${y}" width="${w}" height="${h}" ${extra}/>`;
 const glyph = (id, x, y, size, color) => `<g style="color:${color}">${use(`icon-${id}`, x, y, size, size)}</g>`;
 const formatK = (n) => new Intl.NumberFormat('pt-BR', { maximumFractionDigits: 1 }).format(n) + 'k';
-const pct = (p) => Math.min(100, Math.round((p.context / CAPACITY) * 100));
+const pct = (p) => Math.min(100, Math.round((p.context / windowOf(p)) * 100));
+const overContextWarn = (p) => p.context >= CONTEXT_WARN_K;
 
 function themeStyle(theme) {
   const t = THEMES[theme] || THEMES.blue;
@@ -109,6 +176,102 @@ function toast(msg) {
   $('#toast').textContent = msg;
   $('#toast').classList.add('visible');
   toastTimer = setTimeout(() => $('#toast').classList.remove('visible'), 3600);
+}
+
+/* ---------- real-time action log + live feed ----------
+   Every meaningful event is logged per person AND pushed to the global feed, so the
+   timeline stays accessible even after the agent is eliminated (see archivePerson). */
+function logAction(person, text, kind = 'info') {
+  const at = Date.now();
+  person.actions.push({ text, kind, at });
+  if (person.actions.length > 60) person.actions.shift();
+  state.feed.unshift({
+    personId: person.id, name: person.name, avatarId: person.avatarId,
+    avatarKind: person.avatarKind, text, kind, at
+  });
+  if (state.feed.length > 200) state.feed.pop();
+  renderFeed();
+}
+function feedIcon(kind) {
+  return { tool: 'code', file: 'file', test: 'flask', result: 'check', question: 'hand', warn: 'alert', done: 'check', cost: 'context', paper: 'file' }[kind] || 'play';
+}
+function renderFeed() {
+  const list = $('#live-feed-list');
+  if (list) {
+    list.innerHTML = state.feed.slice(0, 40).map((f) => `
+      <li class="feed-item feed-kind-${esc(f.kind)}" data-action="select" data-agent="${f.personId}" role="button" tabindex="0" aria-label="Ação de ${esc(f.name)}: ${esc(f.text)}. Abrir pessoa.">
+        <img class="feed-avatar" src="${esc(avatarSrc(f))}" alt="">
+        <div class="feed-copy"><strong>${esc(f.name)}</strong><span>${esc(f.text)}</span></div>
+        <time data-feed-time="${f.at}">${ago(f.at)}</time>
+      </li>`).join('');
+  }
+  const counter = $('#live-feed-count');
+  if (counter) counter.textContent = String(state.feed.length);
+  updatePendingUI();
+}
+function updatePendingUI() {
+  const pending = state.people.filter((p) => p.questions.some((q) => q.status === 'pending'));
+  const btn = $('#pending-questions');
+  if (btn) {
+    btn.hidden = pending.length === 0;
+    btn.innerHTML = `${icon('hand')}<span>${pending.length === 1 ? '1 a aguardar de ti' : `${pending.length} a aguardar de ti`}</span>`;
+    btn.setAttribute('aria-label', `${pending.length} pergunta(s) por responder`);
+  }
+  const count = $('#archive-count');
+  if (count) count.textContent = String(state.archived.length);
+  const archiveBtn = $('#archive-button');
+  if (archiveBtn) archiveBtn.setAttribute('aria-label', `Arquivo com ${state.archived.length} agente(s) eliminado(s)`);
+}
+function paintLiveValues() {
+  for (const t of $$('[data-feed-time]')) t.textContent = ago(Number(t.dataset.feedTime));
+  for (const p of state.people) {
+    const seat = $(`g.seat[role="button"][data-agent="${p.id}"]`);
+    if (!seat) continue;
+    const role = seat.querySelector('.seat-card-role');
+    if (role) role.textContent = seatRoleLine(p);
+    seat.classList.toggle('context-over', overContextWarn(p));
+  }
+  const found = findSelected();
+  if (found && !papersTarget && !questionTarget) {
+    const p = found.person;
+    const speed = $('#tv-speed');
+    if (speed) speed.textContent = `${Math.round(p.tokenSpeed)} tok/s`;
+    const cost = $('#tv-cost');
+    if (cost) cost.textContent = formatUSD(costOf(p));
+    const ctx = $('#tv-context');
+    if (ctx) ctx.textContent = `~${formatK(p.context)}`;
+    const agoNode = $('#tv-live-ago');
+    if (agoNode) agoNode.textContent = `atualizado ${ago(Date.now())}`;
+    const actList = $('#activity-list');
+    if (actList) actList.innerHTML = actionsListHtml(p);
+    const warn = $('#ctx-warning');
+    if (warn) warn.hidden = !overContextWarn(p);
+  }
+}
+function telemetryTick() {
+  for (const p of state.people) {
+    const active = p.hasComputer && !p.away && (p.status === 'working' || p.status === 'tool');
+    if (active) {
+      const target = p.status === 'tool' ? rand(18, 46) : rand(24, 92);
+      p.tokenSpeed = p.tokenSpeed ? p.tokenSpeed * 0.55 + target * 0.45 : target;
+      const produced = Math.round(p.tokenSpeed); /* ~1s of output tokens */
+      p.usage.output += produced;
+      p.usage.input += Math.round(produced * 0.18);
+      p.usage.cacheRead += Math.round(produced * 2.1);
+      p.usage.cacheWrite += Math.round(produced * 0.12);
+      p.context = Math.min(windowOf(p) * 1.3, p.context + (produced / 1000) * 2.6);
+      p.contextPeak = Math.max(p.contextPeak, p.context);
+      if (overContextWarn(p) && !p.ctxWarned) {
+        p.ctxWarned = true;
+        logAction(p, `contexto acima de ${CONTEXT_WARN_K}k — compactação recomendada`, 'warn');
+        toast(`${p.name} passou de ${CONTEXT_WARN_K}k de contexto.`);
+      }
+    } else if (p.tokenSpeed > 0) {
+      p.tokenSpeed = Math.max(0, p.tokenSpeed - 12);
+    }
+    if (!p.contextPeak) p.contextPeak = p.context;
+  }
+  paintLiveValues();
 }
 
 /* ---------- people, avatars and expressions ---------- */
@@ -135,7 +298,12 @@ function makePerson({ name, avatarId, teamId }) {
     avatarKind: avatarKindOf(id), teamId,
     homeModuleId: null, homeSeat: null, away: false,
     status: 'available', context: 0, hasComputer: false, task: '',
-    outputs: [], expressionPreset: null
+    outputs: [], expressionPreset: null,
+    model: pick(MODEL_IDS),
+    usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    tokenSpeed: 0, contextPeak: 0, ctxWarned: false,
+    taskQueue: [], questions: [], finish: null,
+    actions: [], startedAt: Date.now()
   };
 }
 function setExpression(person, presetId) {
@@ -200,23 +368,67 @@ function addPerson(teamId, opts = {}) {
 function seed() {
   seq = 20;
   state.bubbles.clear();
+  state.feed = [];
+  state.archived = [];
+  questionTarget = null;
+  papersTarget = null;
   state.teams = [
     { id: 'site', name: 'Site', path: '~/workspaces/site', theme: 'blue', completed: 0 },
     { id: 'api', name: 'API & integrações', path: '~/workspaces/api', theme: 'teal', completed: 0 }
   ];
-  const P = (id, name, avatarId, teamId, status, context, hasComputer) => ({
+  const P = (id, name, avatarId, teamId, status, context, hasComputer, extra = {}) => ({
     id, name, avatarId, avatarKind: avatarKindOf(avatarId), teamId,
     homeModuleId: null, homeSeat: null, away: false,
-    status, context, hasComputer, task: '', outputs: [], expressionPreset: null
+    status, context, hasComputer, task: '', outputs: [], expressionPreset: null,
+    model: 'deepseek-chat', usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    tokenSpeed: 0, contextPeak: context, ctxWarned: context >= CONTEXT_WARN_K,
+    taskQueue: [], questions: [], finish: null, actions: [], startedAt: Date.now() - 3600e3,
+    ...extra
   });
+  const now = Date.now();
   state.people = [
-    P('p-rui', 'Rui', 'rui', 'site', 'working', 43.5, true),
-    P('p-bia', 'Bia', 'bia', 'site', 'working', 27.8, true),
-    P('p-lia', 'Lia', 'lia', 'site', 'working', 53.3, true),
-    P('p-pesquisa', 'Pesquisa', 'pesquisa', 'site', 'working', 18.4, true),
-    P('p-codigo', 'Código', 'codigo', 'site', 'tool', 36.2, true),
-    P('p-testes', 'Testes', 'testes', 'site', 'working', 12.8, true),
-    P('p-alex', 'Alex', 'alex', 'api', 'working', 31.6, true),
+    P('p-rui', 'Rui', 'rui', 'site', 'working', 43.5, true, {
+      task: 'criar a tela de login', tokenSpeed: 38,
+      usage: { input: 42000, output: 61000, cacheRead: 310000, cacheWrite: 18000 },
+      taskQueue: [{ id: 'paper-seed-1', text: 'criar a tela de login', status: 'active', createdAt: now - 240e3 }]
+    }),
+    P('p-bia', 'Bia', 'bia', 'site', 'waiting', 27.8, true, {
+      tokenSpeed: 0,
+      usage: { input: 21000, output: 34000, cacheRead: 150000, cacheWrite: 9000 },
+      questions: [{
+        id: 'q-seed-1', header: 'DECISÃO',
+        question: 'Qual é o próximo passo desta tarefa?',
+        detail: 'O agente parou e ficou à espera de uma decisão sua antes de continuar.',
+        options: [{ label: 'Continuar como está' }, { label: 'Rever o plano antes de avançar', description: 'pausa e mostra o plano' }, { label: 'Cancelar esta tarefa' }],
+        multiSelect: false, askedAt: now - 45e3, status: 'pending'
+      }]
+    }),
+    P('p-lia', 'Lia', 'lia', 'site', 'working', 53.3, true, {
+      tokenSpeed: 52,
+      usage: { input: 58000, output: 84000, cacheRead: 420000, cacheWrite: 24000 }
+    }),
+    P('p-pesquisa', 'Pesquisa', 'pesquisa', 'site', 'working', 214.6, true, {
+      tokenSpeed: 64,
+      usage: { input: 210000, output: 260000, cacheRead: 2100000, cacheWrite: 110000 },
+      taskQueue: [
+        { id: 'paper-seed-2', text: 'comparar as duas abordagens de cache', status: 'queued', createdAt: now - 90e3 },
+        { id: 'paper-seed-3', text: 'resumir as fontes encontradas', status: 'queued', createdAt: now - 40e3 }
+      ]
+    }),
+    P('p-codigo', 'Código', 'codigo', 'site', 'tool', 36.2, true, {
+      tokenSpeed: 27,
+      usage: { input: 39000, output: 52000, cacheRead: 260000, cacheWrite: 15000 }
+    }),
+    P('p-testes', 'Testes', 'testes', 'site', 'done', 12.8, true, {
+      tokenSpeed: 0,
+      usage: { input: 12000, output: 19000, cacheRead: 90000, cacheWrite: 5000 },
+      finish: { ...FINISH_REASONS.completed, at: now - 150e3 },
+      taskQueue: [{ id: 'paper-seed-4', text: 'rodar a suíte completa', status: 'done', createdAt: now - 300e3 }]
+    }),
+    P('p-alex', 'Alex', 'alex', 'api', 'working', 31.6, true, {
+      tokenSpeed: 45,
+      usage: { input: 33000, output: 47000, cacheRead: 220000, cacheWrite: 12000 }
+    }),
     P('p-maya', 'Maya', 'maya', 'api', 'available', 0, false)
   ];
   const home = (id, mod, seat) => { const p = personById(id); p.homeModuleId = mod; p.homeSeat = seat; };
@@ -229,6 +441,23 @@ function seed() {
     { id: 'm-team', teamId: 'site', kind: 'delegation', seats: ['p-lia', 'p-pesquisa', 'p-codigo', 'p-testes'] },
     { id: 'm-api', teamId: 'api', kind: 'main', seats: ['p-alex', 'p-maya', null, null] }
   ];
+  /* a believable opening feed so the timeline is never empty on load */
+  const feedSeed = [
+    ['p-pesquisa', 'contexto acima de 200k — compactação recomendada', 'warn', 210e3],
+    ['p-bia', 'pergunta: qual é o próximo passo desta tarefa?', 'question', 45e3],
+    ['p-rui', 'tarefa: criar a tela de login', 'message', 240e3],
+    ['p-testes', 'turn/end · completed', 'done', 150e3],
+    ['p-codigo', 'executou a ferramenta de build', 'tool', 60e3],
+    ['p-alex', 'atualizou o arquivo do projeto', 'file', 30e3]
+  ];
+  for (const [pid, text, kind, dt] of feedSeed) {
+    const p = personById(pid);
+    if (!p) continue;
+    const at = now - dt;
+    p.actions.push({ text, kind, at });
+    state.feed.push({ personId: pid, name: p.name, avatarId: p.avatarId, avatarKind: p.avatarKind, text, kind, at });
+  }
+  state.feed.sort((a, b) => b.at - a.at);
   state.selected = null; state.tab = 'context';
 }
 
@@ -304,6 +533,7 @@ function syncBubbles() {
 function emitOutput(person, text, kind = 'result') {
   person.outputs.push({ text, kind, at: Date.now() });
   if (person.outputs.length > 24) person.outputs.shift();
+  logAction(person, text, kind);
   showBubble(person, text, kind);
 }
 function kindMatchesStatus(kind, status) {
@@ -336,6 +566,48 @@ function scheduleActivity() {
 }
 
 /* ---------- rendering ---------- */
+function seatRoleLine(person) {
+  if (!person.hasComputer) return `CTX — · ${person.outputs.length ? 'último output' : 'sem output'}`;
+  return `CTX ~${pct(person)}% · ${formatUSD(costOf(person))} · ${Math.round(person.tokenSpeed)} tok/s`;
+}
+function pendingQuestionOf(person) {
+  return person.questions.find((q) => q.status === 'pending') || null;
+}
+function questionFlagSvg(person, cx) {
+  const q = pendingQuestionOf(person);
+  if (!q) return '';
+  return `<g class="question-flag" role="button" tabindex="0" data-action="open-question" data-agent="${person.id}" aria-label="${esc(person.name)} fez uma pergunta. Abrir pergunta.">
+    <title>❓ ${esc(person.name)} fez uma pergunta — clique para responder</title>
+    <circle class="question-flag-dot" cx="${cx - 72}" cy="205" r="17"/>
+    <circle class="question-flag-pulse" cx="${cx - 72}" cy="205" r="17"/>
+    <text class="question-flag-glyph" x="${cx - 72}" y="212" text-anchor="middle">?</text></g>`;
+}
+function contextWarnSvg(person, cx) {
+  return `<g class="context-warn-marker" aria-hidden="true"><title>Contexto acima de ${CONTEXT_WARN_K}k</title>
+    <circle cx="${cx + 72}" cy="250" r="15"/>${glyph('alert', cx + 63, 240, 18, '#795d33')}</g>`;
+}
+function finishRibbonSvg(person, cx) {
+  const fin = person.finish;
+  if (!fin) return '';
+  return `<g class="finish-ribbon" data-finish="${esc(fin.kind)}" aria-hidden="true">
+    <rect x="${cx - 99}" y="509" width="198" height="26" rx="13"/>
+    ${glyph(fin.icon, cx - 87, 514, 16, fin.color)}
+    <text x="${cx - 64}" y="526" fill="${fin.color}">${esc(fin.label)} · ${esc(fin.note)}</text></g>`;
+}
+function paperStackSvg(person, cx) {
+  const queued = person.taskQueue.filter((t) => t.status === 'queued');
+  const active = person.taskQueue.find((t) => t.status === 'active');
+  if (!queued.length && !active) return '';
+  const shown = queued.slice(0, 3);
+  const sheets = shown.map((t, i) => `<rect class="paper-sheet" x="${-31 + i * 2}" y="${-22 - i * 5}" width="62" height="44" rx="3" transform="rotate(${i % 2 ? 2 : -2} 0 0)"/>`).join('');
+  return `<g class="paper-stack" role="button" tabindex="0" data-action="open-papers" data-agent="${person.id}" transform="translate(${cx} 404)" aria-label="Pilha de ${queued.length} tarefa(s) na fila de ${esc(person.name)}. Abrir pilha de papéis.">
+    <title>📋 ${queued.length} na fila — clique para ver, editar e submeter</title>
+    <rect class="paper-stack-hit" x="-44" y="-42" width="88" height="72" rx="8" fill="transparent" pointer-events="all"/>
+    ${active ? `<rect class="paper-active" x="${-34}" y="${-27}" width="68" height="50" rx="3" transform="rotate(1 0 0)"/>` : ''}
+    ${sheets}
+    ${queued.length ? `<g class="paper-count"><circle cx="36" cy="-30" r="12"/><text x="36" y="-25" text-anchor="middle">${queued.length}</text></g>` : ''}
+  </g>`;
+}
 function renderCharacter(person, cx) {
   const src = avatarSrc(person);
   return `<g class="seat character-hit" data-action="select" data-agent="${person.id}" aria-hidden="true"><g transform="translate(${cx - 113} 147)"><g class="character" data-character-id="${person.id}" data-expression="${expressionOf(person)}"><image href="${esc(src)}" width="226" height="240" preserveAspectRatio="xMidYMax meet"/></g></g></g>`;
@@ -359,13 +631,17 @@ function renderSeat(mod, person, index) {
   const selected = person.id === state.selected ? ' selected' : '';
   const laptop = person.hasComputer
     ? `<g class="character-laptop">${use('laptop', cx - 76, 323, 152, 95)}${glyph(info.icon === 'plus' ? 'code' : info.icon, cx - 14, 350, 28, '#f4f7f8')}</g>` : '';
-  return `<g class="seat${selected}" role="button" tabindex="0" aria-label="Abrir ${esc(person.name)}, ${esc(info.label)}" data-action="select" data-agent="${person.id}">
-    <title>${esc(person.name)} · ${esc(info.label)} · clique para ver contexto</title>${hit}${laptop}
+  return `<g class="seat${selected}${overContextWarn(person) ? ' context-over' : ''}" role="button" tabindex="0" aria-label="Abrir ${esc(person.name)}, ${esc(info.label)}${overContextWarn(person) ? `, contexto acima de ${CONTEXT_WARN_K}k` : ''}" data-action="select" data-agent="${person.id}">
+    <title>${esc(person.name)} · ${esc(info.label)} · ${esc(seatRoleLine(person))}${person.finish ? ` · ${esc(person.finish.label)}` : ''} · clique para ver contexto</title>${hit}${laptop}
+    ${paperStackSvg(person, cx)}
     <rect class="seat-card" x="${cx - 99}" y="426" width="198" height="77" rx="9"/>
     <text class="seat-card-name" x="${cx}" y="450" text-anchor="middle">${esc(person.name)}</text>
-    <text class="seat-card-role" x="${cx}" y="469" text-anchor="middle">CTX ${person.hasComputer ? '~' + pct(person) + '%' : '—'} · ${person.outputs.length ? 'último output' : 'sem output'}</text>
+    <text class="seat-card-role" x="${cx}" y="469" text-anchor="middle">${esc(seatRoleLine(person))}</text>
     <circle cx="${cx - 73}" cy="487" r="5.5" fill="${info.color}"/><text class="seat-card-status" x="${cx - 60}" y="492" fill="${info.color}">${esc(info.label)}</text>
     <rect class="selection-line" x="${cx - 33}" y="415" width="66" height="4" rx="2" fill="#3881b4"/>
+    ${questionFlagSvg(person, cx)}
+    ${contextWarnSvg(person, cx)}
+    ${finishRibbonSvg(person, cx)}
     ${person.status === 'error' ? `<circle class="attention-marker" cx="${cx + 72}" cy="205" r="15"/>${glyph('alert', cx + 63, 195, 18, '#795d33')}` : ''}
     </g>`;
 }
@@ -393,8 +669,14 @@ function renderModule(mod, index) {
       ${glyph(mod.kind === 'delegation' ? 'team' : 'browser', 64, 548, 48, '#f7f9f3')}
       <text class="desk-label" x="139" y="577">${title}</text>
       <text class="desk-subtitle" x="141" y="609">${subtitle}</text>
-      <text class="desk-counter" x="840" y="610" text-anchor="end">${people}/4 lugares</text>
+      <text class="desk-counter" x="840" y="610" text-anchor="end">${people}/4 lugares · ${formatUSD(deskCost(mod))} gasto</text>
     </g>`;
+}
+function deskCost(mod) {
+  return mod.seats.reduce((sum, s) => {
+    const p = typeof s === 'string' && s !== 'reserved' ? personById(s) : null;
+    return sum + (p ? costOf(p) : 0);
+  }, 0);
 }
 function leadName(mod) {
   /* A delegation table is labelled by whoever sits at seat 0 of THAT module:
@@ -445,7 +727,8 @@ function findSelected() {
   return { person, mod, team: teamById(person.teamId) || { name: 'Sem time' } };
 }
 function contextView(person) {
-  if (!person.hasComputer) return `<div class="section-heading"><h3>Contexto da sessão</h3><span class="estimated-tag">EXEMPLO</span></div><div class="context-total"><strong>—</strong><span>/ 128k tokens</span></div><div class="empty-context">Essa pessoa acabou de chegar.<br>Abra <strong>Computador</strong> e simule uma primeira tarefa para ver o notebook aparecer.</div>`;
+  if (!person.hasComputer) return `<div class="section-heading"><h3>Contexto da sessão</h3><span class="estimated-tag">EXEMPLO</span></div><div class="context-total"><strong>—</strong><span>/ ${windowOf(person)}k tokens</span></div><div class="empty-context">Essa pessoa acabou de chegar.<br>Abra <strong>Computador</strong> e simule uma primeira tarefa para ver o notebook aparecer.</div>`;
+  const win = windowOf(person);
   const parts = [
     { name: 'Conversa', value: person.context * 0.44, color: '#729bbb' },
     { name: 'Arquivos', value: person.context * 0.27, color: '#8ca997' },
@@ -454,25 +737,56 @@ function contextView(person) {
   ];
   const cumulative = parts.reduce((list, p) => { list.push((list.at(-1) || 0) + p.value); return list; }, []);
   const cells = Array.from({ length: 72 }, (_, i) => {
-    const token = ((i + 0.5) / 72) * CAPACITY;
+    const token = ((i + 0.5) / 72) * win;
     const cat = cumulative.findIndex((n) => token < n);
     return `<span ${cat >= 0 ? `style="background:${parts[cat].color}"` : ''}></span>`;
   }).join('');
+  const prices = modelOf(person).prices;
+  const usageRows = [
+    { key: 'input', label: 'Entrada (não-cacheada)', price: prices.input },
+    { key: 'output', label: 'Saída', price: prices.output },
+    { key: 'cacheRead', label: 'Leitura de cache', price: prices.cacheRead },
+    { key: 'cacheWrite', label: 'Escrita de cache', price: prices.cacheWrite }
+  ];
   return `<div class="section-heading"><h3>Janela de contexto</h3><span class="estimated-tag">SIMULADO</span></div>
-    <div class="context-total"><strong>~${formatK(person.context)}</strong><span>/ 128k tokens</span></div>
+    <div class="ctx-warning" id="ctx-warning" ${overContextWarn(person) ? '' : 'hidden'} role="alert">${icon('alert')}<span>Contexto acima de <strong>${CONTEXT_WARN_K}k</strong> — compactação recomendada.</span></div>
+    <div class="context-total"><strong id="tv-context">~${formatK(person.context)}</strong><span>/ ${win}k tokens</span></div>
     <p class="context-caption">${pct(person)}% ocupado · espaço para a próxima ideia</p>
-    <div class="context-bar" role="meter" aria-label="Ocupação simulada do contexto" aria-valuemin="0" aria-valuemax="128" aria-valuenow="${person.context}">${parts.map((p) => `<span style="width:${(p.value / CAPACITY) * 100}%;background:${p.color}" title="${p.name}"></span>`).join('')}</div>
-    <div class="context-scale"><span>0</span><span>128k</span></div>
+    <div class="context-bar" role="meter" aria-label="Ocupação simulada do contexto" aria-valuemin="0" aria-valuemax="${win}" aria-valuenow="${Math.round(person.context)}">${parts.map((p) => `<span style="width:${(p.value / win) * 100}%;background:${p.color}" title="${p.name}"></span>`).join('')}</div>
+    <div class="context-scale"><span>0</span><span>${win}k</span></div>
     <div class="context-legend">${parts.map((p) => `<div class="context-legend-row"><i style="background:${p.color}"></i><span>${p.name}</span><strong>~${formatK(p.value)}</strong></div>`).join('')}</div>
     <div class="context-map" aria-hidden="true">${cells}</div><div class="token-map-caption">Um mapa visual do espaço ocupado.</div>
-    <div class="context-message">${icon('check')}<span>Ocupação de contexto, não custo nem progresso. Os números desta demo são fictícios.</span></div>`;
+    <div class="context-message">${icon('check')}<span>Ocupação de contexto, não custo nem progresso. Os números desta demo são fictícios.</span></div>
+    <div class="inspector-rule"></div>
+    <div class="section-heading"><h3>Telemetria em tempo real</h3><span class="estimated-tag">SIMULADO</span></div>
+    <div class="telemetry-grid">
+      <div class="telemetry-cell"><small>Velocidade</small><strong id="tv-speed">${Math.round(person.tokenSpeed)} tok/s</strong></div>
+      <div class="telemetry-cell"><small>Gasto acumulado</small><strong id="tv-cost">${formatUSD(costOf(person))}</strong></div>
+      <div class="telemetry-cell"><small>Pico de contexto</small><strong>~${formatK(person.contextPeak)}</strong></div>
+      <div class="telemetry-cell"><small>Último turno</small><strong>${person.finish ? esc(person.finish.label) : '—'}</strong></div>
+    </div>
+    <p class="simulation-label">Atualizado a cada segundo. ${PRICE_UNIT} · tabela simulada.</p>
+    <div class="cost-table">${usageRows.map((r) => `<div class="cost-row"><span>${r.label}</span><code>${(person.usage[r.key] || 0).toLocaleString('pt-BR')} × US$ ${r.price.toFixed(3)}</code><strong>${formatUSD(((person.usage[r.key] || 0) * r.price) / 1e6)}</strong></div>`).join('')}</div>
+    <div class="model-row"><label for="model-select">Modelo</label>
+      <select id="model-select" aria-label="Modelo da pessoa">${MODEL_IDS.map((id) => `<option value="${id}" ${person.model === id ? 'selected' : ''}>${MODELS[id].label}</option>`).join('')}</select></div>
+    <p class="inspector-note">Trocar de modelo recalcula a janela e o preço. Sem preço conhecido, o custo seria "indisponível" — nunca zero.</p>`;
 }
 function computerView(person) {
   const logs = person.outputs.slice(-6).reverse();
+  const queued = person.taskQueue.filter((t) => t.status === 'queued');
   return `<div class="section-heading"><h3>${person.hasComputer ? 'O que está acontecendo' : 'A primeira tarefa começa aqui.'}</h3><span class="estimated-tag">DEMO</span></div>
     <textarea id="demo-task" class="task-textarea" maxlength="300" placeholder="Ex.: criar a tela inicial do projeto…" aria-label="Tarefa de demonstração">${esc(person.task)}</textarea>
     <button class="button button-primary button-full" data-action="simulate-task">${icon('play')}Enviar tarefa</button>
     <p class="simulation-label">Nada é enviado. Apenas muda a cena e o balão de output.</p>
+    <div class="inspector-rule"></div>
+    <div class="section-heading"><h3>Pilha de papéis</h3><span class="estimated-tag">${queued.length} na fila</span></div>
+    <p class="simulation-label" style="margin:0 0 8px">Mais uma tarefa entra na fila como um papel na mesa. Enquanto não for submetida, pode ser editada ou submetida já.</p>
+    <textarea id="paper-task" class="task-textarea" maxlength="300" placeholder="Escreva mais uma tarefa para a pilha…" aria-label="Nova tarefa para a pilha de papéis"></textarea>
+    <div class="queue-actions">
+      <button class="button button-light" data-action="queue-task">${icon('file')}Colocar na mesa</button>
+      <button class="button button-violet" data-action="queue-task-now">${icon('play')}Submeter agora</button>
+      <button class="button button-quiet" data-action="open-papers" data-agent="${person.id}">Abrir pilha (${person.taskQueue.length})</button>
+    </div>
     <div class="inspector-rule"></div>
     <div class="section-heading"><h3>Outputs recentes</h3><span class="estimated-tag">${person.outputs.length} itens</span></div>
     ${person.hasComputer && logs.length ? `<ol class="activity">${logs.map((o) => `<li>${icon(o.kind === 'file' ? 'file' : o.kind === 'tool' ? 'code' : o.kind === 'test' ? 'flask' : o.kind === 'message' ? 'hand' : 'check')}<div><strong>${esc(o.text)}</strong><small>${esc(o.kind)} · apareceu no balão por 1s</small></div></li>`).join('')}</ol>`
@@ -481,6 +795,29 @@ function computerView(person) {
     <div class="section-heading"><h3>Estado visual</h3><span class="estimated-tag">SIMULADO</span></div>
     <div class="simulation-controls">${Object.entries(STATUS).map(([key, s]) => `<button data-action="set-status" data-status="${key}" class="${person.status === key ? 'active' : ''}" aria-pressed="${person.status === key}">${icon(s.icon)}${s.label}</button>`).join('')}</div>
     <p class="simulation-label">O estado muda rótulo, ícone e expressão. Nenhum evento real do DSH existe aqui.</p>`;
+}
+function actionsListHtml(person) {
+  const actions = person.actions.slice(-16).reverse();
+  if (!actions.length) return `<div class="empty-context">Sem ações registadas ainda.</div>`;
+  return `<ol class="activity live-actions">${actions.map((a) => `<li class="feed-kind-${esc(a.kind)}">${icon(feedIcon(a.kind))}<div><strong>${esc(a.text)}</strong><small data-feed-time="${a.at}">${ago(a.at)}</small></div></li>`).join('')}</ol>`;
+}
+function activityView(person) {
+  const pending = pendingQuestionOf(person);
+  const answered = person.questions.filter((q) => q.status !== 'pending');
+  return `<div class="section-heading"><h3>Ações em tempo real</h3><span class="estimated-tag">LIVE</span></div>
+    <p class="simulation-label" style="margin:0 0 8px">Cada evento desta pessoa fica registado aqui e no feed global, mesmo depois de ela sair da sala.</p>
+    <div id="activity-list">${actionsListHtml(person)}</div>
+    <div class="inspector-rule"></div>
+    <div class="section-heading"><h3>Fim de turno</h3><span class="estimated-tag">${person.finish ? 'turn/end' : '—'}</span></div>
+    ${person.finish
+      ? `<div class="finish-card" data-finish="${esc(person.finish.kind)}">${icon(person.finish.icon)}<div><strong>${esc(person.finish.label)}</strong><small>${esc(person.finish.note)} · ${ago(person.finish.at)}</small></div></div>`
+      : `<div class="empty-context">Turno em curso. O fim só aparece com um sinal <code>turn/end</code> — silêncio nunca conta como feito.</div>`}
+    <div class="inspector-rule"></div>
+    <div class="section-heading"><h3>Perguntas</h3><span class="estimated-tag">${person.questions.length} registadas</span></div>
+    ${pending ? `<div class="question-card pending">${icon('hand')}<div><strong>${esc(pending.question)}</strong><small>à espera · ${ago(pending.askedAt)}</small></div>
+      <button class="button button-primary" data-action="open-question" data-agent="${person.id}">Responder</button></div>` : ''}
+    ${answered.length ? `<ol class="activity">${answered.slice(-5).reverse().map((q) => `<li>${icon(q.status === 'answered' ? 'check' : 'close')}<div><strong>${esc(q.question)}</strong><small>${q.status === 'answered' ? `resposta: ${esc((q.answer && (q.answer.custom || (q.answer.selected || []).join(', '))) || '—')}` : 'cancelada'} · ${ago(q.resolvedAt || q.askedAt)}</small></div></li>`).join('')}</ol>` : ''}
+    ${!pending && !answered.length ? `<div class="empty-context">Sem perguntas. O sinal ❓ aparece sobre a cabeça quando esta pessoa pede uma decisão.</div>` : ''}`;
 }
 function expressionsView(person) {
   const current = expressionOf(person);
@@ -508,10 +845,11 @@ function renderInspector() {
     <div class="inspector-tabs" role="tablist">
       <button role="tab" aria-selected="${state.tab === 'context'}" class="${state.tab === 'context' ? 'active' : ''}" data-action="tab" data-tab="context">${icon('context')}Contexto</button>
       <button role="tab" aria-selected="${state.tab === 'computer'}" class="${state.tab === 'computer' ? 'active' : ''}" data-action="tab" data-tab="computer">${icon('code')}Computador</button>
+      <button role="tab" aria-selected="${state.tab === 'activity'}" class="${state.tab === 'activity' ? 'active' : ''}" data-action="tab" data-tab="activity">${icon('play')}Atividade</button>
       <button role="tab" aria-selected="${state.tab === 'expressions'}" class="${state.tab === 'expressions' ? 'active' : ''}" data-action="tab" data-tab="expressions">${icon('brush')}Expressões</button>
     </div>
     <div class="inspector-content" role="tabpanel">
-      ${state.tab === 'context' ? contextView(person) : state.tab === 'computer' ? computerView(person) : expressionsView(person)}
+      ${state.tab === 'context' ? contextView(person) : state.tab === 'computer' ? computerView(person) : state.tab === 'activity' ? activityView(person) : expressionsView(person)}
       <div class="inspector-actions">
         <div class="inspector-rule"></div>
         <div class="section-heading"><h3>Simulador de eventos DSH</h3><span class="estimated-tag">DEMO</span></div>
@@ -519,17 +857,23 @@ function renderInspector() {
         <div class="simulation-controls">
           <button data-action="sim-event" data-event="subagent-start">${icon('team')}subagent/start</button>
           <button data-action="sim-event" data-event="subagent-end">${icon('return')}subagent/end</button>
-          <button data-action="sim-event" data-event="turn-end">${icon('check')}turn/end</button>
-          <button data-action="sim-event" data-event="question">${icon('hand')}pergunta</button>
+          <button data-action="sim-event" data-event="turn-end">${icon('check')}turn/end · completed</button>
+          <button data-action="sim-event" data-event="turn-error">${icon('alert')}turn/end · error</button>
+          <button data-action="sim-event" data-event="turn-abort">${icon('close')}turn/end · aborted</button>
+          <button data-action="sim-event" data-event="question">${icon('hand')}user-questions</button>
+          <button data-action="sim-event" data-event="context-pressure">${icon('context')}contextPressure &gt; 200k</button>
+          <button data-action="sim-event" data-event="tool-call">${icon('code')}tool/call</button>
         </div>
+        <button class="button button-danger button-full" data-action="eliminate-agent" data-agent="${person.id}">${icon('close')}Eliminar pessoa (guarda o histórico)</button>
       </div>
-      <p class="inspector-note">Só frontend. Sem agentes, ferramentas ou custos reais.</p>
+      <p class="inspector-note">Só frontend. Custos, tokens e velocidade são estimativas simuladas — sem agentes nem chamadas reais.</p>
     </div>`;
 }
 
 function render({ fit = false } = {}) {
   renderWorld();
   renderInspector();
+  renderFeed();
   if (fit) requestAnimationFrame(fitScene);
 }
 
@@ -637,6 +981,8 @@ function returnTeam(teamId) {
     const home = moduleById(lead.homeModuleId);
     if (home) home.seats[lead.homeSeat] = lead.id;
   }
+  /* eliminated children keep their history accessible in the Arquivo */
+  for (const child of children) archivePerson(child, 'subagent/end · equipe recolhida');
   state.people = state.people.filter((p) => !children.includes(p));
   state.modules = state.modules.filter((m) => !delegationModules.includes(m));
   for (const m of state.modules) m.seats = m.seats.map((s) => (children.some((c) => c.id === s) ? null : s));
@@ -669,6 +1015,215 @@ function animateTransfer(id, before) {
       { duration: 900, easing: 'cubic-bezier(.3,.05,.25,1)' }
     );
   });
+}
+
+/* ---------- turn endings: explicit signals only (turn/end reason.kind) ---------- */
+function finishTurn(person, reasonKey = 'completed') {
+  const fin = FINISH_REASONS[reasonKey] || FINISH_REASONS.completed;
+  person.finish = { ...fin, at: Date.now() };
+  person.status = fin.kind === 'completed' ? 'done'
+    : (fin.kind === 'error' || fin.kind === 'blocked' || fin.kind === 'max-tokens') ? 'error' : 'waiting';
+  person.expressionPreset = null;
+  const activePaper = person.taskQueue.find((t) => t.status === 'active');
+  if (activePaper) activePaper.status = fin.kind === 'completed' ? 'done' : 'failed';
+  emitOutput(person, `turn/end · ${fin.kind}`, fin.kind === 'completed' ? 'result' : 'message');
+  render();
+  toast(`${person.name}: ${fin.label.toLowerCase()} — ${fin.note}.`);
+}
+
+/* ---------- questions: flag on the person → bottom sheet with options + input ---------- */
+function askQuestion(person) {
+  const existing = pendingQuestionOf(person);
+  if (existing) { openQuestionSheet(person.id); return; }
+  const tpl = pick(QUESTION_POOL);
+  const q = {
+    id: uid('question'), header: tpl.header || 'PERGUNTA', question: tpl.question, detail: tpl.detail || '',
+    options: (tpl.options || []).map((o) => ({ ...o })), multiSelect: !!tpl.multiSelect,
+    askedAt: Date.now(), status: 'pending', answer: null, resolvedAt: null
+  };
+  person.questions.push(q);
+  person.status = 'waiting';
+  person.expressionPreset = null;
+  logAction(person, `pergunta: ${q.question}`, 'question');
+  render();
+  toast(`${person.name} fez uma pergunta. Clique no sinal ❓ para responder.`);
+}
+function openQuestionSheet(personId) {
+  const person = personById(personId);
+  const q = person && pendingQuestionOf(person);
+  if (!person || !q) return;
+  questionTarget = { personId: person.id, questionId: q.id };
+  $('#question-title').textContent = q.question;
+  $('#question-detail').textContent = q.detail || '';
+  $('#question-header').textContent = q.header || 'PERGUNTA';
+  $('#question-options').innerHTML = `<legend>${q.multiSelect ? 'Escolha uma ou mais opções' : 'Escolha uma opção'}</legend>` +
+    q.options.map((o, i) => `<label class="question-option"><input type="${q.multiSelect ? 'checkbox' : 'radio'}" name="question-option" value="${esc(o.label)}" ${i === 0 && !q.multiSelect ? '' : ''}><span><strong>${esc(o.label)}</strong>${o.description ? `<small>${esc(o.description)}</small>` : ''}</span></label>`).join('');
+  $('#question-custom').value = '';
+  const asker = $('#question-asker');
+  asker.innerHTML = `<img src="${esc(avatarSrc(person))}" alt="Avatar de ${esc(person.name)}">
+    <div><strong>${esc(person.name)}</strong><small>perguntou ${ago(q.askedAt)} · aguarda resposta</small></div>`;
+  $('#question-overlay').hidden = false;
+  $('#question-sheet').hidden = false;
+  $('#question-sheet').classList.add('sheet-in');
+  const first = $('#question-options input');
+  if (first) first.focus();
+}
+function closeQuestionSheet() {
+  questionTarget = null;
+  $('#question-overlay').hidden = true;
+  $('#question-sheet').hidden = true;
+  $('#question-sheet').classList.remove('sheet-in');
+}
+function resolveQuestion(status) {
+  const person = personById(questionTarget && questionTarget.personId);
+  const q = person && person.questions.find((x) => x.id === questionTarget.questionId);
+  if (!person || !q) { closeQuestionSheet(); return; }
+  const selected = $$('#question-options input:checked').map((i) => i.value);
+  const custom = $('#question-custom').value.trim();
+  if (status === 'answered' && !selected.length && !custom) {
+    toast('Escolha uma opção ou escreva uma resposta antes de responder.');
+    return;
+  }
+  q.status = status;
+  q.answer = { selected, custom };
+  q.resolvedAt = Date.now();
+  person.status = status === 'answered' ? 'working' : 'available';
+  person.expressionPreset = null;
+  if (status === 'answered') {
+    const answerText = custom || selected.join(', ');
+    logAction(person, `resposta: ${answerText}`, 'result');
+    showBubble(person, `resposta: ${answerText}`, 'message');
+    toast(`Resposta entregue a ${person.name}.`);
+  } else {
+    logAction(person, 'pergunta cancelada pelo utilizador', 'warn');
+    toast(`Pergunta de ${person.name} cancelada.`);
+  }
+  closeQuestionSheet();
+  render();
+}
+
+/* ---------- paper stack: queued prompts on the desk, editable until submitted ---------- */
+function addPaper(person, text, submitNow = false) {
+  const paper = { id: uid('paper'), text, status: 'queued', createdAt: Date.now() };
+  person.taskQueue.push(paper);
+  logAction(person, `papel na fila: ${text}`, 'paper');
+  if (submitNow) submitPaper(person, paper.id);
+  else { render(); toast(`Papel de ${person.name} colocado na mesa. ${person.taskQueue.filter((t) => t.status === 'queued').length} na fila.`); }
+}
+function submitPaper(person, paperId) {
+  const paper = person.taskQueue.find((t) => t.id === paperId);
+  if (!paper || paper.status === 'active') return;
+  for (const other of person.taskQueue) if (other.status === 'active') other.status = 'done';
+  paper.status = 'active';
+  submitTaskNow(person, paper.text, paper);
+}
+function submitTaskNow(person, text, paper = null) {
+  person.task = text;
+  person.hasComputer = true;
+  person.status = 'working';
+  person.finish = null; /* a new task retires the previous finish badge */
+  person.expressionPreset = null;
+  if (!person.context) person.context = rand(10, 22);
+  if (paper) paper.status = 'active';
+  else {
+    for (const other of person.taskQueue) if (other.status === 'active') other.status = 'done';
+    const fresh = { id: uid('paper'), text, status: 'active', createdAt: Date.now() };
+    person.taskQueue.push(fresh);
+  }
+  emitOutput(person, `tarefa: ${text}`, 'message');
+  render();
+  const laptop = $(`[data-character-id="${person.id}"]`)?.closest('.desk-module')?.querySelectorAll('.character-laptop');
+  laptop?.forEach((n) => n.classList.add('laptop-arriving'));
+  toast(`Notebook pronto. A tarefa de ${person.name} é só simulação.`);
+}
+function removePaper(person, paperId) {
+  const paper = person.taskQueue.find((t) => t.id === paperId);
+  if (!paper || paper.status !== 'queued') return;
+  person.taskQueue = person.taskQueue.filter((t) => t.id !== paperId);
+  logAction(person, `papel removido da fila: ${paper.text}`, 'paper');
+  render();
+}
+function openPapers(personId) {
+  const person = personById(personId);
+  if (!person) return;
+  papersTarget = { personId: person.id };
+  renderPapersDialog();
+  $('#papers-dialog').showModal();
+}
+function renderPapersDialog() {
+  const person = personById(papersTarget && papersTarget.personId);
+  if (!person) return;
+  $('#papers-title').textContent = `A pilha de papéis de ${person.name}`;
+  $('#papers-subtitle').textContent = 'Cada papel é um prompt na fila. Enquanto não for submetido, pode ser editado ou submetido já.';
+  const labels = { queued: 'na fila', active: 'em execução', done: 'concluída', failed: 'falhou' };
+  $('#papers-list').innerHTML = person.taskQueue.length
+    ? [...person.taskQueue].reverse().map((t) => `
+      <li class="paper-row paper-${t.status}" data-paper="${t.id}">
+        <div class="paper-row-head"><span class="paper-chip">${labels[t.status] || t.status}</span><small>criado ${ago(t.createdAt)}</small></div>
+        <textarea class="paper-text" data-paper-edit="${t.id}" maxlength="300" ${t.status === 'queued' ? '' : 'readonly'} aria-label="Prompt do papel">${esc(t.text)}</textarea>
+        <div class="paper-row-actions">
+          ${t.status === 'queued' ? `<button class="button button-primary" data-action="submit-paper" data-paper="${t.id}">${icon('play')}Submeter agora</button>
+            <button class="button button-quiet" data-action="remove-paper" data-paper="${t.id}">${icon('close')}Remover</button>` : ''}
+          ${t.status === 'active' ? `<span class="paper-note">este papel está a ser executado agora</span>` : ''}
+          ${t.status === 'done' ? `<span class="paper-note">tarefa concluída · histórico preservado</span>` : ''}
+          ${t.status === 'failed' ? `<span class="paper-note">turno terminou sem sucesso</span>` : ''}
+        </div>
+      </li>`).join('')
+    : `<li class="empty-context">A pilha está vazia. Use "Colocar na mesa" para deixar aqui a próxima tarefa.</li>`;
+}
+
+/* ---------- eliminated agents: the history stays accessible ---------- */
+function archivePerson(person, reason) {
+  logAction(person, `eliminado — ${reason}`, 'warn');
+  state.archived.unshift({
+    id: person.id, name: person.name, avatarId: person.avatarId, avatarKind: person.avatarKind,
+    teamName: (teamById(person.teamId) || { name: 'Sem time' }).name,
+    reason, eliminatedAt: Date.now(), startedAt: person.startedAt,
+    status: person.status, finish: person.finish ? { ...person.finish } : null,
+    model: person.model, usage: { ...person.usage }, cost: costOf(person),
+    context: person.context, contextPeak: person.contextPeak, tokenSpeed: person.tokenSpeed,
+    actions: person.actions.map((a) => ({ ...a })),
+    outputs: person.outputs.map((o) => ({ ...o })),
+    papers: person.taskQueue.map((t) => ({ ...t })),
+    questions: person.questions.map((q) => ({ ...q }))
+  });
+}
+function eliminatePerson(person, reason = 'eliminado pelo utilizador (demo)') {
+  archivePerson(person, reason);
+  for (const mod of state.modules) mod.seats = mod.seats.map((s) => (s === person.id ? null : s));
+  state.people = state.people.filter((p) => p.id !== person.id);
+  if (state.selected === person.id) state.selected = null;
+  render({ fit: true });
+  toast(`${person.name} foi eliminado. O histórico fica no Arquivo.`);
+}
+function renderArchive() {
+  const list = $('#archive-list');
+  if (!list) return;
+  list.innerHTML = state.archived.length
+    ? state.archived.map((a, i) => `
+      <article class="archive-card" data-archive-card="${i}">
+        <header class="archive-head">
+          <img class="archive-avatar" src="${esc(avatarSrc(a))}" alt="Avatar de ${esc(a.name)}">
+          <div class="archive-who"><strong>${esc(a.name)}</strong><small>${esc(a.teamName)} · eliminado ${ago(a.eliminatedAt)} · ${esc(a.reason)}</small></div>
+          <button class="button button-light" data-action="archive-detail" data-archive="${i}" aria-expanded="false">Ver histórico</button>
+        </header>
+        <div class="archive-stats">
+          <div><small>Gasto total</small><strong>${formatUSD(a.cost)}</strong></div>
+          <div><small>Tokens (saída)</small><strong>${(a.usage.output || 0).toLocaleString('pt-BR')}</strong></div>
+          <div><small>Pico de contexto</small><strong>~${formatK(a.contextPeak)}</strong></div>
+          <div><small>Ações</small><strong>${a.actions.length}</strong></div>
+          <div><small>Papéis</small><strong>${a.papers.length}</strong></div>
+          <div><small>Modelo</small><strong>${esc(a.model)}</strong></div>
+        </div>
+        <div class="archive-detail" data-archive-detail="${i}" hidden>
+          <h4>Últimas ações</h4>
+          <ol class="activity">${a.actions.slice(-12).reverse().map((act) => `<li>${icon(feedIcon(act.kind))}<div><strong>${esc(act.text)}</strong><small>${ago(act.at)}</small></div></li>`).join('') || '<li>Sem ações.</li>'}</ol>
+          <h4>Papéis (prompts)</h4>
+          <ul class="archive-papers">${a.papers.map((t) => `<li><span class="paper-chip">${esc(t.status)}</span><span>${esc(t.text)}</span></li>`).join('') || '<li>Sem papéis.</li>'}</ul>
+          ${a.finish ? `<h4>Fim de turno</h4><p class="simulation-label">${esc(a.finish.label)} · ${esc(a.finish.note)} · ${ago(a.finish.at)}</p>` : ''}
+        </div>
+      </article>`).join('')
+    : `<div class="empty-context">Ninguém foi eliminado ainda. Quando alguém sair da sala, o histórico completo fica guardado aqui.</div>`;
 }
 
 /* ---------- events ---------- */
@@ -715,12 +1270,29 @@ function handleAction(el) {
       } else if (d.event === 'subagent-end') {
         returnTeam(p.teamId);
       } else if (d.event === 'turn-end') {
-        p.status = 'done';
-        emitOutput(p, 'turn/end · completed', 'result');
-        render();
+        finishTurn(p, 'completed');
+      } else if (d.event === 'turn-error') {
+        finishTurn(p, 'error');
+      } else if (d.event === 'turn-abort') {
+        finishTurn(p, 'aborted');
       } else if (d.event === 'question') {
-        p.status = 'waiting';
-        emitOutput(p, 'pergunta: qual é o próximo passo?', 'message');
+        askQuestion(p);
+      } else if (d.event === 'context-pressure') {
+        p.context = Math.max(p.context, 214.6);
+        p.contextPeak = Math.max(p.contextPeak, p.context);
+        if (!p.ctxWarned) {
+          p.ctxWarned = true;
+          logAction(p, `contexto acima de ${CONTEXT_WARN_K}k — compactação recomendada`, 'warn');
+        }
+        p.hasComputer = true;
+        render();
+        toast(`${p.name} está com o contexto acima de ${CONTEXT_WARN_K}k — veja o aviso.`);
+      } else if (d.event === 'tool-call') {
+        p.status = 'tool';
+        p.hasComputer = true;
+        p.expressionPreset = null;
+        p.tokenSpeed = rand(18, 46);
+        emitOutput(p, 'executou a ferramenta de build', 'tool');
         render();
       }
       break;
@@ -728,16 +1300,68 @@ function handleAction(el) {
     case 'simulate-task': {
       if (!found) break;
       const text = $('#demo-task').value.trim() || pick(DATA.tasks);
-      const person = found.person;
-      person.task = text;
-      person.hasComputer = true;
-      person.status = 'working';
-      if (!person.context) person.context = rand(10, 22);
-      emitOutput(person, `tarefa: ${text}`, 'message');
-      render();
-      const laptop = $(`[data-character-id="${person.id}"]`)?.closest('.desk-module')?.querySelectorAll('.character-laptop');
-      laptop?.forEach((n) => n.classList.add('laptop-arriving'));
-      toast(`Notebook pronto. A tarefa de ${person.name} é só simulação.`);
+      submitTaskNow(found.person, text);
+      break;
+    }
+    case 'queue-task': {
+      if (!found) break;
+      const text = $('#paper-task').value.trim() || pick(DATA.tasks);
+      addPaper(found.person, text);
+      break;
+    }
+    case 'queue-task-now': {
+      if (!found) break;
+      const text = $('#paper-task').value.trim() || pick(DATA.tasks);
+      addPaper(found.person, text, true);
+      break;
+    }
+    case 'open-papers': openPapers(d.agent || (found && found.person.id)); break;
+    case 'submit-paper': {
+      const person = personById(papersTarget && papersTarget.personId);
+      if (person) { submitPaper(person, d.paper); renderPapersDialog(); }
+      break;
+    }
+    case 'remove-paper': {
+      const person = personById(papersTarget && papersTarget.personId);
+      if (person) { removePaper(person, d.paper); renderPapersDialog(); }
+      break;
+    }
+    case 'paper-queue': {
+      const person = personById(papersTarget && papersTarget.personId);
+      const text = $('#paper-input').value.trim();
+      if (person && text) { addPaper(person, text); $('#paper-input').value = ''; renderPapersDialog(); }
+      break;
+    }
+    case 'paper-submit-now': {
+      const person = personById(papersTarget && papersTarget.personId);
+      const text = $('#paper-input').value.trim();
+      if (person && text) { addPaper(person, text, true); $('#paper-input').value = ''; renderPapersDialog(); }
+      break;
+    }
+    case 'open-question': openQuestionSheet(d.agent || (found && found.person.id)); break;
+    case 'close-question-sheet': closeQuestionSheet(); break;
+    case 'cancel-question': resolveQuestion('cancelled'); break;
+    case 'toggle-feed': {
+      state.feedOpen = !state.feedOpen;
+      $('#live-feed').classList.toggle('collapsed', !state.feedOpen);
+      break;
+    }
+    case 'open-archive': renderArchive(); $('#archive-dialog').showModal(); break;
+    case 'archive-detail': {
+      const detail = $(`[data-archive-detail="${d.archive}"]`);
+      const btn = $(`[data-action="archive-detail"][data-archive="${d.archive}"]`);
+      if (detail) {
+        detail.hidden = !detail.hidden;
+        if (btn) {
+          btn.setAttribute('aria-expanded', String(!detail.hidden));
+          btn.textContent = detail.hidden ? 'Ver histórico' : 'Ocultar histórico';
+        }
+      }
+      break;
+    }
+    case 'eliminate-agent': {
+      const person = personById(d.agent) || (found && found.person);
+      if (person) eliminatePerson(person);
       break;
     }
   }
@@ -749,9 +1373,28 @@ document.addEventListener('click', (e) => {
   if (close) close.closest('dialog').close();
 });
 document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && questionTarget) { closeQuestionSheet(); return; }
   const btn = e.target.closest('g[role="button"]');
   if (btn && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); handleAction(btn); }
-  if (e.key === 'Escape' && state.selected && !document.querySelector('dialog[open]')) { state.selected = null; render({ fit: true }); }
+  if (e.key === 'Escape' && state.selected && !document.querySelector('dialog[open]') && !questionTarget) { state.selected = null; render({ fit: true }); }
+});
+document.addEventListener('change', (e) => {
+  if (e.target.id !== 'model-select') return;
+  const found = findSelected();
+  if (!found) return;
+  const before = windowOf(found.person);
+  found.person.model = e.target.value;
+  const after = windowOf(found.person);
+  logAction(found.person, `modelo alterado para ${modelOf(found.person).label} (janela ${before}k → ${after}k)`, 'cost');
+  render();
+  toast(`Modelo de ${found.person.name}: ${modelOf(found.person).label}.`);
+});
+document.addEventListener('input', (e) => {
+  const edit = e.target.closest('[data-paper-edit]');
+  if (!edit) return;
+  const person = personById(papersTarget && papersTarget.personId);
+  const paper = person && person.taskQueue.find((t) => t.id === edit.dataset.paperEdit);
+  if (paper && paper.status === 'queued') paper.text = edit.value;
 });
 for (const dialog of $$('dialog')) {
   dialog.addEventListener('click', (e) => {
@@ -801,6 +1444,17 @@ $('#delegate-form').addEventListener('submit', (e) => {
   const count = Math.min(24, Math.max(1, Math.trunc(Number($('#subagent-count').value) || 3)));
   $('#delegate-dialog').close();
   delegate(delegateTarget.personId, count);
+});
+$('#question-form').addEventListener('submit', (e) => {
+  e.preventDefault();
+  resolveQuestion('answered');
+});
+$('#question-overlay').addEventListener('click', closeQuestionSheet);
+$('#papers-dialog').addEventListener('close', () => { papersTarget = null; });
+$('#archive-button').addEventListener('click', () => { renderArchive(); $('#archive-dialog').showModal(); });
+$('#pending-questions').addEventListener('click', () => {
+  const person = state.people.find((p) => p.questions.some((q) => q.status === 'pending'));
+  if (person) openQuestionSheet(person.id);
 });
 $('#zoom-in').addEventListener('click', () => zoomAt(state.zoom * 1.18));
 $('#zoom-out').addEventListener('click', () => zoomAt(state.zoom / 1.18));
@@ -853,3 +1507,4 @@ window.addEventListener('resize', () => { clearTimeout(resizeTimer); resizeTimer
 seed();
 render({ fit: true });
 scheduleActivity();
+telemetryTimer = setInterval(telemetryTick, 1000);

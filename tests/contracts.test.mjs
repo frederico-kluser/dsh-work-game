@@ -295,6 +295,8 @@ test('index.html tem os ids essenciais da UI (viewport, world, inspector, diálo
   const idsEssenciais = [
     'viewport', 'world', 'inspector',
     'workspace-dialog', 'recruit-dialog', 'delegate-dialog',
+    'papers-dialog', 'archive-dialog', 'question-sheet', 'question-overlay', 'live-feed',
+    'pending-questions', 'archive-button',
     'toast', 'zoom-in', 'zoom-out', 'fit-scene', 'reset-demo'
   ];
   const emFalta = idsEssenciais.filter((id) => !new RegExp(`\\bid="${id}"`).test(html));
