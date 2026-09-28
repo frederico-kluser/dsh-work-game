@@ -1,14 +1,14 @@
 ---
-name: dsh-work-game-coala-memory-agent-skill
-description: "Memória CoALA/SQLite LOCAL do projeto dsh-work-game — episódica (decisões e eventos datados), semântica (factos do projeto e material ingerido), procedimental (como se faz aqui) e working memory orçamentada, com busca híbrida FTS5+vetor (RRF), proveniência e supersessão. Use SEMPRE durante o desenvolvimento em dsh-work-game — no início de cada tarefa para recuperar contexto, quando precisares de 'o que sabemos sobre…', 'porque decidimos…', 'como se faz isto neste projeto', 'o que diz o material sobre…', e no fim para registar decisões, factos e procedimentos duráveis. Não usar para segredos nem para estado volátil da tarefa."
+name: vibe-coding-game-agent-skill
+description: "Memória CoALA/SQLite LOCAL do projeto vibe-coding-game — episódica (decisões e eventos datados), semântica (factos do projeto e material ingerido), procedimental (como se faz aqui) e working memory orçamentada, com busca híbrida FTS5+vetor (RRF), proveniência e supersessão. Use SEMPRE durante o desenvolvimento em vibe-coding-game — no início de cada tarefa para recuperar contexto, quando precisares de 'o que sabemos sobre…', 'porque decidimos…', 'como se faz isto neste projeto', 'o que diz o material sobre…', e no fim para registar decisões, factos e procedimentos duráveis. Não usar para segredos nem para estado volátil da tarefa."
 metadata:
   type: coala-project-memory
-  project: dsh-work-game
+  project: vibe-coding-game
   engine: "coala.py v2.0.0 (Python 3 stdlib)"
   managed-by: coala-agent-skill
 ---
 
-# Memória CoALA local — dsh-work-game
+# Memória CoALA local — vibe-coding-game
 
 A memória de longo prazo **deste projeto** (e só dele) vive nesta pasta: `memory/coala.sqlite`
 (SQLite em WAL; pasta `0700`, ficheiro `0600`). Não existe memória global — cada projeto instalado
@@ -16,7 +16,7 @@ tem a sua. O motor é `scripts/coala.py` (cópia vendorizada, Python 3 stdlib, s
 sozinho esta base: não precisas de `--db`.
 
 ```bash
-COALA="python3 .agents/dsh-work-game-coala-memory-agent-skill/scripts/coala.py"   # a partir da raiz do projeto
+COALA="python3 .agents/vibe-coding-game-agent-skill/scripts/coala.py"   # a partir da raiz do projeto
 $COALA where                                          # confirma a base em uso
 ```
 

@@ -1,22 +1,22 @@
 {
   "coala_manifest": 1,
-  "project": "dsh-work-game",
-  "skill": "dsh-work-game-coala-memory-agent-skill",
+  "project": "vibe-coding-game",
+  "skill": "vibe-coding-game-agent-skill",
   "db": "memory/coala.sqlite",
   "engine": {
     "file": "scripts/coala.py",
     "version": "2.0.0",
-    "sha256": "1bd03ed27ff09ea0cfa9f9fd9a8e10197089cce332b62ae96fd615998ec1dd8a"
+    "sha256": "bafbbedd6c6ede9a0c4c3a78fbf1a2b627076504e31af7e47292192d4fbdfa0d"
   },
   "schema_version": 2,
   "git_policy": "ignore",
   "installer": "coala-agent-skill/scripts/coala-install.py",
   "installed_at": "2026-09-27T17:58:19+00:00",
-  "updated_at": "2026-09-27T19:12:25+00:00",
+  "updated_at": "2026-09-28T07:58:24+00:00",
   "managed": {
-    "SKILL.md": "6d29eae6945c8829a083b8d12a4ac0c090e65bd8001879adf2450c244f64c8f1",
+    "SKILL.md": "5580ba0ae8a08cd482b6023a383ee7ef9aff8de76ad292ba0499104b6b527df5",
     "memory/.gitignore": "5941079484623004d0493eda784610b14f22d89d4a7473df50f514a8a3b044d4",
     "references/schema.md": "468411fae3448fbb030e704e87d6d22405404bcc222daf623628c2550eac2d42",
-    "scripts/coala.py": "1bd03ed27ff09ea0cfa9f9fd9a8e10197089cce332b62ae96fd615998ec1dd8a"
+    "scripts/coala.py": "bafbbedd6c6ede9a0c4c3a78fbf1a2b627076504e31af7e47292192d4fbdfa0d"
   }
 }

@@ -57,7 +57,13 @@ DB_ENV = "COALA_DB"
 W_FTS_ENV = "COALA_RRF_W_FTS"
 W_VEC_ENV = "COALA_RRF_W_VEC"
 
-SKILL_SUFFIX = "-coala-memory-agent-skill"   # convenção: <projeto>-coala-memory-agent-skill
+SKILL_SUFFIX = "-agent-skill"                    # convenção: <projeto>-agent-skill (minúsculas)
+LEGACY_SKILL_SUFFIXES = ("-coala-memory-agent-skill", "-memory-agent-skill")  # nomes antigos: migram
+
+
+def is_memory_skill(name: str) -> bool:
+    """Reconhece uma skill de memória local (novo nome ou legado)."""
+    return name.endswith(SKILL_SUFFIX) or any(name.endswith(s) for s in LEGACY_SKILL_SUFFIXES)
 MANIFEST_NAME = "coala.json"                 # manifesto da instalação local
 INGEST_CONFIG_NAME = "ingest.json"           # fontes de material do projeto
 DB_SUBPATH = ("memory", "coala.sqlite")
@@ -322,7 +328,7 @@ def skill_dir_of_engine(engine_file: str = None):
     """Se o motor está vendorizado em <x>-coala-memory-agent-skill/scripts/, devolve a skill."""
     here = os.path.dirname(os.path.abspath(engine_file or __file__))
     skill = os.path.dirname(here)
-    if os.path.basename(here) == "scripts" and os.path.basename(skill).endswith(SKILL_SUFFIX):
+    if os.path.basename(here) == "scripts" and is_memory_skill(os.path.basename(skill)):
         return skill
     return None
 
@@ -331,7 +337,7 @@ def skill_dir_of_db(path: str):
     """Se a base está em <x>-coala-memory-agent-skill/memory/, devolve a skill."""
     mem = os.path.dirname(os.path.abspath(path))
     skill = os.path.dirname(mem)
-    if os.path.basename(mem) == DB_SUBPATH[0] and os.path.basename(skill).endswith(SKILL_SUFFIX):
+    if os.path.basename(mem) == DB_SUBPATH[0] and is_memory_skill(os.path.basename(skill)):
         return skill
     return None
 
@@ -352,7 +358,7 @@ def find_project_skill(start: str = None):
             except OSError:
                 names = []
             found = [os.path.join(agents, n) for n in names
-                     if n.endswith(SKILL_SUFFIX)
+                     if is_memory_skill(n)
                      and os.path.isfile(os.path.join(agents, n, MANIFEST_NAME))]
             if len(found) > 1:
                 raise UsageError(
