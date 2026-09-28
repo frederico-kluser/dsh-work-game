@@ -287,7 +287,7 @@ async function corridaDsh(motor, browser, base) {
       await page.waitForSelector('#wg-filtros-menu', { timeout: 5000 });
       const r = await page.evaluate(() => ({
         interruptores: [...document.querySelectorAll('#wg-filtros-menu [role="switch"]')].map((s) => s.getAttribute('aria-checked') ?? s.getAttribute('aria-pressed') ?? ''),
-        etiquetas: [...document.querySelectorAll('#wg-filtros-menu [role="switch"]')].map((s) => s.textContent.trim().slice(0, 30)),
+        etiquetas: [...document.querySelectorAll('#wg-filtros-menu .wg-filtro-texto strong')].map((s) => s.textContent.trim().slice(0, 30)),
       }));
       assert.equal(r.interruptores.length, 4, `só ${r.interruptores.length} interruptores`);
       await captura(page, motor, 'dsh-02-filtros');
