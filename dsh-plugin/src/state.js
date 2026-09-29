@@ -372,3 +372,39 @@ export function setPrices(state, prices) {
   next.prices = prices && typeof prices === 'object' ? { ...prices } : {};
   return next;
 }
+
+/* Paragem em cascata — o plano de "Parar" de uma pessoa: o alvo e TODA a sua
+ * subárvore de subagentes, pai-primeiro (o líder para primeiro: não pode
+ * re-delegar enquanto a equipa se desmonta), depois os descendentes por nível.
+ *
+ * O DSH não faz cascata: `session.cancel()` e o `interrupt_agent` do
+ * subagent-control param APENAS o alvo — os descendentes continuam a correr
+ * ("descendants keep running", contrato de tool-subagent-control). Este plano é
+ * o que falta: quem o executa chama `cancel()` (e larga a fila pendente) a cada
+ * sessão do plano.
+ *
+ * @param {Array<{sessionId: string, parentSessionId?: string}>} catalogo —
+ *   as entradas do catálogo de sessões do DSH (`SessionSummary`)
+ * @param {string} alvo — o id da sessão a parar
+ * @returns {Array<{id: string, nivel: number}>} plano ordenado, alvo em primeiro
+ */
+export function planoDeParagem(catalogo, alvo) {
+  if (alvo == null) return [];
+  const filhos = new Map();
+  for (const entrada of Array.isArray(catalogo) ? catalogo : []) {
+    if (!entrada || entrada.sessionId == null || entrada.parentSessionId == null) continue;
+    const lista = filhos.get(entrada.parentSessionId) ?? [];
+    lista.push(entrada.sessionId);
+    filhos.set(entrada.parentSessionId, lista);
+  }
+  const plano = [{ id: alvo, nivel: 0 }];
+  const vistos = new Set([alvo]);
+  for (let i = 0; i < plano.length; i += 1) {
+    for (const filho of filhos.get(plano[i].id) ?? []) {
+      if (vistos.has(filho)) continue; /* ciclos e links repetidos: uma vez */
+      vistos.add(filho);
+      plano.push({ id: filho, nivel: plano[i].nivel + 1 });
+    }
+  }
+  return plano;
+}

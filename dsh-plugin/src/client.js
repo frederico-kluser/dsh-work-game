@@ -1055,6 +1055,36 @@ window.__ModuleLoader__.load({
       return { people, teams: estado.teams, alerts: estado.alerts, workspaces: estado.workspaces ?? null };
     }
 
+    /* Paragem em cascata — o plano de "Parar" de uma pessoa: o alvo e TODA a
+     * sua subárvore de subagentes, pai-primeiro (o líder para primeiro: não pode
+     * re-delegar enquanto a equipa se desmonta), depois os descendentes por nível.
+     * Cópia embutida de `state.js` (o bundle servido não importa ficheiros
+     * irmãos) — o teste de paridade mantém as duas iguais.
+     *
+     * O DSH não faz cascata: `session.cancel()` e o `interrupt_agent` do
+     * subagent-control param APENAS o alvo — os descendentes continuam a correr
+     * ("descendants keep running", contrato de tool-subagent-control). */
+    function planoDeParagem(catalogo, alvo) {
+      if (alvo == null) return [];
+      const filhos = new Map();
+      for (const entrada of Array.isArray(catalogo) ? catalogo : []) {
+        if (!entrada || entrada.sessionId == null || entrada.parentSessionId == null) continue;
+        const lista = filhos.get(entrada.parentSessionId) ?? [];
+        lista.push(entrada.sessionId);
+        filhos.set(entrada.parentSessionId, lista);
+      }
+      const plano = [{ id: alvo, nivel: 0 }];
+      const vistos = new Set([alvo]);
+      for (let i = 0; i < plano.length; i += 1) {
+        for (const filho of filhos.get(plano[i].id) ?? []) {
+          if (vistos.has(filho)) continue; /* ciclos e links repetidos: uma vez */
+          vistos.add(filho);
+          plano.push({ id: filho, nivel: plano[i].nivel + 1 });
+        }
+      }
+      return plano;
+    }
+
     // Expiração (~1s) só de outputs na UI (contrato §2): nunca recalcula
     // emoji/expressão/ficha.
     function purgar(estado, agora = Date.now()) {
@@ -2675,6 +2705,20 @@ window.__ModuleLoader__.load({
         icone: ICONE_ATIVIDADE[a.tipo] ?? 'play',
       }));
 
+      // Paragem em cascata: o botão "Parar" aparece quando há trabalho a correr
+      // ou subagentes ativos, e diz sempre o alcance (pessoa SÓ ou pessoa e equipa).
+      const subagentesAtivos = Array.isArray(p.subagents) ? p.subagents.length : num(p.subagents);
+      const aCorrer = p.running === true || p.status === 'working';
+      const paragem = {
+        disponivel: aCorrer || subagentesAtivos > 0,
+        aCorrer,
+        subagentes: subagentesAtivos,
+        rotulo: subagentesAtivos > 0 ? 'Parar pessoa e equipa' : 'Parar pessoa',
+        titulo: subagentesAtivos > 0
+          ? `Interrompe o turno de ${p.name ?? 'esta pessoa'} e de TODOS os ${subagentesAtivos} subagente(s) em curso — e larga as tarefas na fila de cada um`
+          : `Interrompe o turno de ${p.name ?? 'esta pessoa'} e larga as tarefas na fila`,
+      };
+
       return {
         id: p.id,
         nome: p.name ?? 'Pessoa',
@@ -2690,6 +2734,7 @@ window.__ModuleLoader__.load({
         },
         pergunta: p.question ?? null,
         subagentes: num(p.subagents),
+        paragem,
         contexto,
         custo,
         atividade,
@@ -3634,6 +3679,11 @@ window.__ModuleLoader__.load({
       '.wg-sidebar .wg-conversa-card strong.wg-sem-titulo{color:#a3aaa4;font-weight:600}',
       '.wg-sidebar .wg-conversa-acoes{display:flex;gap:8px}',
       '.wg-sidebar .wg-conversa-acoes .wg-button{flex:1 1 0}',
+      '.wg-sidebar .wg-conversa-acoes.wg-paragem{margin-top:8px}',
+      // Perigo: as mesmas cores do .button-danger da demo (REGRA DE OURO).
+      '.wg-sidebar .wg-button-danger{background:#f9e5de;border:1px solid #e2b6a6;color:#a2543a}',
+      '.wg-sidebar .wg-button-danger:hover{background:#f4d7cd}',
+      '.wg-sidebar .wg-button-danger:disabled{opacity:.65;cursor:default;transform:none}',
       '.wg-sidebar .wg-button{display:inline-flex;gap:7px;align-items:center;justify-content:center;min-height:36px;border-radius:8px;padding:8px 12px;font-size:11px;font-weight:700;white-space:nowrap;transition:background .15s,transform .15s,border-color .15s}',
       '.wg-sidebar .wg-button:active{transform:translateY(1px)}',
       '.wg-sidebar .wg-button-primary{background:#2869a6;color:#fff;border:1px solid #2869a6}',
@@ -4021,8 +4071,11 @@ window.__ModuleLoader__.load({
       }));
 
     function SidebarPessoa(props) {
-      const { modelo: m, aba, mudarAba, fechar, telefoneAberto, abrirTelefone, abrirConversa } = props;
+      const { modelo: m, aba, mudarAba, fechar, telefoneAberto, abrirTelefone, abrirConversa, parar } = props;
       const abasRef = react.useRef(null);
+      // "Parar" é assíncrono (cancel + fila, sessão a sessão): enquanto corre,
+      // o botão fica desativado e diz "A parar…".
+      const [aParar, setAParar] = react.useState(false);
       // Setas/Home/End mudam de separador (padrão WAI-ARIA de tabs).
       const teclarAbas = (e) => {
         const i = ABAS_SIDEBAR.findIndex((a) => a.id === aba);
@@ -4072,7 +4125,21 @@ window.__ModuleLoader__.load({
                 type: 'button', className: 'wg-button wg-button-light wg-abrir-conversa',
                 title: 'Mostrar esta conversa no DSH', onClick: abrirConversa,
               }, 'Abrir no DSH')
-              : null)),
+              : null),
+          m.paragem && m.paragem.disponivel && parar
+            ? h('div', { className: 'wg-conversa-acoes wg-paragem' },
+              h('button', {
+                type: 'button', className: 'wg-button wg-button-danger wg-parar',
+                'data-alcance': m.paragem.subagentes > 0 ? 'equipa' : 'pessoa',
+                title: m.paragem.titulo,
+                disabled: aParar ? 'disabled' : undefined,
+                onClick: () => {
+                  if (aParar) return;
+                  setAParar(true);
+                  Promise.resolve().then(() => parar()).catch(() => {}).then(() => setAParar(false));
+                },
+              }, aParar ? 'A parar…' : m.paragem.rotulo))
+            : null),
         h('div', { className: 'wg-inspector-tabs', role: 'tablist', 'aria-label': 'Detalhes da pessoa', ref: abasRef, onKeyDown: teclarAbas },
           ...ABAS_SIDEBAR.map((a) => h('button', {
             key: a.id, type: 'button', role: 'tab', id: `wg-aba-${a.id}`, 'data-aba': a.id,
@@ -4887,6 +4954,8 @@ window.__ModuleLoader__.load({
                 else if (typeof props.abrirTelefone === 'function') props.abrirTelefone(modelo.id);
               },
               abrirConversa: podeAgir && typeof props.abrirConversa === 'function' ? () => props.abrirConversa(modelo.id) : null,
+              // "Parar" (em cascata: pessoa + subárvore de subagentes).
+              parar: typeof props.pararPessoa === 'function' ? () => props.pararPessoa(modelo.id) : null,
             })
             : null,
         ),
@@ -4969,6 +5038,92 @@ window.__ModuleLoader__.load({
         try { ui.startSession(workspaceId); trace('nova-sessao', workspaceId); } catch (erro) { trace('nova-sessao-erro', String(erro && erro.message || erro)); }
       },
     };
+
+    /* ================================================================
+     * 5. Paragem em cascata — "Parar" uma pessoa e TODA a sua equipa
+     * ================================================================
+     *
+     * A feature que o DSH não tem. Lá, `session.cancel()` (e o `interrupt_agent`
+     * do subagent-control) para APENAS o alvo: "descendants keep running". E há
+     * uma segunda armadilha no contrato de `cancel()`: "pending queued work
+     * remains and resumes in FIFO order after the Host reaches cancellation
+     * quiescence" — ou seja, SEM largar a fila, a tarefa adicional que se
+     * mandou por mensagem entra em execução logo a seguir à "paragem".
+     *
+     * Por isso uma paragem real aqui é, para cada sessão do plano
+     * (planoDeParagem: o alvo + subárvore, pai-primeiro):
+     *   1. `session.cancel()` — interromper o turno em curso;
+     *   2. `updateQueue(id, {kind:'remove'})` a cada entrada da fila pendente
+     *      (projeção 'inbox', next-step e next-turn);
+     *   3. `ref.release()` uma única vez — a referência usa o nosso rótulo de
+     *      contagem (nunca 'mainView': ver armadilha 9 em docs/contratos-plugin.md).
+     *
+     * Falhas são registadas por id e nunca abortam o resto do plano (parar o
+     * filho não pode ficar refém de o pai ter dado erro). Diagnóstico headless:
+     * `window.__wgParagem`.
+     */
+    async function pararComSubagentes(ctx, alvo) {
+      const resultado = { alvo, plano: [], parados: [], turnosCancelados: 0, filaLimpada: 0, falhas: [] };
+      const sessoes = ctx && ctx.sessions;
+      if (alvo == null || !sessoes || typeof sessoes.retain !== 'function') {
+        resultado.falhas.push({ id: alvo ?? null, erro: 'sem canal de sessões (ctx.sessions)' });
+        return resultado;
+      }
+      let catalogo = [];
+      try {
+        // A árvore sai do MESMO snapshot da ponte (byId.parentId +
+        // subagentsByParent) — `linhasDoSnapshot` faz a fusão. `ctx.sessions.list`
+        // é um ObservableSnapshot<SessionListState>, não uma função.
+        const lista = sessoes.list;
+        if (lista && typeof lista.getSnapshot === 'function') {
+          catalogo = linhasDoSnapshot(lista.getSnapshot())
+            .map((linha) => ({ sessionId: linha.id, parentSessionId: linha.parentId ?? null }));
+        } else if (Array.isArray(lista)) {
+          catalogo = lista; /* fakes e hosts com o catálogo simples */
+        }
+      } catch (erro) {
+        resultado.falhas.push({ id: alvo, erro: mensagemDeErro(erro) });
+        return resultado;
+      }
+      resultado.plano = planoDeParagem(catalogo, alvo).map((entrada) => entrada.id);
+      for (const id of resultado.plano) {
+        let ref = null;
+        try {
+          ref = sessoes.retain(id, { source: FONTE_TELEFONE });
+        } catch (erro) {
+          resultado.falhas.push({ id, erro: mensagemDeErro(erro) });
+          continue;
+        }
+        try {
+          let sessao = null;
+          try { sessao = ref.binding.session; } catch (erro) { resultado.falhas.push({ id, erro: mensagemDeErro(erro) }); continue; }
+          try {
+            const r = await sessao.cancel();
+            if (r && r.ok === false) resultado.falhas.push({ id, erro: 'cancel() recusado pelo DSH' });
+            else resultado.turnosCancelados += 1;
+          } catch (erro) { resultado.falhas.push({ id, erro: mensagemDeErro(erro) }); }
+          // Largar a fila pendente: sem isto as tarefas retomam sozinhas.
+          try {
+            const caixa = sessao.projections && typeof sessao.projections.faceOf === 'function'
+              ? sessao.projections.faceOf('inbox')
+              : null;
+            for (const m of mensagensDaCaixa(caixa ? caixa.getSnapshot() : null)) {
+              try {
+                const r = await sessao.updateQueue(m.id, { kind: 'remove' });
+                if (!r || r.ok !== false) resultado.filaLimpada += 1;
+                else resultado.falhas.push({ id, erro: `fila ${m.id}: remoção recusada` });
+              } catch (erro) { resultado.falhas.push({ id, erro: mensagemDeErro(erro) }); }
+            }
+          } catch (erro) { resultado.falhas.push({ id, erro: mensagemDeErro(erro) }); }
+          resultado.parados.push(id);
+        } finally {
+          try { ref.release(); } catch { /* já libertada */ }
+        }
+      }
+      trace('paragem', `${alvo}: ${resultado.parados.length}/${resultado.plano.length} parados · ${resultado.filaLimpada} da fila largados`);
+      try { window.__wgParagem = resultado; } catch { /* sem window */ }
+      return resultado;
+    }
 
     // Núcleo: estado + adaptador + seleção + expirações (ciclo de vida da fibra).
     // `opcoes.abrirConversa(id)` — fábrica do controlador do celular (testes);
@@ -5085,6 +5240,13 @@ window.__ModuleLoader__.load({
         getTelefone: () => telefone,
         getConversa: () => conversa,
         getHistorico: (id) => (id != null && historico.sessionId === id ? historico.itens : null),
+        // Parar a pessoa e TODA a sua subárvore de subagentes (secção 5).
+        pararPessoa: async (id) => {
+          if (id == null) return null;
+          const r = await pararComSubagentes(ctxDoPlugin, id);
+          notificar();
+          return r;
+        },
         abrirTelefone: (id) => {
           if (!id) return;
           if (telefone.aberto && telefone.sessionId === id && conversa) return;
@@ -5336,6 +5498,8 @@ window.__ModuleLoader__.load({
     exports.__resumoArgs = resumoArgs;
     exports.__rotuloData = rotuloData;
     exports.__criarConversaTelefone = criarConversaTelefone;
+    exports.__planoDeParagem = planoDeParagem;
+    exports.__pararComSubagentes = pararComSubagentes;
     exports.__FONTE_TELEFONE = FONTE_TELEFONE;
     exports.__MAX_ITENS_TELEFONE = MAX_ITENS_TELEFONE;
 

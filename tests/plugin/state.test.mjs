@@ -43,10 +43,10 @@ const PRECO = { 'deepseek-chat': { input: 2, output: 3, cacheRead: 0.5, cacheWri
 /* API e estado inicial                                                */
 /* ------------------------------------------------------------------ */
 
-test('módulo exporta exatamente as 5 funções do contrato', () => {
+test('módulo exporta exatamente as funções do contrato', () => {
   assert.deepEqual(
     Object.keys(stateApi).sort(),
-    ['applyEvent', 'createOfficeState', 'officeView', 'personView', 'setPrices']
+    ['applyEvent', 'createOfficeState', 'officeView', 'personView', 'planoDeParagem', 'setPrices']
   );
 });
 
