@@ -5070,14 +5070,45 @@ window.__ModuleLoader__.load({
         return resultado;
       }
       let catalogo = [];
+      const enderecos = new Map();
       try {
         // A árvore sai do MESMO snapshot da ponte (byId.parentId +
         // subagentsByParent) — `linhasDoSnapshot` faz a fusão. `ctx.sessions.list`
         // é um ObservableSnapshot<SessionListState>, não uma função.
         const lista = sessoes.list;
         if (lista && typeof lista.getSnapshot === 'function') {
-          catalogo = linhasDoSnapshot(lista.getSnapshot())
+          const snap = lista.getSnapshot();
+          catalogo = linhasDoSnapshot(snap)
             .map((linha) => ({ sessionId: linha.id, parentSessionId: linha.parentId ?? null }));
+          // Moradas dos filhos: `retain` por id pode não resolver a morada e o
+          // `cancel()` cai na rota errada (o host recusa `session.cancel` em
+          // sessões de subagente — "owned by subagent routing"). Com a morada
+          // explícita, o cliente roteia para `subagents.interruptByParent`.
+          const sub = snap.subagentsByParent && typeof snap.subagentsByParent === 'object' ? snap.subagentsByParent : {};
+          for (const [pai, catalogoFilhos] of Object.entries(sub)) {
+            const entradas = Array.isArray(catalogoFilhos) ? catalogoFilhos
+              : (catalogoFilhos && Array.isArray(catalogoFilhos.entries) ? catalogoFilhos.entries : []);
+            for (const entrada of entradas) {
+              if (!entrada || entrada.id == null) continue;
+              enderecos.set(String(entrada.id), {
+                parentSessionId: String(pai),
+                childSessionId: String(entrada.id),
+                mode: entrada.mode === 'one-shot' ? 'one-shot' : 'continuable',
+              });
+            }
+          }
+          // Filhos que só aparecem no catálogo raiz (origin 'subagent'): a
+          // morada deriva do parentId. Um FORK também tem parentId mas não é
+          // subagente (`subagente: false`) — fica sem morada, como uma sessão
+          // normal (retain por id).
+          for (const linha of linhasDoSnapshot(snap)) {
+            if (!linha.subagente || linha.parentId == null || enderecos.has(String(linha.id))) continue;
+            enderecos.set(String(linha.id), {
+              parentSessionId: String(linha.parentId),
+              childSessionId: String(linha.id),
+              mode: 'continuable',
+            });
+          }
         } else if (Array.isArray(lista)) {
           catalogo = lista; /* fakes e hosts com o catálogo simples */
         }
@@ -5086,22 +5117,35 @@ window.__ModuleLoader__.load({
         return resultado;
       }
       resultado.plano = planoDeParagem(catalogo, alvo).map((entrada) => entrada.id);
+      resultado.detalhes = resultado.plano.map((id) => ({
+        id,
+        morada: enderecos.get(id)?.mode ?? 'sessão normal',
+      }));
+      const detalheRemoto = (r) => {
+        const e = r && r.error;
+        if (!e) return 'sem detalhe';
+        return [e.code, e.message].filter(Boolean).join(' — ') || 'sem detalhe';
+      };
       for (const id of resultado.plano) {
         let ref = null;
         try {
-          ref = sessoes.retain(id, { source: FONTE_TELEFONE });
+          ref = sessoes.retain(enderecos.get(id) ?? id, { source: FONTE_TELEFONE });
         } catch (erro) {
-          resultado.falhas.push({ id, erro: mensagemDeErro(erro) });
+          resultado.falhas.push({ id, erro: `retain: ${mensagemDeErro(erro)}` });
           continue;
         }
         try {
           let sessao = null;
-          try { sessao = ref.binding.session; } catch (erro) { resultado.falhas.push({ id, erro: mensagemDeErro(erro) }); continue; }
+          try { sessao = ref.binding.session; } catch (erro) { resultado.falhas.push({ id, erro: `binding: ${mensagemDeErro(erro)}` }); continue; }
+          // Esperar pela abertura partilhada: a morada do subagente (roteio do
+          // cancel) e as projeções assentam com `ready` (resolve mesmo quando a
+          // abertura falha — ler `openState`; ver receita do celular).
+          try { await ref.ready; } catch { /* a abertura pode falhar; seguimos */ }
           try {
             const r = await sessao.cancel();
-            if (r && r.ok === false) resultado.falhas.push({ id, erro: 'cancel() recusado pelo DSH' });
+            if (r && r.ok === false) resultado.falhas.push({ id, erro: `cancel: ${detalheRemoto(r)}` });
             else resultado.turnosCancelados += 1;
-          } catch (erro) { resultado.falhas.push({ id, erro: mensagemDeErro(erro) }); }
+          } catch (erro) { resultado.falhas.push({ id, erro: `cancel: ${mensagemDeErro(erro)}` }); }
           // Largar a fila pendente: sem isto as tarefas retomam sozinhas.
           try {
             const caixa = sessao.projections && typeof sessao.projections.faceOf === 'function'
@@ -5111,10 +5155,10 @@ window.__ModuleLoader__.load({
               try {
                 const r = await sessao.updateQueue(m.id, { kind: 'remove' });
                 if (!r || r.ok !== false) resultado.filaLimpada += 1;
-                else resultado.falhas.push({ id, erro: `fila ${m.id}: remoção recusada` });
-              } catch (erro) { resultado.falhas.push({ id, erro: mensagemDeErro(erro) }); }
+                else resultado.falhas.push({ id, erro: `fila ${m.id}: ${detalheRemoto(r)}` });
+              } catch (erro) { resultado.falhas.push({ id, erro: `fila ${m.id}: ${mensagemDeErro(erro)}` }); }
             }
-          } catch (erro) { resultado.falhas.push({ id, erro: mensagemDeErro(erro) }); }
+          } catch (erro) { resultado.falhas.push({ id, erro: `fila: ${mensagemDeErro(erro)}` }); }
           resultado.parados.push(id);
         } finally {
           try { ref.release(); } catch { /* já libertada */ }

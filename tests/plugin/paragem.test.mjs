@@ -106,12 +106,12 @@ test('paridade: o plano embutido no bundle é o mesmo do state.js', () => {
 
 /** Fake do DSH: `ctx.sessions` na forma real (ObservableSnapshot + retain). */
 function fakeDsh({ catalogo = [], filhosPorPai = {}, filas = {}, reterFalha = [], cancelRecusa = [], listaSimples = false }) {
-  const registo = { ordem: [], cancel: [], fila: [], releases: [] };
+  const registo = { ordem: [], cancel: [], fila: [], releases: [], moradas: [] };
   // Forma real do catálogo: byId (com parentId) + subagentsByParent (os filhos
   // que só aparecem no catálogo de filhos do pai).
   const ids = catalogo.map((e) => e.sessionId);
   const byId = {};
-  for (const e of catalogo) byId[e.sessionId] = { id: e.sessionId, parentId: e.parentSessionId ?? null };
+  for (const e of catalogo) byId[e.sessionId] = { id: e.sessionId, parentId: e.parentSessionId ?? null, origin: e.origin };
   const subagentsByParent = {};
   for (const [pai, filhos] of Object.entries(filhosPorPai)) {
     subagentsByParent[pai] = { entries: filhos.map((id) => ({ id })) };
@@ -122,7 +122,13 @@ function fakeDsh({ catalogo = [], filhosPorPai = {}, filas = {}, reterFalha = []
     : { getSnapshot: () => ({ ids, byId, subagentsByParent }) };
   const sessoes = {
     list: lista,
-    retain: (id) => {
+    retain: (alvo) => {
+      // O retain recebe o id OU a morada explícita do subagente
+      // ({parentSessionId, childSessionId, mode}) — sem morada o cancel()
+      // do filho cai na rota errada e o host recusa.
+      const id = typeof alvo === 'string' ? alvo : alvo?.childSessionId;
+      const morada = typeof alvo === 'string' ? null : alvo;
+      if (morada) registo.moradas.push(morada);
       if (reterFalha.includes(id)) throw new Error(`sessão desconhecida: ${id}`);
       registo.ordem.push(id);
       return {
@@ -168,6 +174,12 @@ test('pararComSubagentes: para o alvo e TODA a subárvore, pai-primeiro', async 
   assert.deepEqual(registo.cancel, ['s1', 'c1', 'c2', 'g1'], 'cancel() por cada uma, pai primeiro');
   assert.equal(r.turnosCancelados, 4);
   assert.deepEqual(registo.releases, ['s1', 'c1', 'c2', 'g1'], 'uma referência retida e libertada por sessão');
+  // Filhos retidos com a MORADA explícita (roteio correto do cancel): o neto
+  // veio do catálogo de filhos; os filhos do byId sem origin ficam como
+  // sessões normais (retain por id).
+  assert.deepEqual(registo.moradas.map((m) => m.childSessionId), ['g1']);
+  for (const m of registo.moradas) assert.equal(typeof m.parentSessionId, 'string');
+  assert.deepEqual(r.detalhes.map((d) => d.morada), ['sessão normal', 'sessão normal', 'sessão normal', 'continuable']);
 });
 
 test('pararComSubagentes: aceita também um catálogo simples (array)', async () => {
@@ -179,6 +191,17 @@ test('pararComSubagentes: aceita também um catálogo simples (array)', async ()
   const r = await B.__pararComSubagentes(ctx, 's1');
   assert.deepEqual(r.plano, ['s1', 'c1', 'g1']);
   assert.deepEqual(registo.cancel, ['s1', 'c1', 'g1']);
+});
+
+test('pararComSubagentes: filho só no catálogo raiz (origin subagent) ganha morada derivada do pai', async () => {
+  const { ctx, registo } = fakeDsh({
+    catalogo: [sessao('s1'), { sessionId: 'c1', parentSessionId: 's1', origin: 'subagent' }, { sessionId: 'fork', parentSessionId: 's1' }],
+  });
+  const r = await B.__pararComSubagentes(ctx, 's1');
+  assert.deepEqual(r.plano, ['s1', 'c1', 'fork']);
+  // c1 é subagente → morada derivada; o fork é conversa normal → retain por id.
+  assert.deepEqual(registo.moradas.map((m) => [m.childSessionId, m.parentSessionId]), [['c1', 's1']]);
+  assert.deepEqual(r.detalhes.map((d) => d.morada), ['sessão normal', 'continuable', 'sessão normal']);
 });
 
 test('pararComSubagentes: larga TODA a fila pendente (sem isto ela retoma sozinha)', async () => {

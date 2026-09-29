@@ -163,6 +163,7 @@ try {
   assert.ok(paragem.turnosCancelados >= 2, `só ${paragem.turnosCancelados} turnos cancelados — a cascata não chegou aos filhos`);
   assert.ok(paragem.filaLimpada >= 1, `a fila pendente não foi largada (${paragem.filaLimpada}) — as tarefas adicionais retomariam sozinhas`);
   ok('plano em cascata executado', `plano=${paragem.plano.length} · turnos cancelados=${paragem.turnosCancelados} · fila largada=${paragem.filaLimpada}`);
+  console.log(`   · moradas: ${(paragem.detalhes || []).map((d) => `${d.id.slice(0, 8)}=${d.morada}`).join(', ')}`);
 
   /* 7) ninguém fica a trabalhar — nem os subagentes (a cascata é o ponto) */
   let todosParados = false;
