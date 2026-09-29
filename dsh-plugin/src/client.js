@@ -5063,7 +5063,7 @@ window.__ModuleLoader__.load({
      * `window.__wgParagem`.
      */
     async function pararComSubagentes(ctx, alvo) {
-      const resultado = { alvo, plano: [], parados: [], turnosCancelados: 0, filaLimpada: 0, falhas: [] };
+      const resultado = { alvo, plano: [], parados: [], turnosCancelados: 0, filaLimpada: 0, filaItens: [], vidas: [], falhas: [] };
       const sessoes = ctx && ctx.sessions;
       if (alvo == null || !sessoes || typeof sessoes.retain !== 'function') {
         resultado.falhas.push({ id: alvo ?? null, erro: 'sem canal de sessões (ctx.sessions)' });
@@ -5151,20 +5151,37 @@ window.__ModuleLoader__.load({
             for (const m of mensagensDaCaixa(caixa ? caixa.getSnapshot() : null)) {
               try {
                 const r = await sessao.updateQueue(m.id, { kind: 'remove' });
-                if (!r || r.ok !== false) resultado.filaLimpada += 1;
+                if (!r || r.ok !== false) { resultado.filaLimpada += 1; resultado.filaItens.push({ id, itemId: m.id }); }
                 else resultado.falhas.push({ id, erro: `fila ${m.id}: ${detalheRemoto(r)}` });
               } catch (erro) { resultado.falhas.push({ id, erro: `fila ${m.id}: ${mensagemDeErro(erro)}` }); }
             }
           };
-          try { await largarFila(); } catch (erro) { resultado.falhas.push({ id, erro: `fila: ${mensagemDeErro(erro)}` }); }
-          try {
-            const r = await sessao.cancel();
-            if (r && r.ok === false) resultado.falhas.push({ id, erro: `cancel: ${detalheRemoto(r)}` });
-            else resultado.turnosCancelados += 1;
-          } catch (erro) { resultado.falhas.push({ id, erro: `cancel: ${mensagemDeErro(erro)}` }); }
-          // Varredura: uma tarefa que tenha chegado (ou assentado) durante a
-          // cascata também não pode sobreviver.
-          try { await largarFila(); } catch (erro) { resultado.falhas.push({ id, erro: `fila (varredura): ${mensagemDeErro(erro)}` }); }
+          // Martelo de quietude: fila → cancel → re-avaliar. Uma tarefa que
+          // assente durante a cascata (eco que vira ocorrência durável) entraria
+          // em turno sozinha; o cancel num momento sem turno é aceite mas inócuo.
+          // Repete-se enquanto houver fila ou turno vivo (máx. 4 rondas).
+          let rondas = 0;
+          for (let ronda = 0; ronda < 4; ronda += 1) {
+            rondas = ronda + 1;
+            const antes = resultado.filaLimpada;
+            try { await largarFila(); } catch (erro) { resultado.falhas.push({ id, erro: `fila: ${mensagemDeErro(erro)}` }); }
+            let aCorrer = false;
+            try { aCorrer = !!(sessao.getSnapshot && sessao.getSnapshot() && sessao.getSnapshot().running === true); } catch { aCorrer = false; }
+            // A primeira ronda cancela SEMPRE (o utilizador pediu "Parar" e o
+            // snapshot pode estar atrasado); nas seguintes, só com sinais de vida.
+            if (aCorrer || ronda === 0) {
+              try {
+                const r = await sessao.cancel();
+                if (r && r.ok === false) resultado.falhas.push({ id, erro: `cancel: ${detalheRemoto(r)}` });
+                else resultado.turnosCancelados += 1;
+              } catch (erro) { resultado.falhas.push({ id, erro: `cancel: ${mensagemDeErro(erro)}` }); }
+            }
+            if (resultado.filaLimpada === antes && !aCorrer) break;
+            await new Promise((resolve) => setTimeout(resolve, 400));
+          }
+          let vivoNoFim = false;
+          try { vivoNoFim = !!(sessao.getSnapshot && sessao.getSnapshot() && sessao.getSnapshot().running === true); } catch { vivoNoFim = false; }
+          resultado.vidas.push({ id, rondas, aCorrerNoFim: vivoNoFim });
           resultado.parados.push(id);
         } finally {
           try { ref.release(); } catch { /* já libertada */ }
