@@ -120,6 +120,9 @@ function fakeDsh({ catalogo = [], filhosPorPai = {}, filas = {}, reterFalha = []
     ? [...catalogo.map((e) => ({ sessionId: e.sessionId, parentSessionId: e.parentSessionId ?? null })),
       ...Object.entries(filhosPorPai).flatMap(([pai, filhos]) => filhos.map((id) => ({ sessionId: id, parentSessionId: pai })))]
     : { getSnapshot: () => ({ ids, byId, subagentsByParent }) };
+  // Filas COM ESTADO: uma remoção tira a entrada do snapshot (como no DSH) —
+  // a varredura dupla (antes e depois do cancel) não pode recontar.
+  const filasVivas = new Map(Object.entries(filas).map(([id, lista]) => [id, [...lista]]));
   const sessoes = {
     list: lista,
     retain: (alvo) => {
@@ -141,13 +144,14 @@ function fakeDsh({ catalogo = [], filhosPorPai = {}, filas = {}, reterFalha = []
             projections: {
               faceOf: () => ({
                 getSnapshot: () => ({
-                  'next-turn': filas[id] ?? [],
+                  'next-turn': filasVivas.get(id) ?? [],
                   'next-step': [],
                 }),
               }),
             },
             updateQueue: async (itemId, acao) => {
               registo.fila.push({ id, itemId, acao });
+              filasVivas.set(id, (filasVivas.get(id) ?? []).filter((m) => m.id !== itemId));
               return { ok: true };
             },
           },

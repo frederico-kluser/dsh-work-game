@@ -5141,13 +5141,10 @@ window.__ModuleLoader__.load({
           // cancel) e as projeções assentam com `ready` (resolve mesmo quando a
           // abertura falha — ler `openState`; ver receita do celular).
           try { await ref.ready; } catch { /* a abertura pode falhar; seguimos */ }
-          try {
-            const r = await sessao.cancel();
-            if (r && r.ok === false) resultado.falhas.push({ id, erro: `cancel: ${detalheRemoto(r)}` });
-            else resultado.turnosCancelados += 1;
-          } catch (erro) { resultado.falhas.push({ id, erro: `cancel: ${mensagemDeErro(erro)}` }); }
-          // Largar a fila pendente: sem isto as tarefas retomam sozinhas.
-          try {
+          // Largar a fila ANTES de cancelar: o contrato avisa que a fila
+          // pendente retoma sozinha logo após a quietude do cancel — limpando
+          // primeiro não há nada para ressuscitar.
+          const largarFila = async () => {
             const caixa = sessao.projections && typeof sessao.projections.faceOf === 'function'
               ? sessao.projections.faceOf('inbox')
               : null;
@@ -5158,7 +5155,16 @@ window.__ModuleLoader__.load({
                 else resultado.falhas.push({ id, erro: `fila ${m.id}: ${detalheRemoto(r)}` });
               } catch (erro) { resultado.falhas.push({ id, erro: `fila ${m.id}: ${mensagemDeErro(erro)}` }); }
             }
-          } catch (erro) { resultado.falhas.push({ id, erro: `fila: ${mensagemDeErro(erro)}` }); }
+          };
+          try { await largarFila(); } catch (erro) { resultado.falhas.push({ id, erro: `fila: ${mensagemDeErro(erro)}` }); }
+          try {
+            const r = await sessao.cancel();
+            if (r && r.ok === false) resultado.falhas.push({ id, erro: `cancel: ${detalheRemoto(r)}` });
+            else resultado.turnosCancelados += 1;
+          } catch (erro) { resultado.falhas.push({ id, erro: `cancel: ${mensagemDeErro(erro)}` }); }
+          // Varredura: uma tarefa que tenha chegado (ou assentado) durante a
+          // cascata também não pode sobreviver.
+          try { await largarFila(); } catch (erro) { resultado.falhas.push({ id, erro: `fila (varredura): ${mensagemDeErro(erro)}` }); }
           resultado.parados.push(id);
         } finally {
           try { ref.release(); } catch { /* já libertada */ }

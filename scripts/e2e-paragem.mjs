@@ -167,12 +167,31 @@ try {
 
   /* 7) ninguém fica a trabalhar — nem os subagentes (a cascata é o ponto) */
   let todosParados = false;
+  let salaFinal = [];
   while (Date.now() - paradoEm < 30000) {
-    const sala = await estadoDaSala();
-    const relevantes = sala.filter((l) => l.id === alvo.id || idsFilhos.includes(l.id));
-    if (relevantes.length && relevantes.every((l) => l.estado !== 'Trabalhando')) { todosParados = true; break; }
+    salaFinal = await estadoDaSala();
+    const relevantes = salaFinal.filter((l) => l.id === alvo.id || idsFilhos.includes(l.id));
     linhas.push({ t: `${Math.round((Date.now() - paradoEm) / 1000)}s`, ...relevantes });
+    if (relevantes.length && relevantes.every((l) => l.estado !== 'Trabalhando')) { todosParados = true; break; }
     await sleep(1000);
+  }
+  // Provas ANTES das asserções: uma falha tem de deixar rasto legível.
+  writeFileSync(join(OUT, 'observacao.json'), JSON.stringify({ alvo, marcos, linhas, salaFinal, errosConsola: page.consoleErrors }, null, 1));
+  if (!todosParados) {
+    // Diagnóstico: quem ficou a trabalhar e o que diz a conversa dele
+    // (retomou a tarefa da fila? continua no trabalho antigo?).
+    const presos = salaFinal.filter((l) => (l.id === alvo.id || idsFilhos.includes(l.id)) && l.estado === 'Trabalhando');
+    for (const preso of presos) {
+      await page.eval(`document.querySelector('.wg-svg .seat[role="button"][data-session-id="${preso.id}"] .seat-card').dispatchEvent(new MouseEvent('click', { bubbles: true }))`);
+      await sleep(1200);
+      const conversa = await page.eval(`(() => {
+        const itens = [...document.querySelectorAll('.wg-telefone .wg-tel-msg')].slice(-4);
+        return itens.map((el) => ({ texto: (el.textContent || '').trim().slice(0, 120), recibo: (el.querySelector('.wg-tel-recibo') || {}).textContent || '' }));
+      })()`);
+      linhas.push({ diagnostico: preso, conversa });
+      console.log(`   · PRESO: ${preso.nome} (${preso.id}) · conversa: ${JSON.stringify(conversa).slice(0, 300)}`);
+    }
+    writeFileSync(join(OUT, 'observacao.json'), JSON.stringify({ alvo, marcos, linhas, salaFinal, errosConsola: page.consoleErrors }, null, 1));
   }
   assert.ok(todosParados, 'alguém — provavelmente um subagente — continuou "Trabalhando" depois do Parar');
   ok('líder e TODOS os subagentes parados', `em ≤ ${Math.round((Date.now() - paradoEm) / 1000)}s`);
