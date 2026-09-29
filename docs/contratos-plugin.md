@@ -63,6 +63,7 @@ export function createOfficeState() -> state
 export function applyEvent(state, event) -> state      // puro: devolve NOVO estado
 export function personView(state, sessionId) -> view   // apresentação pronta p/ UI
 export function officeView(state) -> { people, teams, alerts }
+export function planoDeParagem(catalogo, alvo) -> [{id, nivel}]  // paragem em cascata (ver abaixo)
 ```
 
 `state.people[sessionId] = { id, name, avatar, status, emoji, expression, ctx, model, cost, question, approvals, subagents, outputs[] }`
@@ -444,6 +445,45 @@ macmini (DSH web 3080) com `verify-dsh-panel.mjs --conversa` e `--enviar`.
    `ref.binding` lança. A última referência (de qualquer fonte) fecha o stream e o scope;
    se o painel principal do DSH tiver a mesma conversa (`mainView`), só desce a contagem.
    `window.__wgTelefoneRefs` conta as referências vivas do plugin (diagnóstico).
+
+### Paragem em cascata — "Parar pessoa e equipa" (a feature que o DSH não tem)
+
+O DSH **não** para subagentes com o pai: `session.cancel()` e o `interrupt_agent` do
+`tool-subagent-control` param APENAS o alvo ("Stops only the target's current turn… **descendants
+keep running**"). E o contrato de `cancel()` avisa que "**pending queued work remains and resumes
+in FIFO order** after the Host reaches cancellation quiescence" — sem largar a fila, a tarefa
+adicional que se mandou por mensagem entra em execução logo a seguir à "paragem". O `cancel()` do
+próprio cliente já roteia filhos por `subagents.interruptByParent(child, parent, 'continuable')`
+(morada durável do pai; funciona sem o Agent do pai vivo), mas o host recusa `session.cancel` em
+sessões de subagente ("owned by subagent routing") — **sem morada explícita, o retain por id cai na
+rota errada e o cancel é recusado**.
+
+O **Parar** do Modo jogo faz a paragem real:
+
+1. **Plano** — `planoDeParagem(catalogo, alvo)`: o alvo e toda a subárvore de subagentes,
+   **pai-primeiro** (o líder não pode re-delegar a meio da desmontagem), por nível, com proteção
+   contra ciclos. A árvore sai do snapshot real (`linhasDoSnapshot`: `byId.parentId` +
+   `subagentsByParent`); um FORK também tem `parentId` mas não é subagente (`subagente: false`) —
+   entra como sessão normal.
+2. **Por sessão do plano**, com a referência retida por instantes (`source` próprio — nunca
+   `mainView`) e `await ref.ready` antes de agir:
+   - **largar a fila ANTES de cancelar** (projeção `inbox`, `next-step` e `next-turn`, por
+     `updateQueue(id, {kind:'remove'})` — o `cancel` do DSH mantém a fila e ela retoma);
+   - **`cancel()`** (retain dos filhos com a morada explícita `{parentSessionId, childSessionId,
+     mode}`, para o cliente rotear para `interruptByParent`);
+   - **martelo de quietude**: repetir (máx. 4 rondas, 400 ms) enquanto houver fila ou turno vivo —
+     uma tarefa que assente durante a cascata vira turno sozinha e o cancel num momento sem turno é
+     aceite mas inócuo. A 1.ª ronda cancela sempre.
+3. **Falhas por id** nunca abortam o resto do plano; `ref.release()` uma única vez por sessão.
+   Diagnóstico headless: `window.__wgParagem` = `{plano, parados, turnosCancelados, filaLimpada,
+   filaItens, vidas, detalhes, falhas}`.
+
+UI: botão **"Parar pessoa" / "Parar pessoa e equipa"** na barra lateral (`data-alcance`), visível
+enquanto há trabalho a correr ou equipa em curso, com "A parar…" durante a cascata. A **contagem de
+subagentes é por FILHO ativo** (`subagentAtivos: Set`): a ponte (diffs do catálogo) e o adaptador
+(eventos reais) emitem AMBOS o `subagent/start` do mesmo filho, com `runId`s diferentes, e somar
+eventos deixava o líder "Trabalhando" em fantasma quando só um dos `end` chegava (apanhado pelo
+`scripts/e2e-paragem.mjs`, que encena tudo isto com trabalho real).
 
 ### Armadilhas do runtime verificadas ao vivo (macmini, 2026-09-28)
 
