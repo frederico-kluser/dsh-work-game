@@ -715,7 +715,8 @@ window.__ModuleLoader__.load({
         statusVisto: false, // já chegou algum `status`? (o 1.º não é transição)
         question: null, // persistente até question/answered
         approvals: [],
-        subagents: 0, // subagentes A CORRER (delegação em curso)
+        subagents: 0, // subagentes A CORRER (delegação em curso) = subagentAtivos.size
+        subagentAtivos: new Set(), // ids dos filhos ativos (dedupe entre ponte e adaptador)
         outputs: [],
         flags: {
           ocioso: true, concluido: false, erro: false, ferramenta: false,
@@ -941,20 +942,32 @@ window.__ModuleLoader__.load({
         }
         case 'subagent/start': {
           const pessoa = p(evento.sessionId);
-          if (!pessoa) break;
-          pessoa.subagents += 1;
-          pessoa.flags.ocioso = false;
-          pessoa.flags.concluido = false;
-          pessoa.flags.retry = false;
-          const filho = evento.childId != null ? p(String(evento.childId)) : null;
-          registar(pessoa, evento, 'subagente-inicio', `Delegou a um subagente${filho ? ` (${filho.name})` : ''}`);
+          if (!pessoa || evento.childId == null) break;
+          // Contagem POR FILHO ativo, nunca por evento: a ponte (diffs do
+          // catálogo) e o adaptador (eventos reais) emitem AMBOS o
+          // 'subagent/start' do mesmo filho — somar eventos deixava o líder
+          // "Trabalhando" para sempre quando só um dos 'end' chegava (ex.:
+          // filho cancelado, cujo run assenta mais tarde). Um filho repetido
+          // entra uma vez; o 'end' de qualquer fonte tira-o.
+          const chaveFilho = String(evento.childId);
+          if (!pessoa.subagentAtivos.has(chaveFilho)) {
+            pessoa.subagentAtivos.add(chaveFilho);
+            pessoa.subagents = pessoa.subagentAtivos.size;
+            pessoa.flags.ocioso = false;
+            pessoa.flags.concluido = false;
+            pessoa.flags.retry = false;
+            const filho = p(chaveFilho);
+            registar(pessoa, evento, 'subagente-inicio', `Delegou a um subagente${filho ? ` (${filho.name})` : ''}`);
+          }
           break;
         }
         case 'subagent/end': {
           const pessoa = p(evento.sessionId);
-          if (pessoa) {
-            pessoa.subagents = Math.max(0, pessoa.subagents - 1);
-            const filho = evento.childId != null ? p(String(evento.childId)) : null;
+          if (!pessoa || evento.childId == null) break;
+          const chaveFilho = String(evento.childId);
+          if (pessoa.subagentAtivos.delete(chaveFilho)) {
+            pessoa.subagents = pessoa.subagentAtivos.size;
+            const filho = p(chaveFilho);
             registar(pessoa, evento, 'subagente-fim', `Subagente terminou${filho ? ` (${filho.name})` : ''}`);
           }
           break;

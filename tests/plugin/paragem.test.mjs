@@ -306,3 +306,33 @@ test('barra lateral: parado e sem equipa → sem botão de parar', () => {
   assert.equal(m.paragem.disponivel, false);
   assert.equal(m.paragem.rotulo, 'Parar pessoa');
 });
+
+/* ------------------------------------------------------------------ */
+/* regressão: o líder não pode ficar "Trabalhando" em fantasma          */
+/* ------------------------------------------------------------------ */
+
+test('regressão: start duplo (ponte + adaptador) conta UM filho — o líder volta a Disponível', () => {
+  // A ponte (diffs do catálogo) e o adaptador (eventos reais) emitem os DOIS
+  // 'subagent/start' do mesmo filho, com runIds diferentes; e de um filho
+  // CANCELADO só chega um dos 'end'. Somar eventos deixava o líder
+  // "Trabalhando" para sempre depois do Parar (apanhado pelo e2e-paragem).
+  const eventos = [
+    { type: 'session/added', sessionId: 's1' },
+    { type: 'session/added', sessionId: 'c1' },
+    { type: 'status', sessionId: 's1', status: 'running' },
+    { type: 'subagent/start', sessionId: 's1', childId: 'c1', runId: 'c1' },        // ponte
+    { type: 'subagent/start', sessionId: 's1', childId: 'c1', runId: 'run-real' },  // adaptador
+  ];
+  const p = pessoaDoBundle(eventos, 's1');
+  assert.equal(p.subagents, 1, 'dois starts do mesmo filho contam UM');
+  assert.equal(B.__modeloSidebar(p, {}).estado.rotulo, 'Trabalhando');
+
+  const aposFim = pessoaDoBundle([
+    ...eventos,
+    { type: 'subagent/end', sessionId: 's1', childId: 'c1', runId: 'c1' },
+    { type: 'status', sessionId: 's1', status: 'idle' },
+  ], 's1');
+  assert.equal(aposFim.subagents, 0, 'um único end (de qualquer fonte) tira o filho');
+  assert.equal(B.__modeloSidebar(aposFim, {}).estado.rotulo, 'Disponível', 'o líder volta a Disponível sem fantasma');
+  assert.equal(B.__modeloSidebar(aposFim, {}).paragem.disponivel, false);
+});
