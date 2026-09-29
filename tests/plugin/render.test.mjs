@@ -277,12 +277,17 @@ const estados = () => {
   return { people, layout, svg: B.__renderOffice({ people, layout }) };
 };
 
-test('cena viva: quem está Disponível dorme — olhos fechados e "zzz" (aria-hidden) só junto a quem está parado', () => {
+test('cena viva: quem está Disponível dorme — olhos fechados, "zzz" e balanço LATERAL da cabeça', () => {
   const { svg } = estados();
   const trechos = trechosDeBoneco(svg);
   const comZzz = Object.keys(trechos).filter((id) => trechos[id].includes('<g class="wg-zzz" aria-hidden="true"'));
   assert.deepEqual(comZzz, ['z'], 'pergunta, erro, concluído e trabalho não dormem');
-  assert.match(trechos.z, /data-expression="sleeping"><use href="#wgav-bia-sleeping"/);
+  assert.match(trechos.z, /data-expression="sleeping" style="animation-duration:[\d.]+s;animation-delay:(-?[\d.]+)s"><use href="#wgav-bia-sleeping"/);
+  // Quem dorme balança a CABEÇA lateralmente (a mesma onda do ativo, eixo X),
+  // com o seu ritmo e a sua fase: nunca igual à do vizinho.
+  assert.match(trechos.z, /class="character wg-balanca-lateral" data-character-id="z"/);
+  const balancoLateral = Number(trechos.z.match(/animation-duration:[\d.]+s;animation-delay:(-?[\d.]+)s/)[1]);
+  assert.ok(balancoLateral <= 0 && balancoLateral > -3.64, `fase negativa dentro do ciclo do ritmo: ${balancoLateral}`);
   // O grupo leva a posição; cada letra fica em (0,0), centrada — a escala e a
   // subida partem da própria letra também no Safari (o WebKit ignorava o x/y
   // do <text> com transform-box:fill-box e os "z" desciam sobre o vizinho).
@@ -329,17 +334,29 @@ test('cena viva: o "zzz" sobe (e anda para a direita) a partir da orelha — geo
   assert.ok(reduzido.includes('.wg-svg .wg-z:nth-child(3){transform:translate(26px,-46px) scale(1.15)}'));
 });
 
-test('cena viva: quem trabalha (Trabalhando/Executando ferramenta) balança — só o boneco, fase por pessoa', () => {
+test('cena viva: quem trabalha (Trabalhando/Executando ferramenta) balança — só o boneco, ritmo e fase por pessoa', () => {
   const { svg } = estados();
-  const balancam = [...svg.matchAll(/<g class="character wg-balanca" data-character-id="([^"]+)" data-expression="[^"]+" style="animation-delay:(-?[\d.]+)s">/g)];
+  const balancam = [...svg.matchAll(/<g class="character wg-balanca" data-character-id="([^"]+)" data-expression="[^"]+" style="animation-duration:([\d.]+)s;animation-delay:(-?[\d.]+)s">/g)];
   assert.deepEqual(balancam.map((m) => m[1]), ['t', 'f'], 'só Trabalhando e Executando ferramenta');
-  assert.equal((svg.match(/wg-balanca/g) || []).length, 2, 'nem cadeira nem portátil balançam');
-  const [a, b] = balancam.map((m) => Number(m[2]));
-  assert.ok(a <= 0 && a > -2.8 && b <= 0 && b > -2.8, `atraso negativo dentro do ciclo (2,8 s): ${a}, ${b}`);
+  assert.equal((svg.match(/wg-balanca"/g) || []).length, 2, 'nem cadeira nem portátil balançam');
+  const duracoes = balancam.map((m) => Number(m[2]));
+  const [a, b] = balancam.map((m) => Number(m[3]));
+  // Ninguém se move na mesma velocidade: o ritmo por pessoa (0,82×–1,30× do
+  // ciclo base de 2,8 s, em passos de 0,01) vem do hash do id — determinístico.
+  for (const d of duracoes) assert.ok(d >= 2.8 * 0.82 - 1e-9 && d <= 2.8 * 1.3 + 1e-9, `ritmo dentro do intervalo: ${d}`);
+  const ritmos = [...Array(12)].map((_, i) => B.__ritmoDe(`conversa-${i}`));
+  assert.ok(new Set(ritmos).size > 6, `ritmos variados entre pessoas: ${ritmos}`);
+  assert.ok(ritmos.every((r) => r >= 0.82 && r <= 1.3), 'dentro da banda 0,82×–1,30×');
+  assert.ok(a <= 0 && a > -duracoes[0] && b <= 0 && b > -duracoes[1], `atraso negativo dentro do ciclo da própria pessoa: ${a}, ${b}`);
   assert.ok([a, b].every((x) => Math.abs(x / 0.2 - Math.round(x / 0.2)) < 1e-6), 'fases em múltiplos do passo (0,2 s)');
-  assert.notEqual(a, b, 'cada pessoa no seu ritmo');
+  assert.notEqual(a, b, 'cada pessoa no seu próprio começo');
+  // O mesmo ritmo é estável para a mesma conversa (hash do id) e quantiza a 0,01.
+  assert.equal(B.__duracaoDe('t', 2.8), B.__duracaoDe('t', 2.8), 'ritmo determinístico');
+  const r = B.__ritmoDe('t');
+  assert.ok(Math.abs(r * 100 - Math.round(r * 100)) < 1e-9, `ritmo quantizado a 0,01: ${r}`);
   const css = B.__CSS_PAINEL;
   assert.ok(css.includes('.wg-svg .character.wg-balanca{transform-box:fill-box;animation:wg-balanco 2.80s steps(1,end) infinite paused}'));
+  assert.ok(css.includes('.wg-svg .character.wg-balanca-lateral{transform-box:fill-box;animation:wg-balanco-lateral 2.80s steps(1,end) infinite paused}'));
   const kf = css.match(/@keyframes wg-balanco\{((?:[\d.]+%\{[^}]*\})+)\}/)[1];
   const ys = [...kf.matchAll(/%\{transform:translateY\((-?[\d.]+)(?:px)?\)\}/g)].map((m) => Number(m[1]));
   assert.equal(ys.length, 15, '14 degraus de 0,2 s num ciclo de 2,8 s (+ o 100%)');
@@ -347,11 +364,27 @@ test('cena viva: quem trabalha (Trabalhando/Executando ferramenta) balança — 
   assert.equal(Math.min(...ys), -7, `sobe levemente (7 unidades ≈ 2,8 px a 40%): ${Math.min(...ys)}`);
   assert.equal(ys[0], 0);
   assert.equal(ys[ys.length - 1], 0, 'volta ao sítio: ciclo sem salto');
-  // prefers-reduced-motion: sem balanço e com o zzz parado (em escada).
+  // prefers-reduced-motion: sem balanço (nem lateral) e com o zzz parado (em escada).
   const reduzido = css.slice(css.indexOf('@media(prefers-reduced-motion:reduce){'));
-  for (const regra of ['.wg-svg .character.wg-balanca{animation:none}', '.wg-svg .wg-z{animation:none;', '.wg-svg .question-flag-pulse{animation:none}']) {
+  for (const regra of ['.wg-svg .character.wg-balanca{animation:none}', '.wg-svg .character.wg-balanca-lateral{animation:none}', '.wg-svg .wg-z{animation:none;', '.wg-svg .question-flag-pulse{animation:none}']) {
     assert.ok(reduzido.includes(regra), regra);
   }
+});
+
+test('cena viva: quem dorme balança a cabeça LATERALMENTE — a mesma onda do ativo, no eixo X', () => {
+  const css = B.__CSS_PAINEL;
+  const kf = css.match(/@keyframes wg-balanco-lateral\{((?:[\d.]+%\{[^}]*\})+)\}/);
+  assert.ok(kf, '@keyframes wg-balanco-lateral');
+  const xs = [...kf[1].matchAll(/%\{transform:translateX\(([\d.]+)(?:px)?\)\}/g)].map((m) => Number(m[1]));
+  assert.equal(xs.length, 15, 'os MESMOS 14 degraus do balanço do ativo (+ o 100%)');
+  assert.ok(xs.every((x) => x >= 0), 'só se desloca para o lado e volta');
+  assert.equal(Math.max(...xs), 7, 'a MESMA distância do ativo (7 unidades), mas lateral');
+  assert.equal(xs[0], 0);
+  assert.equal(xs[xs.length - 1], 0, 'volta ao sítio: ciclo sem salto');
+  // A geometria bate certo com a do balanço vertical: mesmo cosseno, eixo trocado.
+  const ky = css.match(/@keyframes wg-balanco\{((?:[\d.]+%\{[^}]*\})+)\}/)[1];
+  const ys = [...ky.matchAll(/translateY\((-?[\d.]+)(?:px)?\)/g)].map((m) => Number(m[1]));
+  assert.deepEqual(xs.map((x) => -x + 0), ys, 'mesma onda, eixo X em vez de Y');
 });
 
 test('cena viva: o relógio da cena põe as animações (em pausa) no degrau comum — re-montar não salta', () => {
@@ -638,9 +671,9 @@ test('só anima o que se vê: mesas fora da vista da câmara (+ ~1 mesa) ficam s
   // CSS: fora de vista = animation:none (vence a regra da animação); o painel
   // guarda a lista dos animados à vista para o relógio.
   const css = B.__CSS_PAINEL;
-  assert.ok(css.includes('.wg-svg .desk-module.wg-fora .wg-z,.wg-svg .desk-module.wg-fora .character.wg-balanca,.wg-svg .desk-module.wg-fora .question-flag-pulse{animation:none}'),
-    'fora de vista: zzz, balanço e o pulso contínuo da bandeira de pergunta (flag-pulse da demo) param');
-  assert.match(BUNDLE, /g\.querySelectorAll\('\.character\.wg-balanca, \.wg-z'\)/);
+  assert.ok(css.includes('.wg-svg .desk-module.wg-fora .wg-z,.wg-svg .desk-module.wg-fora .character.wg-balanca,.wg-svg .desk-module.wg-fora .character.wg-balanca-lateral,.wg-svg .desk-module.wg-fora .question-flag-pulse{animation:none}'),
+    'fora de vista: zzz, balanço (vertical e lateral) e o pulso contínuo da bandeira de pergunta (flag-pulse da demo) param');
+  assert.match(BUNDLE, /g\.querySelectorAll\('\.character\.wg-balanca, \.character\.wg-balanca-lateral, \.wg-z'\)/);
   assert.match(BUNDLE, /relogio\(\)\.definir\(elementos, cena\)/);
 });
 
@@ -673,7 +706,7 @@ test('só anima o que se vê: quem fica DEBAIXO do celular (ou da barra por cima
     { esq: 444, dir: 795, topo: 14, fundo: 774 });
   assert.equal(B.__caixaNaTela({ offsetLeft: 0, offsetTop: 0, offsetWidth: 0, offsetHeight: 0, offsetParent: pai }, { left: 0, top: 0 }), null);
   // CSS: os tapados ficam sem animação (e fora da lista do relógio).
-  assert.ok(B.__CSS_PAINEL.includes('.wg-svg .character-hit.wg-tapado .wg-z,.wg-svg .character-hit.wg-tapado .character.wg-balanca{animation:none}'));
+  assert.ok(B.__CSS_PAINEL.includes('.wg-svg .character-hit.wg-tapado .wg-z,.wg-svg .character-hit.wg-tapado .character.wg-balanca,.wg-svg .character-hit.wg-tapado .character.wg-balanca-lateral{animation:none}'));
   assert.match(BUNDLE, /if \(!tapado\) for \(const el of g\.querySelectorAll/);
 });
 
@@ -936,7 +969,9 @@ test('REGRA DE OURO: cada corpo embutido é byte a byte o SVG da demo (expressio
   for (const m of bloco.matchAll(/\n\s{6}(\w+): \{\n((?:\s{8}\w+: \{ vb: '[^']+', corpo: `[^`]*` \},\n)+)/g)) {
     for (const e of m[2].matchAll(/\s{8}(\w+): \{ vb: '([^']+)', corpo: `([^`]*)` \}/g)) {
       // O preset 'sleeping' (olhos fechados, quem está Disponível) vem de
-      // assets/avatars/sleeping/<id>.svg; os outros 6 são os da demo.
+      // assets/avatars/sleeping/<id>.svg; os restantes vêm de
+      // assets/avatars/expressions/<id>/<preset>.svg (6 de estado da demo +
+      // focused/thinking/searching/wink da seleção curada por mensagem).
       const ficheiro = e[1] === 'sleeping'
         ? new URL(`assets/avatars/sleeping/${m[1]}.svg`, RAIZ)
         : new URL(`assets/avatars/expressions/${m[1]}/${e[1]}.svg`, RAIZ);
@@ -948,7 +983,7 @@ test('REGRA DE OURO: cada corpo embutido é byte a byte o SVG da demo (expressio
     }
   }
   assert.equal(aDormir.length, 8, `todas as identidades dormem: ${aDormir.join(', ')}`);
-  assert.equal(conferidos, 56, '8 identidades × (6 expressões da demo + a dormir)');
+  assert.equal(conferidos, 88, '8 identidades × 11 presets embutidos (6 de estado + sleeping + 4 da seleção curada)');
 });
 
 test('REGRA DE OURO: o mobiliário embutido é o furniture.svg da demo (ids com prefixo wg-)', () => {
@@ -1245,15 +1280,33 @@ test('núcleo: filtros mudam a sala e persistem; o celular abre e fecha com a pe
   assert.equal(avisos, 1, 'sem mudança, sem re-render');
   n.setFiltros({ ...B.__FILTROS_PADRAO });
 
-  assert.deepEqual(n.getTelefone(), { aberto: false, sessionId: null });
+  assert.deepEqual(n.getTelefone(), { aberto: false, sessionId: null, vista: 'conversa', grupoId: null, origem: 'cena' });
   n.selecionar('a');
   n.abrirTelefone('a');
-  assert.deepEqual(n.getTelefone(), { aberto: true, sessionId: 'a' });
+  assert.deepEqual(n.getTelefone(), { aberto: true, sessionId: 'a', vista: 'conversa', grupoId: null, origem: 'cena' });
   n.fecharTelefone();
   assert.equal(n.getTelefone().aberto, false);
   n.abrirTelefone('a');
   n.selecionar(null); // fechar a barra lateral fecha o celular dessa pessoa
   assert.equal(n.getTelefone().aberto, false);
+  // Navegação do celular tipo iMessage: Grupos → Grupo → Conversa e o "‹"
+  // sobe a pilha; na raiz fecha (desktop) e nada fica retido.
+  n.abrirGrupos();
+  assert.equal(n.getTelefone().vista, 'grupos', 'a segunda funcionalidade: os grupos (workspaces)');
+  n.abrirGrupo('ws:w1', ['a', 'b']);
+  assert.equal(n.getTelefone().vista, 'grupo');
+  assert.deepEqual(n.getGrupo().membros.map((m) => m.id), ['a', 'b'], 'o grupo retém as conversas dos membros');
+  n.abrirTelefone('b', 'grupo');
+  n.selecionar('b');
+  assert.equal(n.getTelefone().vista, 'conversa');
+  assert.equal(n.getTelefone().origem, 'grupo', 'a conversa veio do grupo: o "‹" volta lá');
+  n.voltarTelefone();
+  assert.equal(n.getTelefone().vista, 'grupo', '"‹" do grupo');
+  n.voltarTelefone();
+  assert.equal(n.getTelefone().vista, 'grupos', '"‹" dos grupos');
+  n.voltarTelefone();
+  assert.equal(n.getTelefone().aberto, false, 'na raiz o "‹ Escritório" fecha (desktop)');
+  assert.equal(n.getGrupo().membros.length, 0, 'nada fica retido depois de fechar');
   assert.ok(n.getPrecos() instanceof Map && n.getPrecos().size > 0, 'a tabela de preços do plugin chega à barra lateral');
   soltar();
   n.dispose();
@@ -1477,4 +1530,100 @@ test('câmara: a zona à vista segue a posição REAL do celular e da barra late
   // O painel usa a posição real dos dois (nada de "o celular está sempre à direita").
   assert.match(BUNDLE, /\[painel\.querySelector\('\.wg-telefone'\), painel\.querySelector\('\.wg-sidebar'\)\]/);
   assert.ok(!BUNDLE.includes('tel.offsetLeft - 24'), 'a suposição antiga saiu');
+});
+
+/* ---------- expressão por mensagem (seleção curada) + vigia ---------- */
+
+test('expressão por mensagem: a seleção curada roda a cada mensagem e os estados fortes mandam', () => {
+  assert.deepEqual(B.__SELECAO_CURADA, ['working', 'focused', 'thinking', 'searching', 'wink'],
+    'a curadoria: cinco caras de trabalho da biblioteca Avataaars');
+  let e = escritorio([{ type: 'session/added', sessionId: 'a' }, { type: 'status', sessionId: 'a', status: 'running' }]);
+  const cara = () => B.__presetDe(e.people.get('a'));
+  assert.equal(cara(), 'working', 'sem mensagens ainda: a cara de trabalho base');
+  const vistas = [];
+  for (let i = 0; i < 5; i += 1) {
+    e = B.__applyEvent(e, { type: 'message', sessionId: 'a', side: i % 2 ? 'assistant' : 'user' });
+    vistas.push(cara());
+  }
+  assert.deepEqual(vistas, ['focused', 'thinking', 'searching', 'wink', 'working'],
+    'A CADA mensagem a cara muda — e a seleção roda inteira e volta ao início');
+  // Os estados fortes mandam por cima da rotação…
+  e = B.__applyEvent(e, { type: 'question', sessionId: 'a', id: 'q1', text: 'ok?' });
+  assert.equal(cara(), 'waiting', 'quem pergunta espera');
+  e = B.__applyEvent(e, { type: 'question/answered', sessionId: 'a', id: 'q1' });
+  assert.equal(cara(), 'working', 'de volta à rotação, no índice onde parou');
+  e = B.__applyEvent(e, { type: 'tool', sessionId: 'a', phase: 'call', name: 'bash' });
+  assert.equal(cara(), 'tool', 'com ferramenta a correr');
+  e = B.__applyEvent(e, { type: 'tool', sessionId: 'a', phase: 'result', name: 'bash', ok: true });
+  e = B.__applyEvent(e, { type: 'status', sessionId: 'a', status: 'idle' });
+  assert.equal(cara(), 'sleeping', '…e quem está Disponível dorme');
+});
+
+test('vigia de mensagens: conta user/assistant message das conversas a correr e liberta ao parar', async () => {
+  const vistas = [];
+  let libertados = 0;
+  const tarefas = new Map();
+  let proxId = 1;
+  const agendar = (fn) => { const id = proxId; proxId += 1; tarefas.set(id, fn); return id; };
+  const cancelar = (id) => { tarefas.delete(id); };
+  const disparar = () => { for (const [id, fn] of [...tarefas]) { tarefas.delete(id); fn(); } };
+  let snap = { entries: [] };
+  const ouvintes = new Set();
+  const fluxo = {
+    getSnapshot: () => snap,
+    subscribe(fn) { ouvintes.add(fn); return () => ouvintes.delete(fn); },
+    emitir(entries) { snap = { entries }; for (const fn of [...ouvintes]) fn(); },
+  };
+  const sessoes = {
+    retain: (id) => ({ sessionId: id, ready: Promise.resolve({ eventSource: fluxo }), release: () => { libertados += 1; } }),
+  };
+  const vigia = B.__criarVigiaMensagens({
+    sessoes, aoMensagem: (id, lado) => vistas.push(`${id}:${lado}`), agendar, cancelar,
+    agora: () => Date.now(),
+  });
+  vigia.observar({ type: 'status', sessionId: 's1', status: 'running' });
+  await new Promise((r) => setTimeout(r, 0)); // ref.ready resolve e a 1.ª leitura corre
+  assert.equal(vigia.ligados(), 1, 'uma referência leve por conversa a correr');
+  // História anterior à vigia (e a que chega DEPOIS por loadOlder): nunca conta.
+  fluxo.emitir([
+    { type: 'event', event: { type: 'user/message', seq: 1, time: Date.now() - 60000 } },
+    { type: 'event', event: { type: 'tool/call', seq: 2, time: Date.now() - 60000 } },
+    { type: 'event', event: { type: 'user/message', seq: 7, time: Date.now() - 120000 } },
+  ]);
+  assert.deepEqual(vistas, [], 'a história não mexe na cara');
+  // O prompt que arrancou o turno (perto do retain) e as seguintes contam.
+  fluxo.emitir([
+    { type: 'event', event: { type: 'user/message', seq: 3, time: Date.now() - 200 } },
+    { type: 'event', event: { type: 'tool/call', seq: 4, time: Date.now() - 100 } },
+    { type: 'transient', event: { type: 'assistant/live-chunk', seq: 5, time: Date.now() } },
+    { type: 'event', event: { type: 'assistant/message', seq: 6, time: Date.now() } },
+  ]);
+  assert.deepEqual(vistas, ['s1:user', 's1:assistant'], 'a que arrancou o turno e a resposta');
+  // O mesmo log re-lido não conta de novo (chaves por seq).
+  fluxo.emitir([{ type: 'event', event: { type: 'user/message', seq: 3, time: Date.now() - 200 } }]);
+  assert.deepEqual(vistas, ['s1:user', 's1:assistant'], 'sem dupla contagem');
+  // Parar agenda a libertação com graça; voltar a correr cancela-a.
+  vigia.observar({ type: 'status', sessionId: 's1', status: 'idle' });
+  assert.equal(tarefas.size, 1, 'a libertação fica agendada (a última mensagem chega mesmo antes de parar)');
+  vigia.observar({ type: 'status', sessionId: 's1', status: 'running' });
+  assert.equal(tarefas.size, 0, 'voltou a correr dentro da graça: mantém-se');
+  assert.equal(libertados, 0);
+  // Re-ligação não recicla mensagens antigas (as chaves sobrevivem).
+  fluxo.emitir([{ type: 'event', event: { type: 'user/message', seq: 3, time: Date.now() - 200 } }]);
+  assert.deepEqual(vistas, ['s1:user', 's1:assistant'], 're-ligação não conta de novo');
+  // Em definitivo: liberta e desconta.
+  vigia.observar({ type: 'status', sessionId: 's1', status: 'idle' });
+  disparar();
+  assert.equal(libertados, 1);
+  assert.equal(vigia.ligados(), 0);
+  // session/removed também liberta; sem canal a vigia fica quieta (nada é inventado).
+  vigia.observar({ type: 'status', sessionId: 's2', status: 'running' });
+  assert.equal(vigia.ligados(), 1);
+  vigia.observar({ type: 'session/removed', sessionId: 's2' });
+  assert.equal(vigia.ligados(), 0);
+  const nula = B.__criarVigiaMensagens({ sessoes: null, aoMensagem: () => { throw new Error('não devia chamar'); } });
+  nula.observar({ type: 'status', sessionId: 'x', status: 'running' });
+  assert.equal(nula.ligados(), 0, 'sem ctx.sessions: sem vigia, sem mensagens inventadas');
+  nula.parar();
+  vigia.parar();
 });

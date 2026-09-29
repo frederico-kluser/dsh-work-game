@@ -810,3 +810,67 @@ test('aparência: iPhone + iMessage (#0B84FE / #E9E9EB, 18px, cauda, Dynamic Isl
   assert.ok(BUNDLE.includes("'Escritório')"), '"‹ Escritório" no cabeçalho');
   assert.deepEqual(B.inject, ['slots', 'layout', 'sessions'], 'o uiConversation lê-se com ctx.get — nunca no inject');
 });
+
+/* ---------- grupos (workspaces) e o feed do grupo ---------- */
+
+test('celular: GRUPOS = workspaces — lista clicável e o grupo mostra todos a falar e a escrever', () => {
+  assert.ok(BUNDLE.includes("'data-vista': 'grupos'"), 'tela de grupos');
+  assert.ok(BUNDLE.includes("className: 'wg-tel-grupo-linha'"), 'uma linha por workspace');
+  assert.ok(BUNDLE.includes('Abrir o grupo'), 'cada linha abre o grupo, com nome acessível');
+  assert.ok(BUNDLE.includes("'data-vista': 'grupo'"), 'tela do grupo (feed da equipa)');
+  assert.ok(BUNDLE.includes("className: 'wg-tel-remetente'"), 'o feed atribui cada linha a quem fala');
+  assert.ok(BUNDLE.includes('está a escrever…'), 'quem está a correr aparece a escrever no grupo');
+  assert.ok(BUNDLE.includes('Toque numa pessoa para lhe escrever'), 'no grupo escreve-se à pessoa (abre a conversa individual)');
+});
+
+test('celular: ícone de LIGAR na conversa (a câmara saiu) e SEM ligar no grupo', () => {
+  assert.ok(BUNDLE.includes('ICONES_TELEFONE.ligar()'), 'a conversa tem o handset');
+  assert.ok(!BUNDLE.includes('ICONES_TELEFONE.video'), 'sem o ícone de câmara/FaceTime');
+  assert.ok(!/video: \(\) => svgTel/.test(BUNDLE), 'o ícone de câmara foi mesmo removido');
+  assert.match(BUNDLE, /\/\/ Sem ícone de ligar no grupo/, 'no grupo não há ícone de ligar');
+});
+
+test('celular: microfone no lugar do "+" ao lado do campo de mensagem', () => {
+  assert.ok(BUNDLE.includes("className: 'wg-tel-voz'"), 'botão de voz ao lado do campo');
+  assert.ok(BUNDLE.includes("title: 'Mensagem de voz: use o DSH'"), 'com o título honesto (voz é no DSH)');
+  assert.ok(!/wg-tel-mais/.test(BUNDLE), 'o "+" dos anexos saiu');
+  assert.ok(!/Anexos \(use o DSH\)/.test(BUNDLE), 'sem a proposta de anexos');
+});
+
+test('grupo: linhasDoGrupo junta as conversas por hora, com rótulo de remetente e quem escreve no fim', () => {
+  const agora = Date.UTC(2026, 8, 29, 12, 0, 0);
+  const linhas = B.__linhasDoGrupo([
+    {
+      id: 'a', nome: 'Rui', aCorrer: true,
+      linhas: [
+        { key: 'm1', tipo: 'msg', lado: 'ele', texto: 'olá', time: agora - 5000, estado: 'ok' },
+        { key: 'm2', tipo: 'msg', lado: 'eu', texto: 'bom dia', time: agora - 4000, estado: 'ok' },
+      ],
+    },
+    {
+      id: 'b', nome: 'Bia',
+      linhas: [
+        { key: 'm3', tipo: 'msg', lado: 'ele', texto: 'feito!', time: agora - 3000, estado: 'ok' },
+        { key: 'f1', tipo: 'ferramentas', itens: [{ key: 't1', nome: 'bash', resumo: 'npm test', estado: 'ok' }], time: agora - 2500 },
+        { key: 'd1', tipo: 'data', dia: 'hoje', hora: '12:00' }, // refeito na junção
+      ],
+    },
+  ], { agora });
+  assert.deepEqual(linhas.map((l) => (l.membro ? `${l.membro.id}:${l.tipo}` : l.tipo)),
+    ['data', 'a:msg', 'a:msg', 'b:msg', 'b:ferramentas', 'a:a-escrever'],
+    'hora no topo, linhas por ordem de hora; o "a escrever…" de quem corre fica no fim');
+  assert.equal(linhas[1].rotulo, true, 'a primeira linha de alguém leva o nome de quem fala');
+  assert.equal(linhas[2].rotulo, false, 'mesmo remetente: sem rótulo repetido');
+  assert.equal(linhas[3].rotulo, true, 'mudou de remetente: rótulo');
+  assert.equal(linhas[3].membro.nome, 'Bia', 'cada linha sabe de quem é');
+});
+
+test('celular: modo TELEMÓVEL mostra SÓ o celular — sem moldura, sem escritório, sem fechar', () => {
+  const css = B.__CSS_PAINEL;
+  assert.ok(css.includes('.wg-so-celular .wg-telefone{position:absolute;inset:0;'), 'o celular ocupa o ecrã todo');
+  assert.ok(css.includes('.wg-so-celular .wg-tel-ilha,.wg-so-celular .wg-tel-home{display:none}'), 'sem moldura (ilha nem barra de casa)');
+  assert.ok(css.includes('.wg-so-celular .wg-toolbar,.wg-so-celular .wg-sidebar,.wg-so-celular .wg-rodape{display:none}'), 'só o celular se vê');
+  assert.match(BUNDLE, /max-width: 620px\) and \(pointer: coarse\)/, 'deteção de telemóvel (retrato + toque)');
+  assert.match(BUNDLE, /getTelefone\(\)\.aberto && !emCelular\(\)/, 'Esc não fecha o celular no telemóvel');
+  assert.ok(BUNDLE.includes("voltar: podeFechar ? 'Escritório' : null"), 'no telemóvel não há "‹ Escritório" (não fecha)');
+});

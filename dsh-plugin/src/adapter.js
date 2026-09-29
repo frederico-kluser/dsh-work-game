@@ -182,9 +182,15 @@ export function createAdapter({ onEvent, sessions, projections }) {
       case 'compaction/end':
         emitEvent({ type: 'compaction', sessionId, phase: 'end' })
         break
+      case 'user/message':
+      case 'assistant/message':
+        // Mensagens do log durável da sessão: sem conteúdo (ninguém o pede),
+        // só o lado — cada uma troca a cara da pessoa (evento `message`).
+        emitEvent({ type: 'message', sessionId, side: event.type === 'user/message' ? 'user' : 'assistant' })
+        break
       default:
-        // request/header|context e model/selection → projeções; turn/start,
-        // step/*, mensagens… — sem representação no contrato.
+        // request/header|context e model/selection → projeções; turn/start e
+        // step/* — sem representação no contrato.
         break
     }
   }

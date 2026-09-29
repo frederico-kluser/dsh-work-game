@@ -73,8 +73,16 @@ function deriveEmoji(person) {
   }
 }
 
+/* SELEÇÃO CURADA de expressões (biblioteca Avataaars): as caras que se trocam
+ * A CADA MENSAGEM durante o trabalho — o índice avança no evento `message` e a
+ * mesma pessoa não fica sempre com a mesma cara. Os estados fortes (espera,
+ * erro, ferramenta, sucesso) continuam a mandar; isto só manda enquanto se
+ * trabalha. Curação nossa (só caras de trabalho), igual à do Modo jogo. */
+const SELECAO_CURADA = ['working', 'focused', 'thinking', 'searching', 'wink'];
+
 /* Expressão Avataaars derivada — vocabulário fechado idle/working/tool/waiting/
- * success/error — com override vencedor quando definido (ex.: 'approval'). */
+ * success/error — com override vencedor quando definido (ex.: 'approval') e a
+ * rotação da seleção curada a mandar enquanto se trabalha. */
 function deriveExpression(person) {
   if (person.expressionOverride) return person.expressionOverride;
   if (person.question) return 'waiting';
@@ -82,7 +90,7 @@ function deriveExpression(person) {
   if (person.status === 'error') return 'error';
   if (person.lastTool && person.lastTool.phase === 'call') return 'tool';
   if (person.status === 'done') return 'success';
-  if (person.status === 'working') return 'working';
+  if (person.status === 'working') return SELECAO_CURADA[person.expressionIndex ?? 0] ?? 'working';
   return 'idle';
 }
 
@@ -117,6 +125,7 @@ function createPerson(sessionId, event) {
     outputs: [],
     /* campos internos (não apresentar diretamente) */
     expressionOverride: null,
+    expressionIndex: 0, /* rotação na SELECAO_CURADA, avança a cada `message` */
     retrying: false,
     compacting: false,
     lastTool: null,
@@ -194,6 +203,13 @@ export function applyEvent(state, event) {
       person.retrying = false;
       person.compacting = false;
       person.lastTool = null;
+      break;
+    }
+    case 'message': {
+      /* A cada mensagem durante o trabalho, a cara roda para a próxima da
+       * seleção curada (side: 'user' | 'assistant'). Os estados fortes mandam
+       * na expressão — isto só manda enquanto se trabalha (deriveExpression). */
+      person.expressionIndex = ((person.expressionIndex ?? 0) + 1) % SELECAO_CURADA.length;
       break;
     }
     case 'tool': {

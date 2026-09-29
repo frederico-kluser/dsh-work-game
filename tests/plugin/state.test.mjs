@@ -144,6 +144,26 @@ test('status running/idle alterna entre working e idle (emoji 📝/💤)', () =>
   assert.equal(v.expression, 'idle');
 });
 
+test('message: a cada mensagem durante o trabalho a expressão roda pela seleção curada', () => {
+  let state = office([{ type: 'status', sessionId: 's1', status: 'running' }]);
+  assert.equal(personView(state, 's1').expression, 'working', 'sem mensagens ainda: a cara de trabalho base');
+  const vistas = [];
+  for (let i = 0; i < 5; i += 1) {
+    state = applyEvent(state, { type: 'message', sessionId: 's1', side: i % 2 ? 'assistant' : 'user' });
+    vistas.push(personView(state, 's1').expression);
+  }
+  assert.deepEqual(vistas, ['focused', 'thinking', 'searching', 'wink', 'working'],
+    'roda toda a seleção curada (working·focused·thinking·searching·wink) e volta ao início');
+  // Os estados fortes mandam na cara mesmo com mensagens a chegar.
+  state = applyEvent(state, { type: 'question', sessionId: 's1', id: 'q1', text: 'ok?' });
+  state = applyEvent(state, { type: 'message', sessionId: 's1', side: 'assistant' });
+  assert.equal(personView(state, 's1').expression, 'waiting', 'esperar resposta manda sobre a rotação');
+  // Fora do trabalho, a rotação fica guardada mas não manda (idle).
+  state = applyEvent(state, { type: 'question/answered', sessionId: 's1', id: 'q1' });
+  state = applyEvent(state, { type: 'status', sessionId: 's1', status: 'idle' });
+  assert.equal(personView(state, 's1').expression, 'idle');
+});
+
 test('só turn/end completed produz done — nenhum outro evento conta como conclusão', () => {
   const eventos = [
     { type: 'status', sessionId: 's1', status: 'running' },

@@ -563,47 +563,66 @@ test('usage: deltas de tokenUsage com linha de base e atribuição modelSelectio
     model: 'deepseek/deepseek-v4-flash-0731',
     uncachedInput: 200, output: 50, cacheRead: 20, cacheWrite: 10,
   })
-  // repetição do mesmo settlement: sem delta, silêncio
+  // Cada mensagem do log vira também `message` (a cara troca a cada uma).
+  assert.deepEqual(events[2], { type: 'message', sessionId: 's1', side: 'assistant' })
+  // repetição do mesmo settlement: sem delta de uso (a entrada é distinta: a cara troca)
   source.appendEvent('s1', assistant(1, {
     inputTokens: 200, outputTokens: 50, cacheReadTokens: 20, cacheWriteTokens: 10,
   }))
-  assert.equal(events.length, 2)
+  assert.deepEqual(events.slice(3), [{ type: 'message', sessionId: 's1', side: 'assistant' }], 'sem delta de uso na repetição; a mensagem conta')
   source.appendEvent('s1', assistant(2, {
     inputTokens: 300, outputTokens: 60, cacheReadTokens: 25, cacheWriteTokens: 12,
   }))
-  assert.deepEqual(events[2], {
+  assert.deepEqual(events[4], {
     type: 'usage',
     sessionId: 's1',
     provider: 'openrouter-extra',
     model: 'deepseek/deepseek-v4-flash-0731',
     uncachedInput: 300, output: 60, cacheRead: 25, cacheWrite: 12,
   })
+  assert.deepEqual(events[5], { type: 'message', sessionId: 's1', side: 'assistant' })
 })
 
 test('usage: sem atribuição a base fica parada e o delta chega com a rota', () => {
   const { adapter, source, events } = setup({ sessions: [{ id: 's2' }] })
   adapter.start()
   events.length = 0
-  // sem modelSelection nem request/header: base fixada, nada emitido
+  // sem modelSelection nem request/header: base fixada, o gasto fica calado —
+  // mas a MENSAGEM é evento na mesma (a cara troca a cada uma)
   source.appendEvent('s2', {
     type: 'assistant/message', turn: 1, step: 1, message: {}, stream: [],
     usage: { inputTokens: 100, outputTokens: 10, cacheReadTokens: 0, cacheWriteTokens: 0 },
   })
-  assert.equal(events.length, 0)
+  assert.deepEqual(events, [{ type: 'message', sessionId: 's2', side: 'assistant' }])
   // request/header dobra modelSelection → a rota chega pela projeção
   source.appendEvent('s2', {
     type: 'request/header', reason: 'initial', header: { config: { provider: 'p', model: 'm' } },
   })
-  assert.deepEqual(events[0], { type: 'model', sessionId: 's2', provider: 'p', model: 'm' })
+  assert.deepEqual(events[1], { type: 'model', sessionId: 's2', provider: 'p', model: 'm' })
   // o próximo gasto atribui o delta ACUMULADO desde a base (100+150) — nada se perde
   source.appendEvent('s2', {
     type: 'assistant/message', turn: 2, step: 1, message: {}, stream: [],
     usage: { inputTokens: 150, outputTokens: 20, cacheReadTokens: 0, cacheWriteTokens: 0 },
   })
-  assert.deepEqual(events[1], {
+  assert.deepEqual(events[2], {
     type: 'usage', sessionId: 's2', provider: 'p', model: 'm',
     uncachedInput: 250, output: 30, cacheRead: 0, cacheWrite: 0,
   })
+  assert.deepEqual(events[3], { type: 'message', sessionId: 's2', side: 'assistant' })
+})
+
+test('message: user/message e assistant/message viram `message` com o lado (a cara troca a cada mensagem)', () => {
+  const { adapter, source, events } = setup({ sessions: [{ id: 's1' }] })
+  adapter.start()
+  events.length = 0
+  source.appendEvent('s1', { type: 'user/message', turn: 1, message: { content: [{ type: 'text', text: 'olá' }] } })
+  source.appendEvent('s1', { type: 'assistant/message', turn: 1, step: 1, message: {}, stream: [] })
+  source.appendEvent('s1', { type: 'tool/call', turn: 1, step: 1, callId: 'c1', name: 'bash', arguments: '{}' })
+  assert.deepEqual(events, [
+    { type: 'message', sessionId: 's1', side: 'user' },
+    { type: 'message', sessionId: 's1', side: 'assistant' },
+    { type: 'tool', sessionId: 's1', phase: 'call', name: 'bash' },
+  ], 'só as mensagens contam para a cara; ferramentas têm o seu próprio evento')
 })
 
 test('model: modelSelection define a rota; contextPressure traz capacity (last-wins)', () => {

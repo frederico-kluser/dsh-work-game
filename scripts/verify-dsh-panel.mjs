@@ -3,11 +3,14 @@
  * scripts/verify-dsh-panel.mjs — valida o painel do escritório NUM DSH web real.
  *
  * Uso:  node scripts/verify-dsh-panel.mjs <url-base> [pasta-de-saída] [--acoes] [--recrutar]
- *                                          [--conversa] [--enviar "<regex do título>"]
+ *                                          [--conversa] [--grupos] [--enviar "<regex do título>"]
  *       (CHROME_PATH escolhe o browser: Chrome, Chromium ou Brave)
  *       --acoes    rato real: clicar seleciona, arrastar não clica, "Abrir no DSH" navega
  *       --recrutar lugar livre → conversa nova no workspace (pode criar uma em branco)
  *       --conversa o CELULAR: abre a conversa de cada pessoa, exige bolhas reais
+ *       --grupos   os GRUPOS do celular (workspaces): lista, feed de todos a
+ *                  falar, clique → conversa individual, ícone de ligar (só na
+ *                  conversa), microfone no lugar do "+" e o modo TELEMÓVEL
  *                  (cores do iMessage, cauda, fim da conversa à vista), fecha com
  *                  "‹ Escritório" e Esc, troca de pessoa — e nenhuma referência
  *                  da sessão fica retida (window.__wgTelefoneRefs volta a 0)
@@ -45,12 +48,13 @@ const posicionais = process.argv.slice(2).filter((a, i, todos) => !a.startsWith(
 const ACOES = process.argv.includes('--acoes');       // rato real + "Abrir conversa"
 const RECRUTAR = process.argv.includes('--recrutar'); // + lugar livre (pode criar conversa em branco)
 const CONVERSA = process.argv.includes('--conversa'); // celular: bolhas reais, fechar, trocar, sem fugas
+const GRUPOS = process.argv.includes('--grupos');     // grupos (workspaces) + modo telemóvel
 const iEnviar = process.argv.indexOf('--enviar');
 const ENVIAR = iEnviar >= 0 ? process.argv[iEnviar + 1] : null; // regex do título da conversa de teste
 const MENSAGEM = process.env.VERIFY_MENSAGEM || 'Teste do celular do Modo jogo: responde só com a palavra ok.';
 const base = posicionais[0];
 if (!base) {
-  console.error('uso: node scripts/verify-dsh-panel.mjs <url-base> [pasta-de-saída] [--acoes] [--recrutar] [--conversa] [--enviar "<regex do título>"]');
+  console.error('uso: node scripts/verify-dsh-panel.mjs <url-base> [pasta-de-saída] [--acoes] [--recrutar] [--conversa] [--grupos] [--enviar "<regex do título>"]');
   process.exit(2);
 }
 const OUT = resolve(posicionais[1] || join(ROOT, 'logs', 'verify-dsh'));
@@ -550,10 +554,14 @@ try {
       ok('mensagens anteriores', `${antes} → ${depois.eu + depois.ele} bolhas`);
     }
 
-    // "‹ Escritório" fecha; "Conversa" reabre; Esc fecha — sem fugas.
+    // "‹" sobe a pilha do celular (conversa → Grupos); na raiz, "‹ Escritório"
+    // fecha; "Conversa" reabre; Esc fecha — sem fugas.
+    await page.click('.wg-tel-voltar');
+    await page.waitFor('document.querySelector(".wg-telefone") && document.querySelector(".wg-telefone").getAttribute("data-vista") === "grupos"', 4000);
+    assert.ok(await page.eval(`!!document.querySelector('.wg-tel-grupo-linha')`), 'o "‹" da conversa abre a lista de Grupos');
     await page.click('.wg-tel-voltar');
     await page.waitFor('!document.querySelector(".wg-telefone") && window.__wgTelefoneRefs === 0', 3000);
-    assert.ok(await page.eval(`!!document.querySelector('.wg-sidebar')`), '"‹ Escritório" fecha só o celular');
+    assert.ok(await page.eval(`!!document.querySelector('.wg-sidebar')`), '"‹ Escritório" (raiz dos grupos) fecha só o celular');
     await page.click('.wg-sidebar .wg-abrir-telefone');
     await esperarConversa();
     assert.equal(await page.eval('window.__wgTelefoneRefs'), 1);
@@ -563,6 +571,110 @@ try {
     await page.waitFor('!document.querySelector(".wg-sidebar")', 3000);
     await sleep(900); // a tela volta à largura inteira e a câmara reenquadra (ResizeObserver)
     ok('"‹ Escritório", "Conversa" e Esc', 'abrem/fecham o celular; 0 referências retidas no fim');
+  }
+
+  if (GRUPOS) {
+    /* ── GRUPOS (workspaces): lista → feed de todos → conversa individual ── */
+    const lugaresG = await page.eval(`[...document.querySelectorAll('.wg-svg .seat[role="button"][data-session-id]')].map((el) => el.getAttribute('data-session-id'))`);
+    assert.ok(lugaresG.length > 0, 'há pessoas na sala');
+    await page.eval(`document.querySelector('.wg-svg .seat[role="button"][data-session-id]').dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }))`);
+    await page.waitFor('!!document.querySelector(".wg-telefone")', 8000);
+    // Conversa: LIGAR (a câmara saiu) e MICROFONE no lugar do "+" (sem duplicado).
+    const icones = await page.eval(`(() => {
+      const t = document.querySelector('.wg-telefone');
+      return { ligar: !!t.querySelector('.wg-tel-icone-direita'), voz: !!t.querySelector('.wg-tel-voz'),
+        mais: !!t.querySelector('.wg-tel-mais'), micDentro: !!t.querySelector('.wg-tel-microfone') };
+    })()`);
+    assert.ok(icones.ligar, 'a conversa tem o ícone de ligar');
+    assert.ok(icones.voz && !icones.mais, 'microfone no lugar do "+"');
+    assert.ok(!icones.micDentro, 'sem microfone duplicado dentro da cápsula');
+    ok('conversa: ligar + microfone', JSON.stringify(icones));
+    await page.screenshot(join(OUT, '12-celular-ligar-microfone.png'));
+
+    // "‹" → GRUPOS (os workspaces da sala, tipo iMessage "Messages").
+    await page.click('.wg-tel-voltar');
+    await page.waitFor('document.querySelector(".wg-telefone") && document.querySelector(".wg-telefone").getAttribute("data-vista") === "grupos"', 5000);
+    const grupos = await page.eval(`[...document.querySelectorAll('.wg-tel-grupo-linha')].map((b) => ({
+      nome: (b.querySelector('.wg-tel-grupo-nome') || {}).textContent || '',
+      sub: (b.querySelector('.wg-tel-grupo-sub') || {}).textContent || '',
+    }))`);
+    assert.ok(grupos.length >= 1, 'a lista de grupos tem os workspaces da sala');
+    ok('Grupos = workspaces', grupos.map((g) => `${g.nome} [${g.sub}]`).join(' | '));
+    await page.screenshot(join(OUT, '13-celular-grupos.png'));
+
+    // Grupo: o feed de TODOS a falar e a escrever — e sem ícone de ligar.
+    await page.click('.wg-tel-grupo-linha');
+    await page.waitFor('document.querySelector(".wg-telefone") && document.querySelector(".wg-telefone").getAttribute("data-vista") === "grupo"', 5000);
+    await sleep(1800); // as conversas dos membros publicam
+    const feed = await page.eval(`(() => {
+      const t = document.querySelector('.wg-telefone');
+      return {
+        workspace: t.getAttribute('data-workspace-id'),
+        linhas: t.querySelectorAll('.wg-tel-lista > *').length,
+        falam: [...new Set([...t.querySelectorAll('.wg-tel-remetente')].map((e) => e.textContent.trim()))],
+        escrevendo: t.querySelectorAll('.wg-tel-a-escrever').length,
+        ligar: !!t.querySelector('.wg-tel-icone-direita'),
+        clicaveis: t.querySelectorAll('.wg-tel-msg[data-session-id][role="button"]').length,
+        campo: (t.querySelector('.wg-tel-campo textarea') || {}).placeholder || '',
+      };
+    })()`);
+    assert.ok(feed.linhas > 0, 'o grupo tem linhas (ou pelo menos o estado vazio honesto)');
+    assert.ok(!feed.ligar, 'no grupo NÃO há ícone de ligar');
+    ok('grupo: feed de todos', `workspace=${feed.workspace} · ${feed.linhas} linhas · falam: ${feed.falam.join(', ') || '(sem falas ainda)'} · ${feed.escrevendo} a escrever · campo="${feed.campo}"`);
+    await page.screenshot(join(OUT, '14-celular-grupo-feed.png'));
+
+    // Clicar numa mensagem de alguém abre a conversa individual dessa pessoa.
+    const alvoId = await page.eval(`(() => { const m = document.querySelector('.wg-tel-msg[data-session-id][role="button"]'); return m ? m.getAttribute('data-session-id') : null; })()`);
+    if (alvoId) {
+      await page.eval(`document.querySelector('.wg-tel-msg[data-session-id][role="button"]').dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }))`);
+      await page.waitFor(`document.querySelector('.wg-telefone') && document.querySelector('.wg-telefone').getAttribute('data-session-id') === ${JSON.stringify(alvoId)}`, 10000);
+      ok('clique num membro abre a conversa individual', alvoId);
+      await page.screenshot(join(OUT, '14b-celular-do-grupo.png'));
+      await page.click('.wg-tel-voltar');
+      await page.waitFor('document.querySelector(".wg-telefone").getAttribute("data-vista") === "grupo"', 5000);
+      ok('"‹" da conversa volta AO grupo');
+    }
+    // A pilha fecha toda sem reter referências.
+    await page.click('.wg-tel-voltar');
+    await page.waitFor('document.querySelector(".wg-telefone").getAttribute("data-vista") === "grupos"', 5000);
+    await page.click('.wg-tel-voltar');
+    await page.waitFor('!document.querySelector(".wg-telefone") && window.__wgTelefoneRefs === 0', 5000);
+    ok('grupos → grupo → conversa: a pilha fecha sem reter referências');
+
+    // MODO TELEMÓVEL: o celular É o ecrã — sem moldura, sem escritório e sem fechar.
+    await page.setViewport(390, 844, true);
+    await sleep(800);
+    const mob = await page.eval(`(() => {
+      const p = document.querySelector('.wg-painel');
+      const t = document.querySelector('.wg-telefone');
+      const r = t ? t.getBoundingClientRect() : null;
+      const pr = p ? p.getBoundingClientRect() : null;
+      return {
+        classe: p ? p.className : '',
+        vista: t ? t.getAttribute('data-vista') : null,
+        caixa: r ? [r.x, r.y, r.width, r.height].map(Math.round) : null,
+        painel: pr ? [pr.x, pr.y, pr.width, pr.height].map(Math.round) : null,
+        ilha: t && t.querySelector('.wg-tel-ilha') ? getComputedStyle(t.querySelector('.wg-tel-ilha')).display : null,
+        voltar: t ? !!t.querySelector('.wg-tel-voltar') : null,
+        toolbar: getComputedStyle(document.querySelector('.wg-toolbar')).display,
+      };
+    })()`);
+    assert.ok(/wg-so-celular/.test(mob.classe), 'o painel entra em modo telemóvel');
+    assert.equal(mob.vista, 'grupos', 'abre direto na lista de grupos');
+    assert.ok(!mob.voltar, 'sem "‹ Escritório": no telemóvel o celular não fecha');
+    assert.equal(mob.ilha, 'none', 'sem moldura (Dynamic Island fora)');
+    assert.equal(mob.toolbar, 'none', 'só o celular se vê (sem toolbar/sala)');
+    // O celular ocupa TODO o painel (o chrome do DSH — rail de 56px — fica fora).
+    assert.ok(mob.caixa && mob.painel
+      && Math.abs(mob.caixa[2] - mob.painel[2]) <= 2 && Math.abs(mob.caixa[3] - mob.painel[3]) <= 2,
+    `o celular ocupa o painel todo (celular ${mob.caixa} · painel ${mob.painel})`);
+    await page.key('.wg-tel-lista', 'Escape');
+    await sleep(400);
+    assert.ok(await page.eval('!!document.querySelector(".wg-telefone")'), 'Esc não fecha o celular no telemóvel');
+    ok('modo TELEMÓVEL: só o celular, sem moldura e sem fechar', `caixa ${mob.caixa} · vista ${mob.vista}`);
+    await page.screenshot(join(OUT, '15-celular-movel.png'));
+    await page.setViewport(1160, 805, false);
+    await sleep(600);
   }
 
   if (ENVIAR) {

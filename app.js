@@ -312,7 +312,8 @@ function setExpression(person, presetId) {
   person.expressionPreset = presetId || null;
   render();
   const node = $(`[data-character-id="${person.id}"] image`);
-  if (node && !matchMedia('(prefers-reduced-motion: reduce)').matches) {
+  /* WAAPI fora do alcance do CSS: reduced-motion E visibilidade à mão. */
+  if (node && !matchMedia('(prefers-reduced-motion: reduce)').matches && pessoaNoEcrã(person)) {
     node.animate([{ opacity: 0.25 }, { opacity: 1 }], { duration: 180, easing: 'ease-out' });
   }
 }
@@ -488,6 +489,9 @@ function bubblePosition(personId) {
   return null;
 }
 function showBubble(person, text, kind = 'result') {
+  /* Animar só o que está visível: um balão fora do ecrã nunca se vê (dura 1 s)
+     — nem se cria, nem se anima. */
+  if (!pessoaNoEcrã(person)) return;
   state.bubbles.set(person.id, { text, kind, phase: 'in', stamp: Date.now() });
   syncBubbles();
   setTimeout(() => {
@@ -903,17 +907,76 @@ function render({ fit = false } = {}) {
   renderWorld();
   renderInspector();
   renderFeed();
+  sincronizarAnimacoes(); // a cena re-monta-se: reclassifica o que anima à vista
   if (fit) requestAnimationFrame(fitScene);
 }
 
 /* ---------- camera ---------- */
+let hitScaleAtual = null;
 function updateTransform() {
+  /* Só `transform` se move (compositor, sem repaint). Os hit areas ganham
+     escala inversa com o zoom (Fitts ≥24px) via variável — e só se reescreve
+     quando ela MUDA, para o arrastar puro não recalcular a sala toda. */
   $('#world').style.transform = `translate(${state.pan.x}px, ${state.pan.y}px) scale(${state.zoom})`;
-  /* hit areas grow as the camera zooms out, keeping click targets ≥24px CSS (Fitts) */
-  $('#world').style.setProperty('--hit-scale', String(Math.min(2.8, Math.max(1, 1 / state.zoom))));
+  const hit = String(Math.min(2.8, Math.max(1, 1 / state.zoom)));
+  if (hit !== hitScaleAtual) {
+    hitScaleAtual = hit;
+    $('#world').style.setProperty('--hit-scale', hit);
+  }
   $('#zoom-value').textContent = Math.round(state.zoom * 100) + '%';
   $('#zoom-out').disabled = state.zoom <= 0.16;
   $('#zoom-in').disabled = state.zoom >= 1.5;
+  camaraAtiva();
+  agendarSincronia();
+}
+
+/* ---------- performance: animar SÓ o que está visível (regras Motion) ----------
+   MotionScore: tudo o que anima é `transform`/`opacity`/`filter` (tier S);
+   nada de layout/paint por frame. Em cima disso, três portões:
+   1. VISIBILIDADE — animações contínuas (o pulso do ❓) e transitórias (balão,
+      portátil, fade da expressão) só acontecem com a pessoa no ecrã;
+   2. CAMADA GPU — `will-change` do mundo vive só durante o gesto da câmara
+      (nada de camada permanente a ocupar memória);
+   3. ABA ESCONDIDA — nada se vê, nada anima (`html.oculto` põe tudo em pausa).
+   `prefers-reduced-motion` continua a desligar o resto (CSS) e as animações
+   WAAPI (aqui, onde o CSS não alcança). */
+function dentroDoEcrã(box, mx, my, folga = 260) {
+  const x = box.left + state.pan.x + mx * state.zoom;
+  const y = box.top + state.pan.y + my * state.zoom;
+  return x >= box.left - folga && x <= box.right + folga && y >= box.top - folga && y <= box.bottom + folga;
+}
+function pontoNoEcrã(mx, my, folga = 260) {
+  return dentroDoEcrã($('#viewport').getBoundingClientRect(), mx, my, folga);
+}
+function pessoaNoEcrã(person, folga = 260) {
+  const pos = person && bubblePosition(person.id);
+  return !pos || pontoNoEcrã(pos.x, pos.y, folga);
+}
+function sincronizarAnimacoes() {
+  const flags = document.querySelectorAll('.question-flag');
+  if (!flags.length) return;
+  const box = $('#viewport').getBoundingClientRect(); // UMA leitura por sincronia (nada de thrash)
+  for (const g of flags) {
+    const pulse = g.querySelector('.question-flag-pulse');
+    if (!pulse) continue;
+    const p = personById(g.getAttribute('data-agent'));
+    const pos = p && bubblePosition(p.id);
+    pulse.classList.toggle('fora-de-vista', !!pos && !dentroDoEcrã(box, pos.x, pos.y));
+  }
+}
+let syncPendente = false;
+function agendarSincronia() {
+  if (syncPendente) return;
+  syncPendente = true;
+  requestAnimationFrame(() => { syncPendente = false; sincronizarAnimacoes(); });
+}
+let camaraTimer = null;
+function camaraAtiva() {
+  const world = $('#world');
+  if (!world) return;
+  world.classList.add('camara-ativa');
+  clearTimeout(camaraTimer);
+  camaraTimer = setTimeout(() => world.classList.remove('camara-ativa'), 220);
 }
 function fitScene() {
   const box = $('#viewport').getBoundingClientRect();
@@ -1030,7 +1093,7 @@ function returnTeam(teamId) {
 function animateTransfer(id, before) {
   /* FRONTEND-ONLY MOTION: the ONE avatar element lifts and slides to its new
      seat. It never clones a person and never touches real execution. */
-  if (!before || matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+  if (!before || matchMedia('(prefers-reduced-motion: reduce)').matches || !pessoaNoEcrã(personById(id))) return;
   requestAnimationFrame(() => {
     const el = $(`[data-character-id="${id}"]`);
     if (!el) return;
@@ -1165,7 +1228,7 @@ function submitTaskNow(person, text, paper = null) {
   emitOutput(person, `tarefa: ${text}`, 'message');
   render();
   const laptop = $(`[data-character-id="${person.id}"]`)?.closest('.desk-module')?.querySelectorAll('.character-laptop');
-  laptop?.forEach((n) => n.classList.add('laptop-arriving'));
+  if (pessoaNoEcrã(person)) laptop?.forEach((n) => n.classList.add('laptop-arriving'));
   toast(`Notebook pronto. A tarefa de ${person.name} é só simulação.`);
 }
 function removePaper(person, paperId) {
@@ -1566,6 +1629,11 @@ $('#viewport').addEventListener('keydown', (e) => {
 });
 let resizeTimer;
 window.addEventListener('resize', () => { clearTimeout(resizeTimer); resizeTimer = setTimeout(fitScene, 120); });
+/* Aba escondida = nada visível = nada anima: o CSS entra em pausa
+   (html.oculto) e as animações WAAPI já são filtradas pela visibilidade. */
+document.addEventListener('visibilitychange', () => {
+  document.documentElement.classList.toggle('oculto', document.hidden);
+});
 
 /* boot */
 seed();

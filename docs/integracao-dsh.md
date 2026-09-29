@@ -8,10 +8,13 @@
 > custo estimado, velocidade de tokens e a delegação em curso (subagentes a correr), com
 > as ações Abrir conversa / Nova sessão da API pública `uiWorkspace` — sem inventar nada
 > (ver §7 de `docs/contratos-plugin.md`). Instalar por `link:` (a instalação `file:` é uma
-> cópia congelada que o DSH continua a servir). Continua por ligar: os
-> eventos de fio em tempo real (turn/end, tool/*, user-questions, approval/*) via
-> `retain` + `eventSource`, para os quais `src/adapter.js` (lado host) mantém o
-> mapeamento verificado abaixo. Factos DSH verificados no checkout local
+> cópia congelada que o DSH continua a servir). **Mensagens já ligadas**: o primeiro sinal
+> de fio em tempo real no browser é `user/message` / `assistant/message` → `message`, que
+> troca a cara da pessoa a cada mensagem (vigia de `client.js`: `retain` + `eventSource`
+> enquanto a conversa corre, libertada ao parar — ver §7 de `docs/contratos-plugin.md`).
+> Continua por ligar: os restantes eventos de fio em tempo real (turn/end, tool/*,
+> user-questions, approval/*) via `retain` + `eventSource`, para os quais `src/adapter.js`
+> (lado host) mantém o mapeamento verificado abaixo. Factos DSH verificados no checkout local
 > (`deepseek-harness`, `0.1.6-alpha.2`), arquivo:linha em `docs/conhecimento/07-features-futuras.md`;
 > vocabulário e contratos em `docs/contratos-plugin.md`.
 
@@ -46,6 +49,7 @@ DSH (Cordis) ──► adapter.js ──► eventos normalizados ──► state
 | `request/header` (`EpochHeader.config`) + `request/context` | durável | `model` (com `contextWindow`) |
 | `llm/retry-started` | durável | `retry` |
 | `compaction/start`, `compaction/end` | durável | `compaction` (`phase`) |
+| `user/message`, `assistant/message` | durável (log da sessão) | `message` (`side: user\|assistant`) — a cara troca a cada uma |
 
 ## 3. Runtime (waterfall) vs log durável — e o que isso obriga
 

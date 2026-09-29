@@ -16,6 +16,7 @@ dsh-plugin/
   src/render.js         # SVG do escritório (reutiliza assets/furniture.svg)
   src/cenario-fundo.txt # fundo de escritório (= corpo de assets/office-backdrop.svg), embutido no client.js
 scripts/gerar-fundo-escritorio.py # FONTE do fundo: gera o .svg e o .txt (--embutir: client.js; --verificar)
+scripts/embutir-expressoes.py # FONTE dos corpos de expressão: assets/avatars → EXPR_AVATARS do client.js
 dwg-cli/
   bin/dwg               # executável Node (#!/usr/bin/env node)
   lib/commands.js       # implementação dos comandos
@@ -55,6 +56,7 @@ O `state.js` nunca vê o DSH: recebe apenas objetos `{type, ...}`:
 | `model` | `sessionId, provider, model, contextWindow?` | `request/header` + `request/context` |
 | `retry` | `sessionId` | `llm/retry-started` |
 | `compaction` | `sessionId, phase: 'start'\|'end'` | `compaction/*` |
+| `message` | `sessionId, side: 'user'\|'assistant'` | `user/message`, `assistant/message` (log da sessão) — sem conteúdo; cada uma troca a cara da pessoa (seleção curada) |
 
 ## 2. `dsh-plugin/src/state.js` — API
 
@@ -75,7 +77,9 @@ Regras (verificados no DSH):
 - CTX: `used = projectedTokens ?? pressureTokens`, `window = contextWindow`; sem ambos → `null` (UI mostra `CTX —`).
 - Custo: deltas dos 4 buckets × tabela de preços (state aceita `setPrices(map)`); sem preço → `null` ("custo indisponível").
 - Agregados pai/filho: **filtrar `seq >= inheritedEventCount`** quando o evento o trouxer (anti-dupla-contagem).
-- Expressão Avataaars derivada: idle/working/tool/waiting/success/error (+ override).
+- Expressão Avataaars derivada: idle/working/tool/waiting/success/error (+ override); a
+  trabalhar, a rotação da **seleção curada** (`working · focused · thinking · searching ·
+  wink`) avança com cada evento `message` — durante o trabalho, a cara muda a cada mensagem.
 
 ## 3. `dsh-plugin/src/adapter.js` — API
 
@@ -90,6 +94,8 @@ Mapeamento (fonte: fact-check 2026-09-27):
 - `turn/end.reason.kind` → `turn/end.kind` (vocabulário fechado acima).
 - `TokenUsage` acumulado → converter em `usage` por delta (guardar snapshot anterior por sessão).
 - `request/header` (`EpochHeader.config`) + `request/context` → `model` (com `contextWindow`).
+- `user/message` e `assistant/message` (log da sessão) → `message` com `side` — sem conteúdo;
+  é o que faz a cara da pessoa trocar a cada mensagem (seleção curada).
 - Sem sessão local (`subagent/*​.local === false`) → mostrar `telemetria indisponível`, nunca inventar.
 
 ## 4. `dwg-cli` — comandos (todos com `--json` e saída em `logs/`)
@@ -180,6 +186,26 @@ O bundle (`client.js`) não pode importar irmãos (module table do loader), por 
 fonte vive em `surface.js` e está embutida no bundle (secção 0, o texto de `surface.js`
 sem `export`); os testes de paridade de `tests/plugin/client-surface.test.mjs` exigem o
 mesmo texto e os mesmos eventos para o mesmo cenário (guarda contra drift).
+
+### Desempenho de animação (regras Motion aplicadas a todas as animações)
+
+Tudo o que anima — demo e plugin — é `transform`/`opacity`/`filter` (MotionScore **S**; nada de
+layout/paint por frame) e passa por três portões: **visibilidade** (só o que está em tela anima:
+mesas fora da câmara e lugares debaixo do celular ficam com `animation:none`; na demo, balões,
+portátil e fades também só se animam com a pessoa no ecrã), **aba escondida** (tudo em pausa —
+`html.oculto` na demo, `.wg-painel.wg-oculto` no plugin) e **`will-change` gerido** (a camada GPU
+do mundo só existe durante o gesto da câmara, 220 ms de quietude e desliga). `prefers-reduced-motion`
+desliga o CSS e é filtrado à mão nas animações WAAPI (que não herdam a media query). As animações
+contínuas da cena (balanço, "zzz") ficam nos **degraus de 5 Hz** com um só relógio
+(`criarRelogioCena`): SVG animado não compõe na GPU — springs/WAAPI a 60 fps custariam mais CPU
+(medido: 31% → 2,5% com o relógio).
+
+**A câmara não reconstrói nada.** O markup do SVG da cena (`renderOffice`) é memoizado por
+identidade de ESTADO (`view`/seleção/permissões — `react.useMemo` em `PainelEscritorio`): arrastar
+e dar zoom escrevem apenas `transform: translate(...) scale(...)` no `.wg-mundo` (compositor, sem
+repaint e sem reavaliar o SVG). Na demo, a mesma regra: `updateTransform` só escreve o `transform`
+do mundo (a escala dos hit-areas só se reescreve quando o zoom muda) e a reclassificação do que
+anima faz UMA leitura de geometria por sincronia (nunca por elemento).
 
 ### A sala no bundle (`montarEscritorio` + `renderOffice`)
 
@@ -445,6 +471,60 @@ macmini (DSH web 3080) com `verify-dsh-panel.mjs --conversa` e `--enviar`.
    `ref.binding` lança. A última referência (de qualquer fonte) fecha o stream e o scope;
    se o painel principal do DSH tiver a mesma conversa (`mainView`), só desce a contagem.
    `window.__wgTelefoneRefs` conta as referências vivas do plugin (diagnóstico).
+
+### Celular: GRUPOS (workspaces) e modo telemóvel
+
+A segunda funcionalidade do celular é o **Grupo** = workspace. Navegação tipo iMessage:
+**Grupos → Grupo → Conversa**, com o "‹" a subir a pilha (na raiz, "‹ Escritório" fecha no
+desktop; **no telemóvel não fecha** — o celular É o ecrã). Dados:
+
+- **Grupos** (`montarEscritorio`): uma linha por equipa do layout (workspaces + "Sem workspace"),
+  com as pessoas sentadas às mesas dessa equipa e o subtítulo vivo ("N está a escrever…" quando
+  alguém corre; senão os nomes). Clicar abre o grupo.
+- **Grupo** (`linhasDoGrupo`, pura e testada): o feed CONJUNTO das conversas dos membros —
+  `criarConversaTelefone` por membro (retain enquanto o grupo está aberto, `MAX_GRUPO` = 12),
+  linhas de cada uma junta por hora, com o nome de quem fala (repete depois de uma interjeição
+  minha), ferramentas numa linha (`Rui · 🔧 bash`), datas na ordem junta e o "a escrever…" de
+  cada membro no fim. Clicar numa mensagem (ou em quem escreve) abre a conversa individual
+  (`abrirTelefone(id, 'grupo')` + `selecionar(id)`). Sem ícone de ligar no grupo; o campo fica
+  "Toque numa pessoa para lhe escrever" (não há conversa de grupo a quem enviar — nada se inventa).
+- **Conversa individual**: ícone de **ligar** (handset; era a câmara do FaceTime — decorativo) e
+  **microfone** no lugar do "+" dos anexos (voz é no DSH). A animação de entrada do celular
+  acontece só quando ele ABRE (navegar não a repete).
+- **Modo telemóvel** (`emCelular()`: `(max-width: 620px) and (pointer: coarse)`): o painel recebe
+  `wg-so-celular` e mostra SÓ o celular — sem toolbar/sala/barra, sem moldura (ilha e barra de
+  casa fora), ocupando todo o painel, abrindo na lista de grupos e sem qualquer forma de fechar
+  (o Esc do painel também não fecha). O chrome do DSH (rail) é do DSH, não do painel.
+
+A navegação é do **núcleo**: `telefone = { aberto, sessionId, vista: 'conversa'|'grupos'|'grupo',
+grupoId, origem }` com `abrirGrupos()`, `abrirGrupo(wsId, membros)`, `voltarTelefone()` e
+`fecharTudo()` (liberta conversa + grupo — nunca retém em fundo).
+
+### Vigia de mensagens — a cara troca A CADA MENSAGEM
+
+"Durante o trabalho, a cada mensagem os funcionários trocam de expressão" — mas o
+`SessionSnapshot` não traz mensagens (só o log da sessão as tem). A **vigia** de
+`client.js` (`criarVigiaMensagens`) é o primeiro sinal de fio ligado no browser:
+
+1. **Liga** quando a conversa passa a `running` (evento `status`): `retain(id, {source:
+   'dshWorkGame'})` — a mesma fonte do celular — e `await ref.ready` → `binding.eventSource`.
+2. **Conta** cada entrada `user/message` | `assistant/message` NOVA (chave = `seq`) e emite
+   `{type:'message', sessionId, side}` pelo mesmo caminho dos outros eventos. A história
+   anterior ao retain não conta (nem a que chega depois, por `loadOlder`); o prompt que
+   arrancou o turno conta — chega milissegundos antes do `status`, daí a graça
+   `VIGIA_CORTE_MS` para trás.
+3. **Liberta** `VIGIA_GRACA_MS` depois da conversa parar (a última mensagem do turno chega
+   mesmo antes de ela parar; voltar a correr dentro da graça cancela a libertação), em
+   `session/removed` e no fecho do painel (`parar`/`dispose`). `window.__wgVigiaRefs` conta
+   as referências vivas (diagnóstico). Sem canal ou sem `eventSource`, a vigia fica quieta:
+   nunca se inventa uma mensagem.
+
+A rotação da **seleção curada** (`working · focused · thinking · searching · wink`, em
+`state.js` e no `client.js`) avança com cada `message`; `presetDe(p)` mostra-a enquanto a
+pessoa trabalha e deixa os estados fortes (dormir, ferramenta, espera, erro, sucesso)
+mandarem. Os corpos das expressões embutem-se a partir de `assets/avatars/` com
+`python3 scripts/embutir-expressoes.py --embutir` (idempotente; `--verificar` confere — o
+teste REGRA DE OURO de `tests/plugin/render.test.mjs` garante a igualdade byte a byte).
 
 ### Paragem em cascata — "Parar pessoa e equipa" (a feature que o DSH não tem)
 

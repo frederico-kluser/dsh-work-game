@@ -8,7 +8,7 @@
 .button{display:inline-flex;gap:8px;align-items:center;justify-content:center;min-height:39px;border-radius:8px;padding:9px 14px;font-size:12px;font-weight:700;white-space:nowrap;transition:background .15s,transform .15s,border-color .15s}.button:active{transform:translateY(1px)}.button-primary{background:var(--blue);color:#fff;border:1px solid var(--blue)}.button-primary:hover{background:#205b94}.button-dark{background:#293f50;color:#fff;border:1px solid #293f50}.button-dark:hover{background:#1d3040}.button-light{background:#fffefb;border:1px solid #dce1de}.button-light:hover{background:#f0f3ee;border-color:#bac7c8}.button-quiet{color:#84909a}.button-quiet:hover{background:#f0f1ec;color:var(--ink)}.button-violet{background:var(--violet);color:white}.button-violet:hover{background:#6c529b}.button-full{width:100%}
 .room{display:flex;min-height:0;min-width:0;position:relative}
 .viewport{background:#f2eee4;position:relative;overflow:hidden;overflow:clip;flex:1;min-width:0;touch-action:none;cursor:grab;outline-offset:-4px!important;isolation:isolate}.viewport.dragging{cursor:grabbing}
-.world{position:absolute;left:0;top:0;transform-origin:0 0;will-change:transform;user-select:none}.world>svg{overflow:visible}
+.world{position:absolute;left:0;top:0;transform-origin:0 0;user-select:none}.world.camara-ativa{will-change:transform}.world>svg{overflow:visible}
 .scene-label{position:absolute;left:22px;top:18px;display:flex;align-items:center;gap:8px;pointer-events:none;color:#91978e;font-size:10px;z-index:2}.scene-label .live-dot{background:#8ca987;width:6px;height:6px}.scene-label-divider{height:10px;width:1px;background:#d5d8ca}.scene-label>span:last-child{font-size:9px;color:#a5a998}
 .canvas-help{position:absolute;bottom:20px;left:22px;display:flex;align-items:center;gap:7px;pointer-events:none;color:#96a19e;font-size:10px;z-index:2}.canvas-help svg{width:15px;height:15px}.canvas-help b{font-weight:400;padding:0 5px;color:#b2b8ac}.canvas-help kbd{font-family:inherit;border:1px solid #cfd6cd;background:#fbfcf6;border-radius:4px;padding:1px 4px;font-size:9px}
 .zoom-controls{position:absolute;bottom:16px;right:20px;display:flex;align-items:center;background:#fffefa;border:1px solid #dcded3;border-radius:10px;padding:5px;gap:2px;cursor:default;z-index:2}.zoom-controls button{width:33px;height:32px;display:grid;place-items:center;border-radius:6px;color:#718592}.zoom-controls button:hover{background:#edf1ed;color:var(--ink)}.zoom-controls button svg{height:17px;width:17px}.zoom-controls output{width:43px;text-align:center;font-size:11px;font-weight:700;color:#819098;font-variant-numeric:tabular-nums}.zoom-controls>span{height:20px;width:1px;background:#e6e8df;margin:0 4px}
@@ -61,8 +61,10 @@
 .question-flag{cursor:pointer}
 .question-flag-dot{fill:#e8a33d;stroke:#fffdf6;stroke-width:3}
 .question-flag-glyph{fill:#5c3f0c;font-size:21px;font-weight:800;pointer-events:none}
-.question-flag-pulse{fill:none;stroke:#e8a33d;stroke-width:2.5;opacity:.7;transform-origin:center;transform-box:fill-box;animation:flag-pulse 1.7s ease-out infinite}
+.question-flag-pulse{fill:none;stroke:#e8a33d;stroke-width:2.5;opacity:.7;transform-origin:center;transform-box:fill-box;animation:flag-pulse 1.7s ease-out infinite}.question-flag-pulse.fora-de-vista{animation:none}
 @keyframes flag-pulse{0%{transform:scale(1);opacity:.7}70%{transform:scale(1.75);opacity:0}100%{transform:scale(1.75);opacity:0}}
+/* Performance (regras Motion): nada anima com a aba escondida — não se vê nada. */
+html.oculto *{animation-play-state:paused!important}
 .context-warn-marker circle{fill:#e8a33d;stroke:#fffdf6;stroke-width:2.5}
 .seat:not(.context-over) .context-warn-marker{display:none}
 .finish-ribbon rect{fill:#e3f3ea;stroke:#b7dcc6;stroke-width:1.5}

@@ -202,6 +202,9 @@ export async function launchBrowser({ width = 1440, height = 900 } = {}) {
     },
     async setViewport(w, h, mobile = false) {
       await cdp.send('Emulation.setDeviceMetricsOverride', { width: w, height: h, deviceScaleFactor: 1, mobile });
+      // Toque emulado com o modo telemóvel: é isto que põe `pointer: coarse`
+      // a casar (sem ele, as media queries continuam de rato/ambiente de trabalho).
+      await cdp.send('Emulation.setTouchEmulationEnabled', { enabled: !!mobile, maxTouchPoints: mobile ? 5 : 1 }); // 1–16 em ambos os modos
     },
     /** Tecla real via Input do CDP (keydown/keyup nativos no elemento com foco,
      *  como o keyboard.press do Puppeteer: Enter leva o texto "\r"). */
