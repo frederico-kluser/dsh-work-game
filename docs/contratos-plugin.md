@@ -10,6 +10,7 @@ o adaptador é o único sítio que fala com ela.
 dsh-plugin/
   package.json          # manifesto do plugin (dsh.client + exports ./client)
   cordis.patch.yml      # camada de ativação do bundle
+  src/index.js          # entry host (Cordis): a rota /api da PARTILHA (link + QR) — ver §8
   src/state.js          # lógica PURA do escritório (sem imports do DSH)
   src/adapter.js        # eventos/projeções DSH → eventos normalizados
   src/client.js         # painel no browser (slots do DSH) que renderiza a sala
@@ -25,7 +26,8 @@ scripts/
   macmini-setup.sh      # instala dependências + projeto no macmini (ssh)
   macmini-test.sh       # testes de instalação e execução no macmini
   macmini-logs.sh       # colhe logs do macmini para logs/ local
-tests/plugin/*.test.mjs # testes de state/adapter/CLI (node --test)
+  verify-partilha.mjs   # verificador da PARTILHA (link + QR) num DSH web real — §8
+tests/plugin/*.test.mjs # testes de state/adapter/CLI/partilha (node --test)
 docs/contratos-plugin.md  # este ficheiro
 docs/integracao-dsh.md    # como o plugin liga ao DSH (fontes verificadas)
 docs/terminal.md          # manual do dwg (controlo/debug por terminal)
@@ -677,3 +679,56 @@ verificador completo (`--acoes --conversa`) em Chrome; a cena (geometria do "zzz
 degraus, barra lateral, celular, Atividade) também em Safari 27 (WebKit, via
 `safaridriver`) — depois da correção do `transform-box` (armadilha 17); o celular
 (`--enviar`) em Chrome.
+
+## 8. `dsh-plugin/src/index.js` — a PARTILHA do Modo jogo (link + QR code, 2026-09-29)
+
+O botão **Partilhar ▾** (toolbar, **SÓ desktop** — não existe no modo telemóvel) gera um
+link público + **QR code** para alguém abrir o Modo jogo; o link **fica online até o botão
+"Fechar a ação"** o derrubar (mais nada o fecha: sair do Modo jogo ou fechar o painel não
+tocam no link). O `src/index.js` — até aqui "sem efeitos no host" — ganha UM efeito: a rota
+exacta **`/api/dsh-work-game/partilha`** no canal partilhado `/api` do DSH.
+
+| Método | Corpo | Faz | Resposta |
+|---|---|---|---|
+| `GET` | — | estado da partilha | `{ok, ativo, host?, url?, qr?}` |
+| `POST` | `{acao:'abrir'}` | publica o link (túnel Cloudflare) | `{ok, url, host, probe, aviso?, qr}` |
+| `POST` | `{acao:'fechar'}` | derruba o link (`down` do host) | `{ok, host}` ou `{ok:true, ja:true}` |
+| `POST` | `{acao:'encerrar'}` | **"Encerrar o Cloudflare"**: `down all` — a partilha E as rotas permanentes ficam offline, o túnel para | `{ok, encerrado, hosts[]}` |
+
+- **Transporte e segurança**: o canal `/api` aplica ANTES do dispatch a vedação Host/Origin
+  e a autenticação de browser do DSH (`connection.requestRejection`) — sem sessão válida o
+  pedido nem chega ao handler. O handler exige `content-type: application/json` no POST e
+  devolve 415/400/500 com `erro` legível (nunca traceback). Erro de dependência:
+  `{ok:false, erro:'cloudflare-agent-skill não encontrada (domain.py)', solucao:'…'}`.
+- **Alvo construído NO HOST**: `alvoDePartilha(ctx)` = `connection.authenticatedUrl('http://127.0.0.1:<porto do webServer>/')`
+  + `#jogo` — o URL local COM `?token=<token do processo>` (o telemóvel troca-o por cookie
+  e cai em `/`) e a âncora `#jogo`, que sobrevive ao redirect e abre já o Modo jogo. O
+  browser **não** escolhe o alvo nem o nome do host.
+- **Túnel**: `python3 <domain.py> up '<alvo>' --name jogo --json` da cloudflare-agent-skill
+  (`scripts/expose-port/domain.py`; candidatos: `DSH_WORK_GAME_EXPOSE_PORT`, `~/.dsh/skills`,
+  `~/.agents/skills`, `~/Agent-Skills`). O host público é **efémero** `jogo.<domínio>`
+  (label muda com `DSH_WORK_GAME_SHARE_NAME`) — **nunca** se reutiliza uma rota existente e
+  **nunca** se passa `--persist`. `fechar` corre `down <host EXACTO> --json`: `all` ou a
+  porta do upstream derrubariam também as rotas permanentes do utilizador (ex.: `kluser.me`)
+  — os testes garantem que nenhum comando leva `all` nem a porta.
+- **"Encerrar o Cloudflare"** (ação `encerrar`) é a ÚNICA exceção e a ÚNICA ação destrutiva
+  do plugin (pedido explícito do utilizador, 2026-09-29): `down all` — o link da partilha e
+  **todas** as rotas publicadas pela máquina ficam offline e o túnel para; nada é apagado da
+  conta Cloudflare (reativa-se com `up`). No cliente fica numa zona própria do painel, atrás
+  de confirmação em DOIS cliques ("Confirmar: tudo fica offline" + "Cancelar") e com o aviso
+  de que derruba mais do que a partilha. Com o túnel parado, os hosts mortos respondem **530**
+  da edge (não 404: o 404 é do router, com o túnel ainda vivo) — verificado ao vivo.
+- **QR code**: `qrencode -t PNG` → `data:image/png;base64,…` (desenhado com `<img>`, nunca
+  `innerHTML`); recurso ao `segno` SVG **validado** (`^<svg…</svg>$`, sem `<script`/`on*=`),
+  rejeitado no cliente por `qrSeguro`. Sem ferramenta → o link aparece na mesma, sem QR.
+- **Cliente** (`client.js`): estado puro em `partilhaReduz` (fases `parado | a-gerar |
+  online | a-fechar | a-encerrar | erro`), painel `MenuPartilha` no estilo do menu de filtros
+  (link selecionável, **Copiar link**, **Fechar a ação**, aviso de confiança "quem tem o link
+  acede à UI do DSH neste computador" e a zona destrutiva **"Encerrar o Cloudflare"** com
+  confirmação em dois cliques), ponto verde no botão enquanto o link está online, nota de
+  confirmação depois de encerrar e `estado` relido do host ao abrir o painel (a partilha pode
+  já estar online de antes).
+- **Testes**: `tests/plugin/partilha.test.mjs` (comando injetável — sem rede): ciclo
+  abrir→online→fechar, `down` sempre com o host exacto (e `all` SÓ em `encerrar`), rotas
+  permanentes ignoradas, contrato de erros da rota, QR seguro e a guarda "só desktop"
+  (`celular ? null : …`). Verificação ao vivo: `scripts/verify-partilha.mjs [--encerrar]`.

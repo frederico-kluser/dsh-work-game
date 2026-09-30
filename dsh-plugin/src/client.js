@@ -3944,6 +3944,40 @@ window.__ModuleLoader__.load({
       '.wg-toolbar .wg-filtros-repor{flex:none;height:auto;min-width:0;padding:4px 6px;border:0;background:none;color:#2869a6;font-size:11px;font-weight:700;white-space:nowrap}',
       '.wg-toolbar .wg-filtros-repor:hover{background:#eef3f7}',
       '.wg-toolbar .wg-filtros-repor:disabled{color:#a3aaa4;background:none;cursor:default}',
+      // Partilha (link + QR code) — SÓ desktop: botão na toolbar + painel com o
+      // link online e o botão "Fechar a ação" (mesma paleta do menu de filtros).
+      '.wg-partilha{position:relative;display:inline-flex;align-items:center;margin-left:8px;flex:none}',
+      '.wg-toolbar .wg-partilha-botao[aria-expanded="true"]{background:#e9eee6;border-color:#bac7c8}',
+      '.wg-partilha-ponto{display:inline-block;width:7px;height:7px;border-radius:50%;background:#3c9a5c;margin:0 1px 0 3px}',
+      '.wg-partilha-menu{position:absolute;top:calc(100% + 8px);right:0;z-index:20;width:334px;background:#fffefa;border:1px solid #dcded3;border-radius:12px;box-shadow:0 14px 34px rgba(36,59,80,.14),0 2px 6px rgba(36,59,80,.06);padding:14px 16px 12px;color:#243b50;font-family:"Nunito","Trebuchet MS",ui-rounded,"Segoe UI",sans-serif;cursor:default}',
+      '.wg-partilha-menu *{box-sizing:border-box}',
+      '.wg-partilha-menu .wg-partilha-titulo{display:block;font-size:9px;font-weight:800;letter-spacing:1.3px;color:#96a094;margin:0 0 6px}',
+      '.wg-partilha-menu p{margin:0 0 10px;font-size:11px;line-height:1.55;color:#5d6a72}',
+      '.wg-partilha-menu p.wg-partilha-fino{margin:8px 0 0;font-size:10px;color:#8a969c}',
+      '.wg-partilha-estado{display:flex;align-items:center;gap:7px;margin:0 0 8px;font-size:11px;font-weight:800;color:#2f7a48}',
+      '.wg-partilha-estado small{font-weight:700;color:#8a969c;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}',
+      '.wg-partilha-qr{display:block;width:176px;height:176px;margin:2px auto 10px;padding:8px;background:#fff;border:1px solid #e6e8dc;border-radius:10px}',
+      '.wg-partilha-qr img,.wg-partilha-qr svg{display:block;width:100%;height:100%}',
+      '.wg-partilha-url{display:block;width:100%;margin:0 0 10px;padding:7px 9px;border:1px solid #dcded3;border-radius:8px;background:#f7f6ef;color:#243b50;font:11px/1.45 ui-monospace,SFMono-Regular,Menlo,monospace;word-break:break-all;user-select:all}',
+      '.wg-partilha-linha{display:flex;align-items:center;gap:8px;margin:0 0 8px}',
+      '.wg-toolbar .wg-partilha-acao{flex:1;height:28px;min-width:0;padding:0 10px;border:1px solid #2869a6;border-radius:8px;background:#2869a6;color:#fffefa;font-size:12px;font-weight:700;cursor:pointer;white-space:nowrap}',
+      '.wg-toolbar .wg-partilha-acao:hover:not(:disabled){background:#215b92}',
+      '.wg-toolbar .wg-partilha-acao:disabled{opacity:.5;cursor:default}',
+      '.wg-toolbar .wg-partilha-secundaria{flex:1;height:28px;min-width:0;padding:0 10px;border:1px solid #cfc9b8;border-radius:8px;background:#fffdf6;color:#243b50;font-size:12px;font-weight:700;cursor:pointer;white-space:nowrap}',
+      '.wg-toolbar .wg-partilha-secundaria:hover:not(:disabled){background:#f1ecdd}',
+      '.wg-toolbar .wg-partilha-secundaria:disabled{opacity:.5;cursor:default}',
+      '.wg-toolbar .wg-partilha-fechar{flex:1;height:28px;min-width:0;padding:0 10px;border:1px solid #d8a893;border-radius:8px;background:#fbf0e9;color:#8c4a35;font-size:12px;font-weight:700;cursor:pointer;white-space:nowrap}',
+      '.wg-toolbar .wg-partilha-fechar:hover:not(:disabled){background:#f4e2d7}',
+      '.wg-toolbar .wg-partilha-fechar:disabled{opacity:.5;cursor:default}',
+      '.wg-partilha-erro{margin:0 0 8px;padding:7px 9px;border:1px solid #e3c0b4;background:#fdf1ec;color:#8c4a35;font-size:11px;line-height:1.5;border-radius:8px}',
+      '.wg-partilha-nota{margin:0 0 8px;padding:7px 9px;border:1px solid #cfe0d2;background:#f0f7f1;color:#2f7a48;font-size:11px;line-height:1.5;border-radius:8px}',
+      // Zona destrutiva ("Encerrar o Cloudflare"): separada, quente e atrás de
+      // confirmação — é a única ação que derruba mais do que a partilha.
+      '.wg-partilha-perigo{margin:12px 0 0;padding-top:10px;border-top:1px solid #eeefe6}',
+      '.wg-partilha-perigo p{margin:0 0 8px;font-size:10px;line-height:1.5;color:#a06a55}',
+      '.wg-toolbar .wg-partilha-encerrar{flex:1;height:28px;min-width:0;padding:0 10px;border:1px solid #c98b7b;border-radius:8px;background:#fff4ef;color:#8c4a35;font-size:12px;font-weight:700;cursor:pointer;white-space:nowrap}',
+      '.wg-toolbar .wg-partilha-encerrar:hover:not(:disabled){background:#f6e2d8}',
+      '.wg-toolbar .wg-partilha-encerrar:disabled{opacity:.5;cursor:default}',
       // O DSH dá `corner-shape: superellipse(1.5)` a tudo: o botão do interruptor,
       // o chip e o número têm de ser círculos/pílulas de verdade.
       '.wg-interruptor,.wg-interruptor::after,.wg-escondidas,.wg-filtros-numero{corner-shape:round}',
@@ -4531,6 +4565,197 @@ window.__ModuleLoader__.load({
       );
     }
 
+    /* ── Partilha: link + QR code (SÓ desktop) ─────────────────────────
+       O botão "Partilhar" da toolbar gera um link público (host efémero do
+       domínio do utilizador, via cloudflare-agent-skill no lado host) com QR
+       code para alguém abrir o Modo jogo. O link fica online até o botão
+       "Fechar a ação" o derrubar — contrato em docs/contratos-plugin.md §8.
+       A rota é a exacta /api/dsh-work-game/partilha (canal autenticado do
+       DSH); o alvo publicado é construído no host, nunca aqui. */
+
+    const ROTA_PARTILHA = '/api/dsh-work-game/partilha';
+
+    const PARTILHA_INICIAL = {
+      fase: 'parado', // parado | a-gerar | online | a-fechar | a-encerrar | erro
+      url: '', host: '', qr: null, aviso: '', erro: '', solucao: '', copiado: false, nota: '',
+    };
+
+    /** Redutor puro do estado da partilha (eventos do fluxo do botão). */
+    function partilhaReduz(estado, evento) {
+      const base = estado ? { ...PARTILHA_INICIAL, ...estado } : { ...PARTILHA_INICIAL };
+      switch (evento && evento.tipo) {
+        case 'inicio':
+          return { ...PARTILHA_INICIAL };
+        case 'estado':
+          return evento.ativo
+            ? {
+              ...base, fase: 'online', host: evento.host || base.host,
+              url: evento.url || base.url, qr: evento.qr || base.qr,
+              aviso: evento.aviso || base.aviso, erro: '', solucao: '', copiado: false,
+            }
+            : { ...PARTILHA_INICIAL };
+        case 'a-gerar':
+          return { ...base, fase: 'a-gerar', erro: '', solucao: '', copiado: false, nota: '' };
+        case 'gerado':
+          return {
+            ...base, fase: 'online', url: evento.url || '', host: evento.host || '',
+            qr: evento.qr || null, aviso: evento.aviso || '', erro: '', solucao: '', copiado: false, nota: '',
+          };
+        case 'a-fechar':
+          return { ...base, fase: 'a-fechar', copiado: false };
+        case 'a-encerrar':
+          return { ...base, fase: 'a-encerrar', copiado: false };
+        case 'encerrado':
+          // Tudo offline (down all): o painel repõe-se e confirma o encerramento.
+          return {
+            ...PARTILHA_INICIAL,
+            nota: evento.nota || 'Cloudflare encerrado — todos os links desta máquina ficaram offline.',
+          };
+        case 'fechado':
+          return { ...PARTILHA_INICIAL };
+        case 'erro':
+          return {
+            ...base, fase: 'erro', erro: evento.erro || 'erro desconhecido',
+            solucao: evento.solucao || '', copiado: false,
+          };
+        case 'copiado':
+          return { ...base, copiado: true };
+        default:
+          return base;
+      }
+    }
+
+    /** O QR só se desenha com o formato que o host garantiu (nunca HTML livre). */
+    function qrSeguro(qr) {
+      if (!qr || typeof qr !== 'object') return null;
+      if (qr.tipo === 'png' && typeof qr.dados === 'string' && qr.dados.startsWith('data:image/png;base64,')) return qr;
+      if (qr.tipo === 'svg' && typeof qr.dados === 'string'
+        && /^<svg[\s\S]*<\/svg>$/.test(qr.dados.trim())
+        && !/<script|javascript:|on[a-z]+\s*=/i.test(qr.dados)) return qr;
+      return null;
+    }
+
+    /** Um pedido à rota da partilha (POST) — devolve o JSON ou lança. */
+    async function pedirPartilha(acao) {
+      const resposta = await fetch(ROTA_PARTILHA, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ acao }),
+      });
+      let corpo = null;
+      try { corpo = await resposta.json(); } catch { /* sem corpo JSON */ }
+      return corpo || { ok: false, erro: `resposta inválida do host (HTTP ${resposta.status})` };
+    }
+
+    /** O estado atual (GET) — a partilha pode já estar online de antes. */
+    async function lerPartilha() {
+      const resposta = await fetch(ROTA_PARTILHA, { method: 'GET' });
+      let corpo = null;
+      try { corpo = await resposta.json(); } catch { /* sem corpo JSON */ }
+      return corpo || { ok: false, erro: `resposta inválida do host (HTTP ${resposta.status})` };
+    }
+
+    /* O painel da partilha: link, QR code, "Fechar a ação" e — separado e com
+       confirmação — "Encerrar o Cloudflare" (derruba TUDO: ver §8). */
+    function MenuPartilha(props) {
+      const { estado, botaoRef, fechar, gerar, fecharAcao, copiar, encerrarCloudflare } = props;
+      const menuRef = react.useRef(null);
+      // A única ação destrutiva leva DOIS cliques: o primeiro pede confirmação.
+      const [confirmarEncerrar, setConfirmarEncerrar] = react.useState(false);
+      react.useEffect(() => {
+        // Abrir leva o foco ao 1.º controlo; clicar fora fecha (sem roubar o clique).
+        const menu = menuRef.current;
+        const primeiro = menu && menu.querySelector('button');
+        if (primeiro) { try { primeiro.focus({ preventScroll: true }); } catch { primeiro.focus(); } }
+        const fora = (e) => {
+          if (!menu || menu.contains(e.target)) return;
+          if (botaoRef && botaoRef.current && botaoRef.current.contains(e.target)) return;
+          fechar(false);
+        };
+        document.addEventListener('pointerdown', fora, true);
+        return () => document.removeEventListener('pointerdown', fora, true);
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+      }, []);
+      const online = estado.fase === 'online';
+      const ocupado = estado.fase === 'a-gerar' || estado.fase === 'a-fechar' || estado.fase === 'a-encerrar';
+      const qr = qrSeguro(estado.qr);
+      const avisoConfianca = 'Quem tem o link acede à UI do DSH neste computador — partilha só com quem confias.';
+      let conteudo;
+      if (online || estado.fase === 'a-fechar') {
+        conteudo = [
+          h('div', { className: 'wg-partilha-estado', key: 'estado' },
+            h('span', { className: 'wg-partilha-ponto', 'aria-hidden': true }),
+            online ? 'O link está online' : 'A fechar a ação…',
+            estado.host ? h('small', { title: estado.host }, estado.host) : null),
+          qr
+            ? (qr.tipo === 'png'
+              ? h('img', { key: 'qr', className: 'wg-partilha-qr', src: qr.dados, alt: 'QR code do link de partilha' })
+              : h('div', {
+                key: 'qr', className: 'wg-partilha-qr', role: 'img',
+                'aria-label': 'QR code do link de partilha',
+                dangerouslySetInnerHTML: { __html: qr.dados },
+              }))
+            : h('p', { key: 'qr-falta' }, 'QR code indisponível (sem qrencode/segno) — copia o link.'),
+          estado.url ? h('span', { key: 'url', className: 'wg-partilha-url' }, estado.url) : null,
+          h('div', { className: 'wg-partilha-linha', key: 'linha' },
+            h('button', {
+              type: 'button', className: 'wg-partilha-secundaria',
+              disabled: !estado.url || ocupado, onClick: copiar,
+            }, estado.copiado ? 'Copiado ✓' : 'Copiar link'),
+            h('button', {
+              type: 'button', className: 'wg-partilha-fechar', disabled: ocupado, onClick: fecharAcao,
+            }, estado.fase === 'a-fechar' ? 'A fechar…' : 'Fechar a ação')),
+          estado.aviso ? h('p', { key: 'aviso' }, estado.aviso) : null,
+          h('p', { className: 'wg-partilha-fino', key: 'confianca' }, avisoConfianca),
+        ];
+      } else {
+        conteudo = [
+          h('p', { key: 'texto' },
+            'Gera um link público (no teu domínio) com QR code para alguém abrir o Modo jogo. ',
+            'O link fica online até carregar em “Fechar a ação”.'),
+          estado.fase === 'erro'
+            ? h('div', { className: 'wg-partilha-erro', key: 'erro', role: 'alert' },
+              estado.erro, estado.solucao ? h('small', null, ` — ${estado.solucao}`) : null)
+            : null,
+          h('div', { className: 'wg-partilha-linha', key: 'linha' },
+            h('button', {
+              type: 'button', className: 'wg-partilha-acao', disabled: ocupado, onClick: gerar,
+            }, estado.fase === 'a-gerar' ? 'A gerar o link…' : 'Gerar link e QR code')),
+          h('p', { className: 'wg-partilha-fino', key: 'confianca' }, avisoConfianca),
+        ];
+      }
+      // Zona destrutiva, sempre presente e separada: "Encerrar o Cloudflare"
+      // derruba o link da partilha E todas as outras rotas desta máquina.
+      const perigo = h('div', { className: 'wg-partilha-perigo' },
+        h('p', null, '“Encerrar o Cloudflare” derruba TUDO o que esta máquina publica — o link da partilha e as restantes rotas (ex.: kluser.me) ficam offline e o túnel para. Nada é apagado da conta.'),
+        h('div', { className: 'wg-partilha-linha' },
+          h('button', {
+            type: 'button', className: 'wg-partilha-encerrar', disabled: ocupado,
+            'aria-describedby': 'wg-partilha-aviso-encerrar',
+            onClick: () => {
+              if (confirmarEncerrar) { setConfirmarEncerrar(false); encerrarCloudflare(); } else setConfirmarEncerrar(true);
+            },
+          }, estado.fase === 'a-encerrar'
+            ? 'A encerrar o Cloudflare…'
+            : (confirmarEncerrar ? 'Confirmar: tudo fica offline' : 'Encerrar o Cloudflare')),
+          confirmarEncerrar && !ocupado
+            ? h('button', {
+              type: 'button', className: 'wg-partilha-secundaria',
+              onClick: () => setConfirmarEncerrar(false),
+            }, 'Cancelar')
+            : null),
+        h('p', { className: 'wg-partilha-fino', id: 'wg-partilha-aviso-encerrar' },
+          'Para derrubar SÓ o link da partilha, use o "Fechar a ação" acima.'));
+      return h('div', {
+        id: 'wg-partilha-menu', className: 'wg-partilha-menu', role: 'dialog',
+        'aria-label': 'Partilhar o Modo jogo', ref: menuRef,
+      },
+      h('span', { className: 'wg-partilha-titulo' }, 'PARTILHAR O ESCRITÓRIO'),
+      estado.nota ? h('p', { className: 'wg-partilha-nota', role: 'status' }, estado.nota) : null,
+      ...conteudo,
+      perigo);
+    }
+
     /* ── Celular com a conversa (iPhone + iMessage) ─────────────────────
        Flutua sobre a sala, à esquerda da barra lateral. As mensagens vêm do
        controlador (criarConversaTelefone) e desenham-se SÓ com nós de texto
@@ -5082,9 +5307,13 @@ window.__ModuleLoader__.load({
       const [camera, setCamera] = react.useState({ zoom: 0.3, x: 32, y: 64 });
       const [aba, setAba] = react.useState('contexto');
       const [filtrosAbertos, setFiltrosAbertos] = react.useState(false);
+      // Partilha (link + QR) — só desktop: estado do botão e do painel.
+      const [partilha, setPartilha] = react.useState(() => partilhaReduz(null, { tipo: 'inicio' }));
+      const [partilhaAberta, setPartilhaAberta] = react.useState(false);
       const painelRef = react.useRef(null);
       const telaRef = react.useRef(null);
       const botaoFiltrosRef = react.useRef(null);
+      const botaoPartilhaRef = react.useRef(null);
       const cameraRef = react.useRef(camera);
       cameraRef.current = camera;
       // `will-change` do mundo só durante o gesto da câmara (regra Motion:
@@ -5521,6 +5750,81 @@ window.__ModuleLoader__.load({
         if (typeof props.setFiltros === 'function') props.setFiltros({ ...FILTROS_PADRAO });
       };
 
+      // Partilha (link + QR code): o botão abre o painel e lê o estado atual —
+      // a partilha pode já estar online de antes (mantém-se até "Fechar a ação").
+      const carregarPartilha = async () => {
+        try {
+          const corpo = await lerPartilha();
+          setPartilha((e) => (corpo && corpo.ok && corpo.ativo
+            ? partilhaReduz(e, { tipo: 'estado', ativo: true, host: corpo.host, url: corpo.url, qr: corpo.qr, aviso: corpo.aviso })
+            : partilhaReduz(e, corpo && corpo.ok === false && corpo.erro
+              ? { tipo: 'erro', erro: corpo.erro, solucao: corpo.solucao }
+              : { tipo: 'estado', ativo: false })));
+        } catch (erro) {
+          setPartilha((e) => partilhaReduz(e, {
+            tipo: 'erro', erro: 'sem resposta do host do plugin',
+            solucao: 'o Modo jogo precisa do plugin instalado no DSH (lado host ativo)',
+          }));
+        }
+      };
+      const gerarPartilha = async () => {
+        setPartilha((e) => partilhaReduz(e, { tipo: 'a-gerar' }));
+        try {
+          const corpo = await pedirPartilha('abrir');
+          setPartilha((e) => (corpo && corpo.ok
+            ? partilhaReduz(e, {
+              tipo: 'gerado', url: corpo.url, host: corpo.host, qr: corpo.qr, aviso: corpo.aviso,
+            })
+            : partilhaReduz(e, { tipo: 'erro', erro: (corpo && corpo.erro) || 'falha ao gerar o link', solucao: corpo && corpo.solucao })));
+        } catch (erro) {
+          setPartilha((e) => partilhaReduz(e, {
+            tipo: 'erro', erro: 'sem resposta do host do plugin', solucao: 'ver o Modo jogo no DSH',
+          }));
+        }
+      };
+      // "Fechar a ação": derruba o link (domain.py down) — é o ÚNICO fim da partilha.
+      const fecharAcaoPartilha = async () => {
+        setPartilha((e) => partilhaReduz(e, { tipo: 'a-fechar' }));
+        try {
+          const corpo = await pedirPartilha('fechar');
+          setPartilha((e) => (corpo && corpo.ok
+            ? partilhaReduz(e, { tipo: 'fechado' })
+            : partilhaReduz(e, { tipo: 'erro', erro: (corpo && corpo.erro) || 'falha ao fechar a ação', solucao: corpo && corpo.solucao })));
+        } catch (erro) {
+          setPartilha((e) => partilhaReduz(e, {
+            tipo: 'erro', erro: 'sem resposta do host do plugin', solucao: 'ver o Modo jogo no DSH',
+          }));
+        }
+      };
+      const copiarPartilha = async () => {
+        try {
+          if (navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
+            await navigator.clipboard.writeText(partilha.url);
+            setPartilha((e) => partilhaReduz(e, { tipo: 'copiado' }));
+          }
+        } catch { /* sem clipboard: o link fica selecionável no painel */ }
+      };
+      // "Encerrar o Cloudflare" (detrás de confirmação no painel): `down all` —
+      // o link da partilha e TODAS as rotas desta máquina ficam offline.
+      const encerrarCloudflare = async () => {
+        setPartilha((e) => partilhaReduz(e, { tipo: 'a-encerrar' }));
+        try {
+          const corpo = await pedirPartilha('encerrar');
+          setPartilha((e) => (corpo && corpo.ok
+            ? partilhaReduz(e, {
+              tipo: 'encerrado',
+              nota: (corpo.hosts || []).length
+                ? `Cloudflare encerrado — ${(corpo.hosts || []).length} rota(s) offline (${(corpo.hosts || []).join(', ')}).`
+                : 'Cloudflare encerrado — nada estava publicado.',
+            })
+            : partilhaReduz(e, { tipo: 'erro', erro: (corpo && corpo.erro) || 'falha ao encerrar o Cloudflare', solucao: corpo && corpo.solucao })));
+        } catch (erro) {
+          setPartilha((e) => partilhaReduz(e, {
+            tipo: 'erro', erro: 'sem resposta do host do plugin', solucao: 'ver o Modo jogo no DSH',
+          }));
+        }
+      };
+
       const banner = layout.visiveis === 0
         ? (escondidas.total > 0
           ? `Os filtros escondem ${escondidas.total === 1 ? 'a única conversa' : `todas as ${escondidas.total} conversas`} (${detalheEscondidas(escondidas)}). Abra Filtros para as mostrar.`
@@ -5576,6 +5880,30 @@ window.__ModuleLoader__.load({
               })
               : null,
           ),
+          // Partilha (link + QR code) — SÓ desktop: em telemóvel o celular é o
+          // ecrã e não há nada a partilhar daqui.
+          celular ? null : h('div', { className: 'wg-partilha' },
+            h('button', {
+              type: 'button', className: 'wg-botao wg-partilha-botao', ref: botaoPartilhaRef,
+              title: 'Gerar link e QR code para alguém ver o Modo jogo',
+              'aria-haspopup': 'dialog',
+              'aria-expanded': partilhaAberta ? 'true' : 'false',
+              'aria-controls': partilhaAberta ? 'wg-partilha-menu' : undefined,
+              onClick: () => setPartilhaAberta((a) => {
+                const novo = !a;
+                if (novo) carregarPartilha();
+                return novo;
+              }),
+            }, 'Partilhar',
+            partilha.fase === 'online' ? h('span', { className: 'wg-partilha-ponto', title: 'Link online', 'aria-hidden': true }) : null,
+            ' ▾'),
+            partilhaAberta
+              ? h(MenuPartilha, {
+                estado: partilha, botaoRef: botaoPartilhaRef, fechar: setPartilhaAberta,
+                gerar: gerarPartilha, fecharAcao: fecharAcaoPartilha, copiar: copiarPartilha,
+                encerrarCloudflare,
+              })
+              : null),
           h('span', { className: 'wg-conta' }, conta),
         ),
         h('div', { className: `wg-corpo${telefoneVisivel ? ' wg-com-telefone' : ''}` },
@@ -6249,6 +6577,13 @@ window.__ModuleLoader__.load({
         if (lay && typeof lay.selectPanel === 'function') lay.selectPanel(null); // null = a Conversa do DSH
         else { window.__wgDiag = (window.__wgDiag || '') + '|fechar:sem-layout'; }
       };
+      // Link de partilha (#jogo): quem abre o URL público cai já no Modo jogo.
+      // A âncora sobrevive ao redirect do ?token= para `/` (o token vira cookie).
+      try {
+        if (typeof location !== 'undefined' && location.hash === '#jogo') {
+          setTimeout(() => { try { abrirPainel(); } catch { /* sem layout */ } }, 0);
+        }
+      } catch { /* sem window (testes Node) */ }
       injetarEstilos(document);
       const nucleo = criarNucleo();
 
@@ -6385,6 +6720,10 @@ window.__ModuleLoader__.load({
     exports.__criarVigiaMensagens = criarVigiaMensagens;
     exports.__linhasDoGrupo = linhasDoGrupo;
     exports.__emCelular = emCelular;
+    exports.__partilhaReduz = partilhaReduz;
+    exports.__PARTILHA_INICIAL = PARTILHA_INICIAL;
+    exports.__qrSeguro = qrSeguro;
+    exports.__ROTA_PARTILHA = ROTA_PARTILHA;
     exports.__SELECAO_CURADA = SELECAO_CURADA;
     exports.__presetDe = presetDe;
     exports.__ritmoDe = ritmoDe;
