@@ -16,6 +16,9 @@ dsh-plugin/
   src/client.js         # painel no browser (slots do DSH) que renderiza a sala
   src/render.js         # SVG do escritório (reutiliza assets/furniture.svg)
   src/cenario-fundo.txt # fundo de escritório (= corpo de assets/office-backdrop.svg), embutido no client.js
+  expose-port/          # funcionalidade Cloudflare EMBUTIDA (toolkit vendored da
+                        #   cloudflare-agent-skill: domain.py up|down|list + wrappers,
+                        #   LICENSE) — viaja COM o plugin, sem skill instalada
 scripts/gerar-fundo-escritorio.py # FONTE do fundo: gera o .svg e o .txt (--embutir: client.js; --verificar)
 scripts/embutir-expressoes.py # FONTE dos corpos de expressão: assets/avatars → EXPR_AVATARS do client.js
 dwg-cli/
@@ -733,14 +736,17 @@ exacta **`/api/dsh-work-game/partilha`** no canal partilhado `/api` do DSH.
   e a autenticação de browser do DSH (`connection.requestRejection`) — sem sessão válida o
   pedido nem chega ao handler. O handler exige `content-type: application/json` no POST e
   devolve 415/400/500 com `erro` legível (nunca traceback). Erro de dependência:
-  `{ok:false, erro:'cloudflare-agent-skill não encontrada (domain.py)', solucao:'…'}`.
+  `{ok:false, erro:'domain.py não encontrado (embutido em dsh-plugin/expose-port)', solucao:'…'}`.
 - **Alvo construído NO HOST**: `alvoDePartilha(ctx)` = `connection.authenticatedUrl('http://127.0.0.1:<porto do webServer>/')`
   + `#jogo` — o URL local COM `?token=<token do processo>` (o telemóvel troca-o por cookie
   e cai em `/`) e a âncora `#jogo`, que sobrevive ao redirect e abre já o Modo jogo. O
   browser **não** escolhe o alvo nem o nome do host.
-- **Túnel**: `python3 <domain.py> up '<alvo>' --name jogo --json` da cloudflare-agent-skill
-  (`scripts/expose-port/domain.py`; candidatos: `DSH_WORK_GAME_EXPOSE_PORT`, `~/.dsh/skills`,
-  `~/.agents/skills`, `~/Agent-Skills`). O host público é **efémero** `jogo.<domínio>`
+- **Túnel**: `python3 <domain.py> up '<alvo>' --name jogo --json` — o `domain.py` está
+  **EMBUTIDO** no plugin (`dsh-plugin/expose-port/`, toolkit vendored da
+  cloudflare-agent-skill em 2026-09-30): a funcionalidade Cloudflare viaja COM o plugin e
+  não depende de nenhuma skill instalada. Candidatos (por ordem):
+  `DSH_WORK_GAME_EXPOSE_PORT` (override) > o embutido > a skill instalada (recurso legado:
+  `~/.dsh/skills`, `~/.agents/skills`, `~/Agent-Skills`). O host público é **efémero** `jogo.<domínio>`
   (label muda com `DSH_WORK_GAME_SHARE_NAME`) — **nunca** se reutiliza uma rota existente e
   **nunca** se passa `--persist`. `fechar` corre `down <host EXACTO> --json`: `all` ou a
   porta do upstream derrubariam também as rotas permanentes do utilizador (ex.: `kluser.me`)

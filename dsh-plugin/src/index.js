@@ -8,8 +8,9 @@
  * jogo — contrato em docs/contratos-plugin.md §8.
  *
  * A partilha publica a própria UI do DSH (com o token de sessão) num host
- * EFÉMERO do domínio do utilizador, via cloudflare-agent-skill
- * (`scripts/expose-port/domain.py up|down|list --json`), e o link fica no ar
+ * EFÉMERO do domínio do utilizador, via o `domain.py` EMBUTIDO no plugin
+ * (`dsh-plugin/expose-port/`, toolkit vendored da cloudflare-agent-skill;
+ * `up|down|list --json`), e o link fica no ar
  * até o botão "Fechar a ação" mandar `down`:
  *   - a rota é exacta `/api/dsh-work-game/partilha` (canal partilhado /api, que
  *     já aplica a vedação Host/Origin e a autenticação de browser do DSH ANTES
@@ -24,16 +25,26 @@
  *     `DSH_WORK_GAME_SHARE_NAME` muda o label).
  *
  * Sem build e sem dependências npm: só node:child_process para correr o
- * domain.py (e o qrencode/segno) da skill.
+ * domain.py embutido (e o qrencode/segno) — a funcionalidade Cloudflare viaja
+ * COM o plugin, sem depender de nenhuma skill instalada na máquina.
  */
 import { execFile } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { homedir } from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
-/* ── Localização da skill cloudflare-agent-skill ─────────────────────── */
+/* ── Localização do domain.py (EMBUTIDO; skill instalada só como recurso) ── */
 
-/** Candidatos ao `domain.py` da cloudflare-agent-skill, por ordem de preferência. */
+/** `domain.py` vendored com o plugin (cloudflare-agent-skill → dsh-plugin/expose-port/). */
+export const DOMAIN_PY_EMBUTIDO = fileURLToPath(new URL('../expose-port/domain.py', import.meta.url));
+
+/**
+ * Candidatos ao `domain.py`, por ordem de preferência:
+ * 1. `DSH_WORK_GAME_EXPOSE_PORT` (override explícito, ex. para testes/ops);
+ * 2. o EMBUTIDO em `dsh-plugin/expose-port/domain.py` (a fonte normal);
+ * 3. a cloudflare-agent-skill instalada (recurso legado, se existir).
+ */
 export function candidatosDomainPy(env = process.env, home = homedir()) {
   const fora = env.DSH_WORK_GAME_EXPOSE_PORT;
   const raizes = [
@@ -44,6 +55,7 @@ export function candidatosDomainPy(env = process.env, home = homedir()) {
   ].filter(Boolean);
   return [
     ...(fora ? [fora] : []),
+    DOMAIN_PY_EMBUTIDO,
     ...raizes.map((r) => path.join(r, 'scripts', 'expose-port', 'domain.py')),
   ];
 }
@@ -138,8 +150,8 @@ export function criarServicoPartilha(opcoes = {}) {
 
   const semSkill = () => ({
     ok: false,
-    erro: 'cloudflare-agent-skill não encontrada (domain.py)',
-    solucao: 'instalar a skill ou definir DSH_WORK_GAME_EXPOSE_PORT=/caminho/para/domain.py',
+    erro: 'domain.py não encontrado (embutido em dsh-plugin/expose-port)',
+    solucao: 'restaurar o embutido (git checkout -- dsh-plugin/expose-port) ou definir DSH_WORK_GAME_EXPOSE_PORT=/caminho/para/domain.py',
   });
 
   const alvoUrl = () => {

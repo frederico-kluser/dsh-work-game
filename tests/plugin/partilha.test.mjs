@@ -22,13 +22,16 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { existsSync, readFileSync } from 'node:fs';
+import path from 'node:path';
 
 import moduloHost, {
   alvoDePartilha,
   candidatosDomainPy,
   criarRotaPartilha,
   criarServicoPartilha,
+  DOMAIN_PY_EMBUTIDO,
   gerarQrCode,
   lerJsonSaida,
   resolverDomainPy,
@@ -226,7 +229,7 @@ test('encerrar() sem domain.py e sem túnel: erros legíveis, nunca traceback', 
   const semSkill = criarServicoPartilha({ correr: async () => { throw new Error('não deve correr'); }, alvo: ALVO, nome: 'jogo', domainPy: null });
   const r = await semSkill.encerrar();
   assert.equal(r.ok, false);
-  assert.match(r.erro, /cloudflare-agent-skill/);
+  assert.match(r.erro, /domain\.py não encontrado/);
 
   const vazio = criarServicoPartilha({
     correr: async () => ({ code: 0, stdout: `${JSON.stringify({ ok: true, down: [] })}\n`, stderr: '' }),
@@ -275,7 +278,7 @@ test('sem domain.py a partilha responde com erro + solução (nunca rebenta)', a
   for (const acao of ['estado', 'abrir', 'fechar', 'encerrar']) {
     const r = await servico[acao]();
     assert.equal(r.ok, false);
-    assert.match(r.erro, /cloudflare-agent-skill/);
+    assert.match(r.erro, /domain\.py não encontrado/);
     assert.match(r.solucao, /DSH_WORK_GAME_EXPOSE_PORT/);
   }
 });
@@ -321,15 +324,31 @@ test('gerarQrCode: PNG do qrencode; recurso ao segno SVG; payloads perigosos cae
   assert.equal(await gerarQrCode('https://x', nada.correr), null);
 });
 
-test('candidatos/resolver do domain.py: env primeiro, sem caminhos adivinhados', () => {
+test('candidatos/resolver do domain.py: env primeiro, depois o EMBUTIDO, skill só como recurso', () => {
   const candidatos = candidatosDomainPy({ DSH_WORK_GAME_EXPOSE_PORT: '/x/domain.py' }, '/home/fake');
-  assert.equal(candidatos[0], '/x/domain.py');
-  assert.ok(candidatos.some((c) => c.endsWith('/skills/cloudflare-agent-skill/scripts/expose-port/domain.py')));
+  assert.equal(candidatos[0], '/x/domain.py', 'o override de ambiente manda');
+  assert.equal(candidatos[1], DOMAIN_PY_EMBUTIDO, 'a fonte normal é o domain.py EMBUTIDO no plugin');
+  assert.ok(candidatos.some((c) => c.endsWith('/skills/cloudflare-agent-skill/scripts/expose-port/domain.py')),
+    'a skill instalada continua como recurso legado');
   const visto = [];
   const resolvido = resolverDomainPy(candidatos, (p) => { visto.push(p); return p === candidatos[2]; });
   assert.equal(resolvido, candidatos[2]);
   assert.deepEqual(visto, candidatos.slice(0, 3));
   assert.equal(resolverDomainPy(['/nada'], () => false), null);
+});
+
+test('a funcionalidade Cloudflare está EMBUTIDA: o toolkit corre sem skill instalada', () => {
+  // A funcionalidade da cloudflare-agent-skill viaja COM o plugin
+  // (dsh-plugin/expose-port/, vendored) — nenhuma máquina precisa da skill.
+  const dir = path.dirname(DOMAIN_PY_EMBUTIDO);
+  for (const f of ['domain.py', 'lib.sh', 'expose-port.sh', 'list.sh', 'stop.sh', 'LICENSE']) {
+    assert.ok(existsSync(path.join(dir, f)), `expose-port/${f} embutido`);
+  }
+  // Resolução SEM skill em lado nenhum (home vazio) apanha na mesma o embutido.
+  assert.equal(resolverDomainPy(candidatosDomainPy({}, '/home/sem-skill'), existsSync), DOMAIN_PY_EMBUTIDO);
+  // O contrato da skill: --help é offline-safe e sem dependências — prova de vida.
+  const saida = execFileSync('python3', [DOMAIN_PY_EMBUTIDO, '--help'], { encoding: 'utf8', timeout: 20000 });
+  assert.match(saida, /up|down|list/, 'o domain.py embutido responde');
 });
 
 /* ── Rota /api/dsh-work-game/partilha ───────────────────────────────── */

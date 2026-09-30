@@ -4924,11 +4924,11 @@ function criarReatorVariante(opts) {
 
     /* ── Partilha: link + QR code (SÓ desktop) ─────────────────────────
        O botão "Partilhar" da toolbar gera um link público (host efémero do
-       domínio do utilizador, via cloudflare-agent-skill no lado host) com QR
-       code para alguém abrir o Modo jogo. O link fica online até o botão
-       "Fechar a ação" o derrubar — contrato em docs/contratos-plugin.md §8.
-       A rota é a exacta /api/dsh-work-game/partilha (canal autenticado do
-       DSH); o alvo publicado é construído no host, nunca aqui. */
+       domínio do utilizador, via o domain.py EMBUTIDO no plugin —
+       dsh-plugin/expose-port/) com QR code para alguém abrir o Modo jogo.
+       O link fica online até o botão "Fechar a ação" o derrubar — contrato em
+       docs/contratos-plugin.md §8. A rota é a exacta /api/dsh-work-game/partilha
+       (canal autenticado do DSH); o alvo publicado é construído no host, nunca aqui. */
 
     const ROTA_PARTILHA = '/api/dsh-work-game/partilha';
 
