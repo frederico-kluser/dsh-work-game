@@ -4937,6 +4937,12 @@ window.__ModuleLoader__.load({
       });
       const linhas = linhasDoGrupo(membros, { agora });
       const verPessoa = (id) => { if (typeof abrirTelefone === 'function') abrirTelefone(id); };
+      const [abertos, setAbertos] = react.useState(() => new Set()); // "Ler mais" das longas
+      const alternar = (chave) => setAbertos((atual) => {
+        const novo = new Set(atual);
+        if (novo.has(chave)) novo.delete(chave); else novo.add(chave);
+        return novo;
+      });
 
       const linha = (l) => {
         switch (l.tipo) {
@@ -4947,8 +4953,17 @@ window.__ModuleLoader__.load({
           case 'ferramentas': {
             const p = l.itens[0];
             const n = l.itens.length;
-            const resumo = `🔧 ${p.nome}${p.resumo ? ` · ${p.resumo}` : ''}${n > 1 ? ` · +${n - 1}` : ''}`;
-            return h('div', { key: l.key, className: 'wg-tel-ferramentas', 'data-n': n, title: `${l.membro.nome}: ${p.nome}` }, `${l.membro.nome} · ${resumo}`);
+            const aCorrer = l.itens.some((x) => x.estado === 'a-correr');
+            const resumo = `🔧 ${p.nome}${p.resumo ? ` · ${p.resumo}` : ''}${n > 1 ? ` · +${n - 1}` : ''}${aCorrer ? ' …' : ''}`;
+            // Linha COMPACTA e cinzenta (a mesma da conversa individual — o
+            // texto grande era o que parecia "mensagem não formatada"), com o
+            // nome de quem a usou; clicar abre a conversa dessa pessoa.
+            return h('div', { key: l.key, className: 'wg-tel-ferramentas', 'data-n': n },
+              h('button', {
+                type: 'button', className: 'wg-tel-clicavel',
+                title: `${l.membro.nome}: ${p.nome} — abrir a conversa`,
+                onClick: () => verPessoa(l.membro.id),
+              }, `${l.membro.nome} · ${resumo}`));
           }
           case 'a-escrever':
             return h('div', {
@@ -4965,6 +4980,13 @@ window.__ModuleLoader__.load({
             if (l.rotulo) classes.push('wg-tel-inicio');
             if (!meu) classes.push('wg-tel-clicavel');
             const abrir = { onClick: () => verPessoa(l.membro.id) };
+            // A MESMA formatação da conversa individual: os segmentos completos
+            // (negrito, código, tabelas, listas) e "Ler mais" nas longas. O corte
+            // antigo (240 caracteres do texto bruto) partia a sintaxe a meio —
+            // crases soltas, palavras cortadas.
+            const longo = l.texto.length > TEXTO_LONGO;
+            const curto = longo && !abertos.has(l.key);
+            const segmentos = l.segmentos || segmentosEmCache(curto ? `${l.texto.slice(0, TEXTO_LONGO).trimEnd()}…` : l.texto);
             return h('div', {
               key: l.key, className: classes.join(' '), 'data-lado': l.lado, 'data-session-id': l.membro.id,
               ...(meu ? {} : {
@@ -4977,7 +4999,15 @@ window.__ModuleLoader__.load({
               !meu && l.rotulo ? h('div', { className: 'wg-tel-remetente' }, l.membro.nome) : null,
               h('div', { className: 'wg-tel-linha' },
                 h('div', { className: 'wg-tel-bolha' },
-                  ...conteudoDaBolha(segmentosEmCache(cortar(String(l.texto ?? ''), 240))))));
+                  ...conteudoDaBolha(segmentos),
+                  ...(l.anexos || []).map((a, i) => h('span', { key: `anexo-${i}`, className: 'wg-tel-anexo' }, `${a.tipo === 'imagem' ? '📷' : '📎'} ${a.nome}`)),
+                  longo
+                    ? h('button', {
+                      type: 'button', key: 'ler', className: 'wg-tel-ler-mais',
+                      // o "Ler mais" não pode disparar a abertura da conversa
+                      onClick: (e) => { e.stopPropagation(); alternar(l.key); },
+                    }, curto ? 'Ler mais' : 'Mostrar menos')
+                    : null)));
           }
           default:
             return null;

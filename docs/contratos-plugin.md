@@ -493,7 +493,7 @@ desktop; **no telemóvel não fecha** — o celular É o ecrã). Dados:
   acontece só quando ele ABRE (navegar não a repete).
 - **Modo telemóvel** (`emCelular()`: `(max-width: 620px) and (pointer: coarse)`): o painel recebe
   `wg-so-celular` e o celular vira **`position: fixed` fullscreen contra a JANELA** (o
-  `container-type` do painel desliga-se para o fixed escapar) — cobre TODO o DSH (a barra não se
+  `container-type` do painel desliga-se para o fixed escapar) — cobre o DSH inteiro (a barra não se
   vê), sem toolbar/sala/barra, sem moldura (ilha e barra de casa fora) e sem animações de fundo.
   Navega-se só dentro do celular; a ÚNICA saída é o botão **✕ Fechar** da tela inicial (Grupos),
   que chama `layout.selectPanel(null)` — o Modo jogo fecha e a Conversa do DSH volta (o painel

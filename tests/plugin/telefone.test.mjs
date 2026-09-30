@@ -865,12 +865,31 @@ test('grupo: linhasDoGrupo junta as conversas por hora, com rótulo de remetente
   assert.equal(linhas[3].membro.nome, 'Bia', 'cada linha sabe de quem é');
 });
 
-test('celular: modo TELEMÓVEL mostra SÓ o celular — sem moldura, sem escritório, sem fechar', () => {
+test('celular: modo TELEMÓVEL mostra SÓ o celular em FULLSCREEN — sem barra do DSH, sem moldura', () => {
   const css = B.__CSS_PAINEL;
-  assert.ok(css.includes('.wg-so-celular .wg-telefone{position:absolute;inset:0;'), 'o celular ocupa o ecrã todo');
+  assert.ok(css.includes('.wg-so-celular .wg-telefone{position:fixed;inset:0;'), 'o celular é fixed fullscreen contra a JANELA');
+  assert.ok(css.includes('.wg-so-celular.wg-painel{container-type:normal'), 'o container-type desliga-se para o fixed escapar do painel');
   assert.ok(css.includes('.wg-so-celular .wg-tel-ilha,.wg-so-celular .wg-tel-home{display:none}'), 'sem moldura (ilha nem barra de casa)');
   assert.ok(css.includes('.wg-so-celular .wg-toolbar,.wg-so-celular .wg-sidebar,.wg-so-celular .wg-rodape{display:none}'), 'só o celular se vê');
   assert.match(BUNDLE, /max-width: 620px\) and \(pointer: coarse\)/, 'deteção de telemóvel (retrato + toque)');
   assert.match(BUNDLE, /getTelefone\(\)\.aberto && !emCelular\(\)/, 'Esc não fecha o celular no telemóvel');
-  assert.ok(BUNDLE.includes("voltar: podeFechar ? 'Escritório' : null"), 'no telemóvel não há "‹ Escritório" (não fecha)');
+  // Tela inicial: o ÚNICO ponto de saída é o botão "✕ Fechar" (fecha o Modo jogo).
+  assert.ok(BUNDLE.includes("voltar: podeFechar ? 'Escritório' : 'Fechar'"), 'tela inicial: "‹ Escritório" no desktop, "Fechar" no telemóvel');
+  assert.ok(BUNDLE.includes("voltarIcone: podeFechar ? null : ICONES_TELEFONE.fechar"), 'com o ✕ no telemóvel');
+  assert.match(BUNDLE, /fecharModoJogo = \(\) => \{[\s\S]*?selectPanel\(null\)/, 'fechar o Modo jogo devolve o DSH à Conversa (selectPanel(null))');
+});
+
+test('grupo: mensagens com a formatação COMPLETA da conversa — sem cortes a meio da sintaxe', () => {
+  assert.ok(!BUNDLE.includes("segmentosEmCache(cortar(String(l.texto ?? ''), 240))"),
+    'o feed do grupo já NÃO trunca o texto bruto (partia a sintaxe: crases soltas, palavras cortadas)');
+  assert.match(BUNDLE, /const longo = l\.texto\.length > TEXTO_LONGO;/, '"Ler mais" também no grupo');
+  assert.match(BUNDLE, /conteudoDaBolha\(segmentos\),\n\s+\.\.\.\(l\.anexos/, 'segmentos completos + anexos, como na conversa individual');
+});
+
+test('grupo: ferramentas ficam na linha COMPACTA cinzenta (a da conversa) e clicáveis', () => {
+  // o caso do GRUPO é o último (o da conversa individual vem antes)
+  const bloco = BUNDLE.slice(BUNDLE.lastIndexOf("case 'ferramentas': {"), BUNDLE.lastIndexOf("case 'a-escrever':"));
+  assert.ok(bloco.includes("h('button', {"), 'a ferramenta do grupo usa o botão compacto (não texto grande)');
+  assert.ok(/className: 'wg-tel-clicavel'/.test(bloco), 'e é clicável — abre a conversa de quem a usou');
+  assert.ok(/`\$\{l\.membro\.nome\} · \$\{resumo\}`/.test(bloco), 'com o nome de quem fala');
 });
