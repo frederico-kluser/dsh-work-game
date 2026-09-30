@@ -14,9 +14,11 @@
  *        1 = algo falhou (o resumo diz o quê); 2 = uso inválido.
  */
 import { mkdirSync } from 'node:fs';
+// (asserções simples: o script é evidência, não suíte)
 import { join, resolve } from 'node:path';
 import { launchBrowser, sleep } from '../tests/helpers/cdp.mjs';
 
+const assert = (cond, msg) => { if (!cond) throw new Error(msg); };
 const [URL, OUT_ARG] = process.argv.slice(2);
 if (!/^https?:\/\//.test(URL || '')) {
   console.error('uso: node scripts/capturas-modo-celular.mjs <url-base> [pasta-de-saída]');
@@ -43,6 +45,9 @@ const estadoCelular = () => page.eval(`(() => {
     voz: t ? !!t.querySelector('.wg-tel-voz') : null,
     ilha: t && t.querySelector('.wg-tel-ilha') ? getComputedStyle(t.querySelector('.wg-tel-ilha')).display : null,
     caixa: r ? [r.x, r.y, r.width, r.height].map(Math.round) : null,
+    janela: [innerWidth, innerHeight],
+    // a barra do DSH fica por baixo do celular? (o ponto 12,400 tem de estar NELE)
+    barraCoberta: !!document.elementFromPoint(12, Math.round(innerHeight / 2) - 20)?.closest?.('.wg-telefone'),
     refs: window.__wgTelefoneRefs ?? null,
   };
 })()`);
@@ -105,6 +110,24 @@ try {
   const ainda = await page.eval('!!document.querySelector(".wg-telefone")');
   anotar('Esc no telemóvel', { celularAberto: ainda, esperado: true });
   await page.screenshot(join(OUT, '05-celular-final.png'));
+
+  // 6) Tela inicial: o botao "Fechar" fecha o Modo jogo (volta ao DSH).
+  await page.click('.wg-tel-voltar'); // grupo → grupos (tela inicial)
+  await page.waitFor('document.querySelector(".wg-telefone").getAttribute("data-vista") === "grupos"', 8000);
+  await sleep(500);
+  const fecho = await page.eval(`(() => {
+    const t = document.querySelector('.wg-telefone');
+    const b = t && t.querySelector('.wg-tel-voltar');
+    return { rotulo: b ? b.textContent.trim() : null, titulo: b ? b.getAttribute('title') : null };
+  })()`);
+  anotar('tela inicial com botão de fechar', fecho);
+  await page.screenshot(join(OUT, '06-celular-tela-inicial.png'));
+  assert(fecho.rotulo === 'Fechar', `a tela inicial tem "Fechar" (veio: ${fecho.rotulo})`);
+  await page.click('.wg-tel-voltar');
+  await page.waitFor('!document.querySelector(".wg-painel")', 8000);
+  anotar('Modo jogo fechado', { painel: await page.eval('!!document.querySelector(".wg-painel")'), conversaDsh: await page.eval('!!document.querySelector(".wg-painel") === false') });
+  await sleep(400);
+  await page.screenshot(join(OUT, '07-modo-jogo-fechado.png'));
 
   const erros = page.consoleErrors || [];
   console.log(`\nRESUMO: ${notas.length} passos · erros de consola: ${erros.length}`);

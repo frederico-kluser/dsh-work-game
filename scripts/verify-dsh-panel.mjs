@@ -655,19 +655,23 @@ try {
         caixa: r ? [r.x, r.y, r.width, r.height].map(Math.round) : null,
         painel: pr ? [pr.x, pr.y, pr.width, pr.height].map(Math.round) : null,
         ilha: t && t.querySelector('.wg-tel-ilha') ? getComputedStyle(t.querySelector('.wg-tel-ilha')).display : null,
-        voltar: t ? !!t.querySelector('.wg-tel-voltar') : null,
+        voltar: t && t.querySelector('.wg-tel-voltar') ? t.querySelector('.wg-tel-voltar').textContent.trim() : null,
+        janela: [innerWidth, innerHeight],
+        barraCoberta: !!document.elementFromPoint(12, Math.round(innerHeight / 2) - 20)?.closest?.('.wg-telefone'),
         toolbar: getComputedStyle(document.querySelector('.wg-toolbar')).display,
       };
     })()`);
     assert.ok(/wg-so-celular/.test(mob.classe), 'o painel entra em modo telemóvel');
     assert.equal(mob.vista, 'grupos', 'abre direto na lista de grupos');
-    assert.ok(!mob.voltar, 'sem "‹ Escritório": no telemóvel o celular não fecha');
+    assert.equal(mob.voltar, 'Fechar', 'no telemóvel a tela inicial tem o botão "Fechar" (o único modo de sair)');
     assert.equal(mob.ilha, 'none', 'sem moldura (Dynamic Island fora)');
     assert.equal(mob.toolbar, 'none', 'só o celular se vê (sem toolbar/sala)');
-    // O celular ocupa TODO o painel (o chrome do DSH — rail de 56px — fica fora).
-    assert.ok(mob.caixa && mob.painel
-      && Math.abs(mob.caixa[2] - mob.painel[2]) <= 2 && Math.abs(mob.caixa[3] - mob.painel[3]) <= 2,
-    `o celular ocupa o painel todo (celular ${mob.caixa} · painel ${mob.painel})`);
+    // O celular ocupa a JANELA TODA — a barra do DSH fica por baixo, invisível.
+    assert.ok(mob.caixa && mob.janela
+      && mob.caixa[0] === 0 && mob.caixa[1] === 0
+      && Math.abs(mob.caixa[2] - mob.janela[0]) <= 2 && Math.abs(mob.caixa[3] - mob.janela[1]) <= 2,
+      `o celular é fullscreen (celular ${mob.caixa} · janela ${mob.janela})`);
+    assert.ok(mob.barraCoberta, 'a barra do DSH fica coberta pelo celular');
     await page.key('.wg-tel-lista', 'Escape');
     await sleep(400);
     assert.ok(await page.eval('!!document.querySelector(".wg-telefone")'), 'Esc não fecha o celular no telemóvel');

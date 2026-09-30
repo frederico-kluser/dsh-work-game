@@ -4155,13 +4155,19 @@ window.__ModuleLoader__.load({
       '.wg-tel-remetente{margin:9px 0 1px 46px;font-size:11px;font-weight:600;color:#8e8e93}',
       '.wg-tel-clicavel{cursor:pointer}',
       '.wg-tel-grupo-linha:focus-visible{outline:2px solid #0b84fe;outline-offset:-2px}',
-      // Modo telemóvel: o celular É o ecrã — sem moldura, sem ilha/barra de
-      // casa, sem escritório por baixo e sem fechar (responsivo).
+      // Modo telemóvel (um telemóvel a rodar o site): o celular É o ecrã
+      // INTEIRO — por cima de tudo o que é do DSH (a barra não se vê), sem
+      // moldura, sem ilha/barra de casa, sem escritório por baixo e sem
+      // animações de fundo. O `container-type` do painel (que faria do painel
+      // o containing block de position:fixed) desliga-se aqui: o celular passa
+      // a ser fixed contra a JANELA. Sai-se só pelo botão "Fechar" da tela
+      // inicial (Grupos) — que fecha o Modo jogo (selectPanel(null)).
+      '.wg-so-celular.wg-painel{container-type:normal;overflow:hidden}',
       '.wg-so-celular .wg-toolbar,.wg-so-celular .wg-sidebar,.wg-so-celular .wg-rodape{display:none}',
       '.wg-so-celular .wg-corpo{position:relative;flex:1;min-height:0}',
       '.wg-so-celular .wg-palco{position:absolute;inset:0}',
       '.wg-so-celular .wg-tela{display:none}',
-      '.wg-so-celular .wg-telefone{position:absolute;inset:0;width:auto;height:auto;aspect-ratio:auto;top:0;right:0;padding:0;border:0;border-radius:0;box-shadow:none;background:#fff;z-index:1}',
+      '.wg-so-celular .wg-telefone{position:fixed;inset:0;width:100vw;height:100dvh;aspect-ratio:auto;top:0;right:0;padding:0;border:0;border-radius:0;box-shadow:none;background:#fff;z-index:9999}',
       '.wg-so-celular .wg-tel-ecra{border-radius:0}',
       '.wg-so-celular .wg-tel-ilha,.wg-so-celular .wg-tel-home{display:none}',
       // O DSH dá `corner-shape: superellipse(1.5)` a tudo (cantos contínuos, como
@@ -4555,6 +4561,9 @@ window.__ModuleLoader__.load({
       microfone: () => svgTel({ viewBox: '0 0 16 16', width: 16, height: 16 },
         h('rect', { x: 5.2, y: 1, width: 5.6, height: 9, rx: 2.8, fill: 'currentColor' }),
         h('path', { d: 'M3 7.6a5 5 0 0 0 10 0M8 12.6V15', fill: 'none', stroke: 'currentColor', strokeWidth: 1.5, strokeLinecap: 'round' })),
+      // ✕ do "Fechar o Modo jogo" (tela inicial no telemóvel).
+      fechar: () => svgTel({ viewBox: '0 0 14 14', width: 13, height: 13 },
+        h('path', { d: 'M2 2 12 12M12 2 2 12', fill: 'none', stroke: 'currentColor', strokeWidth: 2.1, strokeLinecap: 'round' })),
       // Ligar (handset) do cabeçalho da conversa — decorativo, como era o de vídeo.
       ligar: () => svgTel({ viewBox: '0 0 22 22', width: 21, height: 21 },
         h('path', {
@@ -4832,7 +4841,7 @@ window.__ModuleLoader__.load({
               type: 'button', className: 'wg-tel-voltar', onClick: o.aoVoltar,
               title: o.voltarTitulo || `Voltar a ${o.voltar}`,
               'aria-label': o.voltarAria || o.voltarTitulo || `Voltar a ${o.voltar}`,
-            }, ICONES_TELEFONE.voltar(), o.voltar)
+            }, (o.voltarIcone || ICONES_TELEFONE.voltar)(), o.voltar)
             : null,
           o.avatar,
           o.direita || null,
@@ -4867,10 +4876,15 @@ window.__ModuleLoader__.load({
           h('div', { className: 'wg-tel-ilha', 'aria-hidden': 'true' }),
           topoTel({
             agora,
-            voltar: podeFechar ? 'Escritório' : null,
+            // Tela inicial: no desktop "‹ Escritório" volta à sala; no
+            // telemóvel é o ÚNICO ponto de saída — "✕ Fechar" fecha o Modo
+            // jogo (volta ao DSH). Em ambos os casos o celular nunca se
+            // "perde": navega-se só dentro dele.
+            voltar: podeFechar ? 'Escritório' : 'Fechar',
             aoVoltar: fechar,
-            voltarTitulo: 'Voltar ao escritório (Esc)',
-            voltarAria: 'Fechar o celular e voltar ao escritório',
+            voltarTitulo: podeFechar ? 'Voltar ao escritório (Esc)' : 'Fechar o Modo jogo',
+            voltarAria: podeFechar ? 'Fechar o celular e voltar ao escritório' : 'Fechar o Modo jogo',
+            voltarIcone: podeFechar ? null : ICONES_TELEFONE.fechar,
             avatar: avatarIniciais('G'),
             nome: 'Grupos',
             subtitulo: `${grupos.length} ${grupos.length === 1 ? 'workspace' : 'workspaces'}`,
@@ -5562,7 +5576,7 @@ window.__ModuleLoader__.load({
                     const g = grupos.find((x) => x.id === id);
                     if (typeof props.abrirGrupo === 'function') props.abrirGrupo(id, g ? g.membros : []);
                   },
-                  fechar: fecharTelefone, podeFechar: !celular,
+                  fechar: celular ? fecharModoJogo : fecharTelefone, podeFechar: !celular,
                 });
               }
               if (vistaTel === 'grupo' && grupoAtual) {
@@ -5630,6 +5644,10 @@ window.__ModuleLoader__.load({
     // botão não depender da forma como o slot injeta props (que varia entre
     // versões do runtime).
     let abrirPainel = () => {};
+    // Fechar o Modo jogo (o botão "Fechar" da tela inicial no telemóvel):
+    // selectPanel(null) devolve o DSH à Conversa — o painel desmonta e liberta
+    // tudo (celular, grupo e vigias).
+    let fecharModoJogo = () => {};
 
     // Botão do pé da barra lateral: abre o painel do escritório. Tooltip nativo
     // no `title`, nome acessível no `aria-label`; em wide mostra o rótulo.
@@ -6195,6 +6213,11 @@ window.__ModuleLoader__.load({
         const lay = ctx.layout ?? (typeof ctx.get === 'function' ? ctx.get('layout') : null);
         if (lay && typeof lay.selectPanel === 'function') lay.selectPanel(PANEL_ID);
         else { window.__wgDiag = (window.__wgDiag || '') + '|abrir:sem-layout'; }
+      };
+      fecharModoJogo = () => {
+        const lay = ctx.layout ?? (typeof ctx.get === 'function' ? ctx.get('layout') : null);
+        if (lay && typeof lay.selectPanel === 'function') lay.selectPanel(null); // null = a Conversa do DSH
+        else { window.__wgDiag = (window.__wgDiag || '') + '|fechar:sem-layout'; }
       };
       injetarEstilos(document);
       const nucleo = criarNucleo();
