@@ -1026,7 +1026,7 @@ test('nomes: nome e boneco DERIVADOS do id — a mesma conversa é a mesma pesso
     const p2 = B.__criarAssociador().para(id);
     assert.deepEqual([p1.name, p1.avatar], [p2.name, p2.avatar], 'o mesmo nome e o mesmo boneco nos dois');
     assert.deepEqual([p1.name, p1.avatar], [a.name, a.avatar]);
-    assert.equal(JSON.parse(um.d['dsh-work-game:assoc'])[id].v, 2, 'guardada (cache) com a versão');
+    assert.equal(JSON.parse(um.d['dsh-work-game:assoc'])[id].v, 3, 'guardada (cache) com a versão');
     // Uma associação ANTIGA (sorteada) é trocada uma vez pela derivada…
     const velho = armazenamento();
     const outroNome = B.__NOMES.find((n) => n !== a.name);
@@ -1039,20 +1039,46 @@ test('nomes: nome e boneco DERIVADOS do id — a mesma conversa é a mesma pesso
   } finally {
     globalThis.window.localStorage = antes;
   }
-  // Desempate de homónimos (fixo): o nome preferido já é de outra pessoa → o seguinte da lista.
+  // Desempate de homónimos (fixo): o nome preferido já é de outra pessoa →
+  // o seguinte da lista DO GÊNERO (a sondagem nunca sai do gênero do boneco).
   const preferido = B.__identidadeDe('x').name;
   let outro = null;
   for (let i = 0; i < 5000 && !outro; i += 1) if (B.__identidadeDe(`y${i}`).name === preferido) outro = `y${i}`;
   assert.ok(outro, 'há ids com o mesmo nome preferido');
   const comDesempate = B.__identidadeDe(outro, (n) => n === preferido);
-  const k = B.__NOMES.indexOf(preferido);
-  assert.equal(comDesempate.name, B.__NOMES[(k + 1) % B.__NOMES.length], 'sondagem linear: o seguinte da lista');
+  const genero = B.__GENERO_AVATAR[comDesempate.avatar];
+  const listaGenero = B.__NOMES.filter((n) => {
+    const g = B.__GENERO_NOME[n] || 'any';
+    return g === genero || g === 'any';
+  });
+  const k = listaGenero.indexOf(preferido);
+  assert.equal(comDesempate.name, listaGenero[(k + 1) % listaGenero.length], 'sondagem linear: o seguinte da lista do gênero');
   assert.equal(comDesempate.avatar, B.__identidadeDe(outro).avatar, 'o boneco não muda com o desempate');
   // No estado: a 2.ª conversa com o mesmo nome preferido não fica homónima.
   let e = B.__createOfficeState({});
   e = B.__applyEvent(e, { type: 'session/added', sessionId: 'x' });
   e = B.__applyEvent(e, { type: 'session/added', sessionId: outro });
   assert.notEqual(e.people.get('x').name, e.people.get(outro).name, 'sem homónimos na sala');
+});
+
+test('nomes: o gênero do boneco bate SEMPRE com o gênero do nome (regra 2026-09-29)', () => {
+  assert.deepEqual({ ...B.__GENERO_AVATAR }, {
+    rui: 'm', bia: 'f', lia: 'f', pesquisa: 'm', codigo: 'm', testes: 'f', alex: 'm', maya: 'f',
+  }, 'tabela de gênero dos 8 bonecos nomeados');
+  for (let i = 0; i < 600; i += 1) {
+    const a = B.__identidadeDe(`session-g-${i}`);
+    const gAvatar = B.__GENERO_AVATAR[a.avatar];
+    const gNome = B.__GENERO_NOME[a.name] || 'any';
+    assert.ok(['f', 'm'].includes(gAvatar), `session-g-${i}: boneco ${a.avatar} sem gênero`);
+    assert.ok(gNome === gAvatar || gNome === 'any',
+      `session-g-${i}: "${a.name}" (${gNome}) com boneco ${a.avatar} (${gAvatar}) — gêneros não batem`);
+  }
+  // Cobertura: cada gênero tem nomes e bonecos de sobra.
+  for (const g of ['f', 'm']) {
+    const nomes = B.__NOMES.filter((n) => { const gn = B.__GENERO_NOME[n] || 'any'; return gn === g || gn === 'any'; });
+    assert.ok(nomes.length >= 20, `poucos nomes para o gênero ${g}: ${nomes.length}`);
+    assert.ok(Object.values(B.__GENERO_AVATAR).includes(g), `sem bonecos para o gênero ${g}`);
+  }
 });
 
 /* ---------- estado: buckets de tokens e atividade por pessoa ---------- */

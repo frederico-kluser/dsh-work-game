@@ -114,6 +114,21 @@ test('DSH_DEMO_DATA.lastNames não tem apelidos repetidos', () => {
   assert.deepEqual(repetidos, [], 'lastNames repetidos: ' + [...new Set(repetidos)].join(', '));
 });
 
+test('DSH_DEMO_DATA.nameGenders cobre todos os firstNames (gênero casa nome ↔ boneco)', () => {
+  const genders = DATA?.nameGenders && typeof DATA.nameGenders === 'object' ? DATA.nameGenders : {};
+  const problemas = [];
+  for (const nome of firstNames) {
+    const g = genders[nome];
+    if (!['f', 'm', 'any'].includes(g)) {
+      problemas.push(`"${nome}" sem gênero válido (valor: ${JSON.stringify(g)})`);
+    }
+  }
+  for (const chave of Object.keys(genders)) {
+    if (!firstNames.includes(chave)) problemas.push(`nameGenders tem "${chave}", que não está em firstNames`);
+  }
+  assert.equal(problemas.length, 0, 'nameGenders divergente de firstNames:\n' + problemas.join('\n'));
+});
+
 test('DSH_DEMO_DATA.outputs tem pelo menos 40 entradas', () => {
   assert.ok(outputs.length >= 40, `Esperados pelo menos 40 outputs, encontrados ${outputs.length}`);
 });
@@ -222,6 +237,48 @@ test('randomIdentityIds tem exatamente 12 ids no formato rNN', () => {
   const repetidos = ids.filter((id, i) => ids.indexOf(id) !== i);
   if (repetidos.length > 0) problemas.push(`ids repetidos: ${[...new Set(repetidos)].join(', ')}`);
   assert.equal(problemas.length, 0, 'randomIdentityIds divergente do contrato:\n' + problemas.join('\n'));
+});
+
+test('identities: todas as identidades declaram gender "f" ou "m"', () => {
+  const problemas = [];
+  for (const [id, ident] of Object.entries(identities)) {
+    if (ident?.gender !== 'f' && ident?.gender !== 'm') {
+      problemas.push(`${id}: gender ${JSON.stringify(ident?.gender)}`);
+    }
+  }
+  if (Object.keys(identities).length === 0) problemas.push('DSH_EXPRESSIONS.identities vazio ou ausente');
+  assert.equal(problemas.length, 0, 'gender em falta nas identidades:\n' + problemas.join('\n'));
+});
+
+test('identidades aleatórias femininas nunca têm barba/bigode ("mulher de bigode" proibida)', () => {
+  const problemas = [];
+  for (const id of (Array.isArray(EXPR?.randomIdentityIds) ? EXPR.randomIdentityIds : [])) {
+    const ident = identities[id];
+    if (ident?.gender === 'f' && ident?.facialHairType !== 'Blank') {
+      problemas.push(`${id}: feminina com facialHairType ${JSON.stringify(ident?.facialHairType)}`);
+    }
+  }
+  assert.equal(problemas.length, 0, problemas.join('\n'));
+});
+
+test('identidades aleatórias: topType todos distintos e zero chapéus/bonés ("o boné repetido" proibido)', () => {
+  const CHAPEUS = new Set(['Hat', 'WinterHat1', 'WinterHat2', 'WinterHat3', 'WinterHat4']);
+  const tops = (Array.isArray(EXPR?.randomIdentityIds) ? EXPR.randomIdentityIds : [])
+    .map((id) => identities[id]?.topType);
+  const problemas = [];
+  const repetidos = [...new Set(tops.filter((t, i) => tops.indexOf(t) !== i))];
+  if (repetidos.length > 0) problemas.push('topType repetido: ' + repetidos.join(', '));
+  const chapeus = tops.filter((t) => CHAPEUS.has(t));
+  if (chapeus.length > 0) problemas.push('chapéu/boné na piscina: ' + chapeus.join(', '));
+  assert.equal(problemas.length, 0, problemas.join('\n'));
+});
+
+test('identidades aleatórias: sem óculos de lente opaca (as expressões têm de se ver)', () => {
+  const OPACOS = new Set(['Sunglasses', 'Wayfarers']);
+  const problemas = [...(Array.isArray(EXPR?.randomIdentityIds) ? EXPR.randomIdentityIds : [])]
+    .filter((id) => OPACOS.has(identities[id]?.accessoriesType))
+    .map((id) => `${id}: ${identities[id]?.accessoriesType}`);
+  assert.equal(problemas.length, 0, 'óculos opacos na piscina: ' + problemas.join(', '));
 });
 
 test('basePreset é "idle"', () => {

@@ -250,6 +250,30 @@ test('recrutamento: nome e avatar sorteados, com "Sortear outro"', async () => {
   assert.equal(r.sentado, true, 'ocupa uma cadeira da mesa escolhida');
 });
 
+test('recrutamento: o gênero do boneco bate SEMPRE com o gênero do nome', async () => {
+  await reset();
+  await page.click('g.slot-free[data-module="m-api"]');
+  await page.waitFor('document.querySelector("#recruit-dialog").open');
+  for (let i = 0; i < 4; i += 1) {
+    if (i > 0) {
+      await page.click('[data-action="reroll"]');
+      await sleep(40);
+    }
+    const par = await page.eval(`(() => {
+      const primeiro = recruitRoll.name.trim().split(/\\s+/)[0];
+      return {
+        nome: recruitRoll.name, avatar: recruitRoll.avatarId,
+        gNome: (window.DSH_DEMO_DATA.nameGenders || {})[primeiro] || 'any',
+        gAvatar: (window.DSH_EXPRESSIONS.identities[recruitRoll.avatarId] || {}).gender
+      };
+    })()`);
+    assert.ok(['f', 'm'].includes(par.gAvatar), `boneco ${par.avatar} sem gênero`);
+    assert.ok(par.gNome === par.gAvatar || par.gNome === 'any',
+      `"${par.nome}" (${par.gNome}) com boneco ${par.avatar} (${par.gAvatar}) — gêneros não batem`);
+  }
+  await page.eval(`document.querySelector('#recruit-dialog').close(); true`);
+});
+
 test('crescimento: ao lotar, nasce mesa ao lado da principal e a mesa de equipe é empurrada', async () => {
   await reset();
   const ordemInicial = await page.eval(`[...document.querySelectorAll('g.desk-module')].map((m) => m.dataset.module)`);
