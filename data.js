@@ -13,6 +13,22 @@ window.DSH_DEMO_DATA = {
     'Tati', 'Vitor', 'Ari', 'Bel', 'Cauã', 'Duda', 'Ely', 'Fábio',
     'Gil', 'Hana', 'Iara', 'Júlia', 'Kai', 'Luan', 'Manu', 'Nilo'
   ],
+  /* Gênero de cada primeiro nome (2026-09-29): casa o nome com o gênero do
+     boneco sorteado — "os gêneros dos bonecos têm de bater com os nomes".
+     'f' feminino · 'm' masculino · 'any' neutro (serve para qualquer boneco).
+     Cobertura OBRIGATÓRIA de todos os firstNames (testado em contracts.test.mjs). */
+  nameGenders: {
+    // femininos
+    Lia: 'f', Bia: 'f', Maya: 'f', Nara: 'f', Iris: 'f', Nina: 'f', Zoe: 'f',
+    Cleo: 'f', Lila: 'f', Mila: 'f', Lara: 'f', Sofia: 'f', Dara: 'f', Yara: 'f',
+    Tati: 'f', Bel: 'f', Duda: 'f', Hana: 'f', Iara: 'f', 'Júlia': 'f', Manu: 'f',
+    // masculinos
+    Rui: 'm', Tom: 'm', Caio: 'm', Otto: 'm', Davi: 'm', 'Léo': 'm', Ivo: 'm',
+    Ravi: 'm', 'Théo': 'm', Enzo: 'm', 'Téo': 'm', Gael: 'm', Ruan: 'm', Iuri: 'm',
+    Levi: 'm', Vitor: 'm', 'Cauã': 'm', 'Fábio': 'm', Gil: 'm', Luan: 'm', Nilo: 'm',
+    // neutros (apelidos curtos usados para qualquer gênero)
+    Alex: 'any', Noa: 'any', Mel: 'any', Ari: 'any', Ely: 'any', Kai: 'any'
+  },
   lastNames: [
     'Silva', 'Souza', 'Lima', 'Cruz', 'Melo', 'Rosa', 'Dias', 'Reis',
     'Luz', 'Moraes', 'Fontes', 'Braga', 'Prado', 'Rocha', 'Sales',

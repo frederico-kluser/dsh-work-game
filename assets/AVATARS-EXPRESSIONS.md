@@ -2,7 +2,7 @@
 
 Módulo de expressões da demo **dsh-work-game**: cada pessoa muda de expressão conforme o estado (apenas `eyes`/`eyebrows`/`mouth`), mantendo **a mesma identidade** (cabelo, pele, roupa, acessórios) dos bustos em [assets/avatars/](assets/avatars/).
 
-- Gerado em **2026-09-27 (UTC)**, durante o desenvolvimento, com downloads diretos do renderer [avataaars.io](https://avataaars.io/) (`avatarStyle=Transparent` em todos).
+- Gerado em **2026-09-27 (UTC)**, durante o desenvolvimento, com downloads diretos do renderer [avataaars.io](https://avataaars.io/) (`avatarStyle=Transparent` em todos). As **12 identidades aleatórias foram re-geradas em 2026-09-29** com `scripts/gerar-avatares-random.py` (ver "Identidades aleatórias (12)" — o género passou a bater com o nome).
 - **Todos os traços são desenhos originais da biblioteca Avataaars renderizados pelo serviço indicado — nada foi redesenhado nem gerado por IA.** Somente olhos, sobrancelhas e boca mudam entre presets; a paleta das roupas foi recolorizada apenas nos quatro casos já documentados em [AVATARS-SOURCES.md](AVATARS-SOURCES.md).
 - Licença MIT, copyright **2017 Pablo Stanley, Fang-Pen Lin**, preservada em [AVATAARS-LICENSE.txt](AVATAARS-LICENSE.txt) (texto oficial: https://raw.githubusercontent.com/fangpenlin/avataaars/master/LICENSE).
 - Uso **100% local/offline**: os SVGs são carregados por `<img>`; as URLs abaixo são registro de proveniência, não dependência de execução.
@@ -87,22 +87,30 @@ As outras quatro pessoas (`rui`, `lia`, `testes`, `alex`) e todas as identidades
 
 ## Identidades aleatórias (12) — configuração completa
 
-Sorteio determinístico (`random.Random(20260927)`) sobre os enums registrados; cada identidade tem 4 presets renderizados (`idle`, `working`, `success`, `error`).
+Redesenhadas em **2026-09-29** (regeneradas com `scripts/gerar-avatares-random.py`) para o **gênero do boneco bater com o gênero do nome** sorteado — a versão anterior tinha mulheres de barba/bigode, três chapéus/bonés repetidos e seis tons de pele `Yellow`. Regras da piscina:
 
-| Id | topType | hairColor | accessoriesType | facialHairType | facialHairColor | clotheType | clotheColor | skinColor |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| `r01` | LongHairFrida | Blue | Prescription01 | BeardLight | Black | BlazerSweater | PastelBlue | Light |
-| `r02` | LongHairStraightStrand | SilverGray | Blank | BeardMedium | Black | CollarSweater | Pink | DarkBrown |
-| `r03` | ShortHairShortFlat | Brown | Prescription01 | BeardLight | Blonde | Overall | Red | Brown |
-| `r04` | LongHairCurly | SilverGray | Blank | MoustacheFancy | Blonde | ShirtVNeck | White | Tanned |
-| `r05` | LongHairNotTooLong | BlondeGolden | Round | Blank | Black | ShirtCrewNeck | Blue01 | Tanned |
-| `r06` | Hat | PastelPink | Blank | BeardMajestic | Brown | Overall | Black | Yellow |
-| `r07` | ShortHairShortWaved | Blonde | Round | BeardMajestic | Blonde | BlazerSweater | Blue03 | Tanned |
-| `r08` | Hat | Blonde | Round | MoustacheFancy | Black | BlazerShirt | PastelOrange | Light |
-| `r09` | WinterHat1 | Blue | Sunglasses | BeardLight | Brown | BlazerSweater | Blue03 | Black |
-| `r10` | ShortHairShortFlat | Red | Round | BeardLight | Auburn | ShirtVNeck | Pink | Yellow |
-| `r11` | LongHairFrida | Blue | Sunglasses | Blank | Brown | GraphicShirt | PastelYellow | Yellow |
-| `r12` | LongHairStraight2 | Red | Wayfarers | MoustacheMagnum | Blonde | BlazerSweater | Pink | Tanned |
+- **6 identidades femininas (`r01`–`r06`) sem qualquer barba/bigode** e **6 masculinas (`r07`–`r12`)** — o campo `gender: 'f' | 'm'` de `expressions.js` casa avatar e nome;
+- **12 `topType` todos distintos e zero chapéus/bonés** (`Hat`, `WinterHat1..4` proibidos);
+- óculos **só de lente transparente** (`Prescription01/02`, `Round`) — as expressões mudam os olhos e lentes opacas (`Sunglasses`, `Wayfarers`) escondê-las-iam;
+- `facialHairColor` acompanha `hairColor`; 6 tons de pele (sem `Yellow`); 9 tipos de roupa distintos.
+- **NOTA de cor:** `BlazerShirt` e `BlazerSweater` ignoram `clotheColor` no renderer (paleta fixa `#262E33` + `#3A4C5A`) — `r04` e `r07` declaram `clotheColor: Black`, que é o que sai mesmo.
+
+Cada identidade tem 4 presets renderizados (`idle`, `working`, `success`, `error`).
+
+| Id | gênero | topType | hairColor | accessoriesType | facialHairType | facialHairColor | clotheType | clotheColor | skinColor |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| `r01` | f | LongHairBob | BrownDark | Blank | Blank | BrownDark | ShirtCrewNeck | PastelBlue | Pale |
+| `r02` | f | LongHairCurly | Black | Round | Blank | Black | CollarSweater | PastelGreen | DarkBrown |
+| `r03` | f | LongHairStraight2 | Blonde | Blank | Blank | Blonde | ShirtScoopNeck | Pink | Light |
+| `r04` | f | LongHairBun | Auburn | Prescription01 | Blank | Auburn | BlazerShirt | Black | Tanned |
+| `r05` | f | LongHairFro | Brown | Blank | Blank | Brown | Hoodie | Red | Black |
+| `r06` | f | LongHairMiaWallace | SilverGray | Blank | Blank | SilverGray | GraphicShirt (`graphicType: Hola`) | PastelYellow | Brown |
+| `r07` | m | ShortHairShortCurly | BlondeGolden | Blank | BeardLight | BlondeGolden | BlazerSweater | Black | Tanned |
+| `r08` | m | ShortHairShortFlat | Platinum | Prescription02 | Blank | Platinum | ShirtCrewNeck | White | Light |
+| `r09` | m | ShortHairDreads01 | BrownDark | Blank | Blank | BrownDark | Overall | Gray01 | Brown |
+| `r10` | m | ShortHairFrizzle | Red | Round | MoustacheFancy | Red | ShirtVNeck | Blue02 | Pale |
+| `r11` | m | ShortHairTheCaesar | Brown | Blank | BeardMedium | Brown | CollarSweater | PastelOrange | Black |
+| `r12` | m | NoHair | Black | Blank | BeardMajestic | Black | Hoodie | Black | DarkBrown |
 
 ## Estrutura de arquivos e módulo de presets
 
@@ -122,6 +130,7 @@ randomIdentityIds // ['r01'..'r12']
 identities        // mapa id -> config: nomeadas = só referência (avatar base + dir + presets);
                   // aleatórias = enums completos (topType, hairColor, accessoriesType,
                   // facialHairType, facialHairColor, clotheType, clotheColor, skinColor)
+                  // todas: gender 'f' | 'm' — casa o boneco com o gênero do nome sorteado
 basePreset        // 'idle'
 resolve(identityId, presetId) // -> caminho local do SVG; se faltar o preset, cai para 'idle';
                   // se ainda faltar, 'assets/avatars/<identityId>.svg' (só nomeadas); senão null
@@ -134,18 +143,20 @@ Exemplos de `resolve`: `resolve("maya","disbelief")` → `assets/avatars/express
 - **146 downloads** de `avataaars.io` (todas as respostas HTTP 200, `Content-Type: image/svg+xml`), **14 cópias locais**:
   - 8 identidades × 13 triples distintos = 104; desses, 6 arquivos `idle` reaproveitam o busto já baixado (`Default`/`DefaultNatural`/`Smile`) de `rui`, `bia`, `codigo`, `testes`, `alex` e `maya` → **98 downloads** nomeados;
   - `wink.svg` de cada pessoa = cópia do `approval.svg` (mesmo triple) → 8 cópias;
-  - 12 identidades aleatórias × 4 presets = **48 downloads**.
+  - 12 identidades aleatórias × 4 presets = **48 downloads** — os 48 ficheiros foram **re-gerados em 2026-09-29** (piscina nova com género coerente; ver "Identidades aleatórias (12)"), substituindo os do sorteio de 2026-09-27.
 - **160 SVGs finais** (112 nomeados + 48 aleatórios) + `expressions.js`.
-- **Tamanho total em disco**: **2.506.862 bytes** para os 160 SVGs (2.39 MiB) — `expressions/` e `random/` — e 10.797 bytes para `expressions.js`; total **2.517.659 bytes** (~2.40 MiB).
+- **Tamanho total em disco**: **2.195.654 bytes** para os 160 SVGs (2.09 MiB) — `expressions/` e `random/` — e 11.804 bytes para `expressions.js`; total **2.207.458 bytes** (~2.11 MiB).
 
 ## Validações executadas
 
 1. **XML bem formado** (`xml.etree.ElementTree`) em 160/160 SVGs; raiz `<svg>` e `viewBox="0 0 264 280"` conferidos em todos.
 2. **Sem `<script>`, `foreignObject`, atributos `on*`, DOCTYPE/entidades, `@import`, `javascript:` ou URLs externas** em 160/160 (declarações `xmlns` são identificadores de namespace, não URLs de recurso).
 3. **Renderização local com `rsvg-convert` em 160/160** (o pedido pedia ao menos 8): todas rasterizam com conteúdo não vazio (alfa médio > 0, medido com ImageMagick em memória, sem criar arquivos extras).
-4. **Identidade preservada**: comparação geométrica (multiconjunto de formas `path`/`rect`/`circle`/`ellipse` com fill efetivo) entre cada busto base e seus variantes confirma que **nenhuma forma de cabelo/pele/roupa foi trocada**; as formas diferentes são exclusivamente olhos/sobrancelha/boca (incluindo dentes/brilhos de boca). O `idle` das seis pessoas reaproveitadas é byte-idêntico ao busto base.
-5. **Recolorizações**: 0 ocorrências do hex de origem restantes; o hex final aparece exatamente 1× em cada um dos 56 arquivos afetados; nenhum hex de recolorização aparece nas demais pessoas ou nas aleatórias.
-6. **Contrato do módulo** testado em Node: 14 presets com campos completos, enums dentro dos conjuntos registrados, `resolve()` com fallback `idle` → busto base → `null`, e todos os caminhos retornados existem em disco (280 resoluções verificadas).
+4. **Identidade preservada**: comparação geométrica (multiconjunto de formas `path`/`rect`/`circle`/`ellipse` com fill efetivo) entre cada busto base e seus variantes confirma que **nenhuma forma de cabelo/pele/roupa foi trocada**; as formas diferentes são exclusivamente olhos/sobrancelha/boca (incluindo dentes/brilhos de boca). O `idle` das seis pessoas reaproveitadas é byte-idêntico ao busto base. Nas identidades aleatórias, `scripts/gerar-avatares-random.py` prova o mesmo por serial canónico: os 4 presets de cada `rNN` só diferem nos grupos `Mouth/*`, `Eyes/*` e `Eyebrow/*` (os ids `react-*` são normalizados por ordem de aparição).
+5. **Config renderizada = config declarada** (identidades aleatórias): os ids semânticos dos grupos (`Top/…`, `Facial-Hair/…`, `Clothing/…`, `Top/_Resources/…`) casam com `topType`/`facialHairType`/`clotheType`/`accessoriesType` de `expressions.js`, e os hex das paletas oficiais de `hairColor`/`skinColor`/`clotheColor` estão presentes em cada ficheiro.
+6. **Regras de gênero da piscina** (2026-09-29): nenhuma identidade `gender: 'f'` tem `facialHairType` ≠ `Blank` (a "mulher de bigode" está proibida), os 12 `topType` são distintos e **zero chapéus/bonés** (`Hat`, `WinterHat1..4`), e nenhum acessório de lente opaca (`Sunglasses`, `Wayfarers`) — as expressões têm de se ver. Tudo testado em `tests/contracts.test.mjs`.
+7. **Recolorizações**: 0 ocorrências do hex de origem restantes; o hex final aparece exatamente 1× em cada um dos 56 arquivos afetados; nenhum hex de recolorização aparece nas demais pessoas ou nas aleatórias.
+8. **Contrato do módulo** testado em Node: 14 presets com campos completos, enums dentro dos conjuntos registrados, `resolve()` com fallback `idle` → busto base → `null`, e todos os caminhos retornados existem em disco (280 resoluções verificadas).
 
 ## SHA-256 dos arquivos finais
 
@@ -265,57 +276,57 @@ Hashes SHA-256 em minúsculas, dos bytes exatos em disco.
 | `assets/avatars/expressions/testes/waiting.svg` | 11274 | `8912d68f31f0f3ce4c8c9bfbc1c9331c4569940410b939594a3897098edcb8d4` |
 | `assets/avatars/expressions/testes/wink.svg` | 12113 | `9d95e44be3219db526b025838f178631e5c021abdb189dcd83938a8db35634b4` |
 | `assets/avatars/expressions/testes/working.svg` | 11762 | `738044450481795638e73ec18e016c4f76e5a890468d57105141ae404e6a0c30` |
-| `assets/avatars/random/r01/error.svg` | 38426 | `9ba595edf5382012f0581cab953123178682bb89aa9ac8d3321af7b50aaafb52` |
-| `assets/avatars/random/r01/idle.svg` | 37371 | `5e1bacbaba57de9da97680bac126e25e0ff88968c65de850223499f8a2750ecc` |
-| `assets/avatars/random/r01/success.svg` | 38098 | `a4e1da9b8738bc25f2207be113209e09518ebb6967562cbdda9ca537eca0ae06` |
-| `assets/avatars/random/r01/working.svg` | 37646 | `1f35c7a67bec1ca71e73e408a37cf87b716c2a387df87c5e7854659029968470` |
-| `assets/avatars/random/r02/error.svg` | 16354 | `dff58730edbb341c5c36602218dc2b9656991b5b98e5346dfea4b6aeaee143a7` |
-| `assets/avatars/random/r02/idle.svg` | 15299 | `71c7faa0e0e54f3092f6593b99d070334ce6572ebc706577030e8cc25c996d2b` |
-| `assets/avatars/random/r02/success.svg` | 16026 | `eb22de0a1be2cf5cb1d6b559f047ea18fae7278c4f311f443cca3b7ea1f6a4db` |
-| `assets/avatars/random/r02/working.svg` | 15574 | `c8da556946ba5203779ac4ffe962a57ac6b3f0712e17d3d89d06913ac675fcdc` |
-| `assets/avatars/random/r03/error.svg` | 16916 | `43b9ff4269b5cd8561736ae1313bd6ccbea60b9acd48e6f94dccfd9b5f7ed486` |
-| `assets/avatars/random/r03/idle.svg` | 15861 | `68dde626500d8dba0e1627b96cd2407cb3a475a433d74f8fb59620e6ecc752fd` |
-| `assets/avatars/random/r03/success.svg` | 16588 | `e1dd15df93bfb6205cb1dacd055fdd792e363150616edaa50d79e2661dd7a172` |
-| `assets/avatars/random/r03/working.svg` | 16136 | `3a623ad9360c7618ceb63a8e5ad55632999775691a048c142b097c2601751dd5` |
-| `assets/avatars/random/r04/error.svg` | 11304 | `02ecf4888b0364e7f8446783cdd3b4c238ccd13aef846c733e860e973881c563` |
-| `assets/avatars/random/r04/idle.svg` | 10249 | `22ac5bc650d3a1c49cf0001b3481abefe9199b490b9539257287a46e2965c248` |
-| `assets/avatars/random/r04/success.svg` | 10976 | `ff4c66ad5c5974d8edc929d7b32b44000d35f197f774984f7c23564b2b89a4b2` |
-| `assets/avatars/random/r04/working.svg` | 10524 | `77ca579b26c169ec824384604f54fe9b068b07968b0089da020f32acdf277a16` |
-| `assets/avatars/random/r05/error.svg` | 12251 | `ebf820330c15ac50b2421764356a8a254593b7ccfbedb79e99028a6fc9849180` |
-| `assets/avatars/random/r05/idle.svg` | 11196 | `85bd36e29d45e5378ef946f068dae939d92216646208faec13522333dadae1c7` |
-| `assets/avatars/random/r05/success.svg` | 11923 | `f4833f1c21f670bd4706356d8358b7a23f1c4e10fe1e9f36cf7cb41b7cf6c7d7` |
-| `assets/avatars/random/r05/working.svg` | 11471 | `9e800a4a2eb2c1c1b6cece659150ea95242f99ff888233a746e1fe8e840d6eab` |
-| `assets/avatars/random/r06/error.svg` | 12613 | `c1e8bc0e0ab81469f6c60b521ea670626ad78a130a9ed382e8be22d16974b13b` |
-| `assets/avatars/random/r06/idle.svg` | 11558 | `26a4261c1d5eac6e35255d4c4d8602c46eac3832a4d59e08758e0855c3c8104a` |
-| `assets/avatars/random/r06/success.svg` | 12285 | `a921d1963d183fc07c0c54250b66ac24f6a982fadb433668d4a2ee0de403a894` |
-| `assets/avatars/random/r06/working.svg` | 11833 | `83eb4222a570c8f10f5740dbf675dd95befe83f51063c87e2f18f24b50a4cd7f` |
-| `assets/avatars/random/r07/error.svg` | 17061 | `9c8da0c9813031f009dd4bae876d841a87c6c430d2422aa305796a01c2693b2b` |
-| `assets/avatars/random/r07/idle.svg` | 16006 | `5e0bfb19ae673d5eff53844b0954e4eb161a0302c8127ac8db95070f3251ccb8` |
-| `assets/avatars/random/r07/success.svg` | 16733 | `e01de86c78d52dd7034dc50fcd2a69a4b1dc62c6fae8a70584fcdeb4882fafbb` |
-| `assets/avatars/random/r07/working.svg` | 16281 | `92ee4606597631d4be97f7cfe3c32acce97750c6bcaf79d5720f2bd1ca97d198` |
-| `assets/avatars/random/r08/error.svg` | 13859 | `30f4a3930c298918859ba8a6a9bf82c61ed9ae552fc55ee8f2e114daff7f2e4b` |
-| `assets/avatars/random/r08/idle.svg` | 12804 | `7432ce96adc8188fefa4baa16a95104619b7b8bf27e13be063b59a19598cd7f0` |
-| `assets/avatars/random/r08/success.svg` | 13531 | `e002e98f1cca2d0421692b2c2be0d2d0f06b77d4802947c926b15df582b50670` |
-| `assets/avatars/random/r08/working.svg` | 13079 | `cc1e2d84cfd7f9b61bbe635f5fb053c586581ef4d2240281f8c02a9fb4b9b3e7` |
-| `assets/avatars/random/r09/error.svg` | 19738 | `921eb70c15d1ef6609c051a7d425d3266403a5b4876063478c89e80a853b3654` |
-| `assets/avatars/random/r09/idle.svg` | 18683 | `717d2b952f7472a2e059f77e8af5ae78ff75d1baf19bc81bb1c006ff7714e4d4` |
-| `assets/avatars/random/r09/success.svg` | 19410 | `fe582e4b007186406d9630dafc5f63116bea2d00f479974d470d5d45d7672ae6` |
-| `assets/avatars/random/r09/working.svg` | 18958 | `fb6b910c0cf7a1b63195e7f3e6386abeb340a26eb831336a194f5d3083f1fe28` |
-| `assets/avatars/random/r10/error.svg` | 14967 | `ecdff50ce9288f906293831233d60603d2463634bbdf0cc5b2dfdc2cea5260aa` |
-| `assets/avatars/random/r10/idle.svg` | 13912 | `7b6105b35e722b9eaced6ec840253681faea2d969a228d27b31bdb5b6774fe9c` |
-| `assets/avatars/random/r10/success.svg` | 14639 | `6cda4f735aa26cf159062e1f324a29ba44796dfd4d4603f6266088e5ac306a3b` |
-| `assets/avatars/random/r10/working.svg` | 14187 | `ecb405a054e5424497537e09420285a246ce86fd790c02df535b47874269dd51` |
-| `assets/avatars/random/r11/error.svg` | 38368 | `de7a1c5dc2d49632076d9c8359ace5a67785a072335b94c46f7478564210870f` |
-| `assets/avatars/random/r11/idle.svg` | 37313 | `9382a1a273a8f8b246f8cb54f97d430391283be7c6da716357bc16620a559ec2` |
-| `assets/avatars/random/r11/success.svg` | 38040 | `7516352863d88a0aef90a2004cf2e5368e7a45267ecbe0304c8b7b6f8f260e05` |
-| `assets/avatars/random/r11/working.svg` | 37588 | `0b61941a57640aff201262f55fa95f4eef65eb66194774e69b72ceb28797b937` |
-| `assets/avatars/random/r12/error.svg` | 20640 | `678b7c65ceb3cdbae1c102992bdc017cb7a2d9cafa3380dbf07d75f181deb873` |
-| `assets/avatars/random/r12/idle.svg` | 19585 | `b5cba6a4fc268ce08c920a9e0cd3d4878de1f2332fae97ccf7c4218f7ab0667b` |
-| `assets/avatars/random/r12/success.svg` | 20312 | `02deda1853952fff000ad714b0ba4fd34deb84dd995ab96246cac3dcbc97f41c` |
-| `assets/avatars/random/r12/working.svg` | 19860 | `4e9a81d2fe48002f15e50b539885d55d0504d0e26d9293f0c4a2a0c6dd8a9dac` |
-| `expressions.js` | 10797 | `eff6378be7622a2973eb0074f3b9b3ab60e13f9dccdfe930de2c97ce72f372a5` |
+| `assets/avatars/random/r01/error.svg` | 8698 | `059afed044511879e3bdd72cc2c0bf216058cd5d51b26ee4270f1cc28ce228a6` |
+| `assets/avatars/random/r01/idle.svg` | 7643 | `5c69a2250f1dc3e90b83ea1b35bbba9212f5e80b45cb92eeba73a6040d2862bd` |
+| `assets/avatars/random/r01/success.svg` | 8370 | `5056e44cdf9d08b0b4277ddc95e817ee7895c67bb8da50d10881debb381d05ef` |
+| `assets/avatars/random/r01/working.svg` | 7918 | `7e4328b8ed82a53ae2b6d4cc833a969362a3671bfacf2234ca8770dc8225f76d` |
+| `assets/avatars/random/r02/error.svg` | 12678 | `c393ef572126abde353b37af9a8d574f2564f53822747b0354c5ae20adeb7fe3` |
+| `assets/avatars/random/r02/idle.svg` | 11623 | `1630d4590f86586c4cce7ff25c84ae934d5b90bdc2c47024fcae8102d3372ba9` |
+| `assets/avatars/random/r02/success.svg` | 12350 | `44234915dc1d311341eb936afc81bf26cb09cd3e0915c6ad8e3f45cdb9edec39` |
+| `assets/avatars/random/r02/working.svg` | 11898 | `83f77a5ff8d5bf61254b1ab7e713e4be31cb222310382b8a6a11dc637a0620a3` |
+| `assets/avatars/random/r03/error.svg` | 12251 | `6df8b3220f2c6323a5ddd35bf8cdfff5cd61681027124d9e07951b236e475db9` |
+| `assets/avatars/random/r03/idle.svg` | 11196 | `b36ab2ee82fd38400d374eaf35338adabc8cdc43f7ac6d46a459b4db26bf5a2f` |
+| `assets/avatars/random/r03/success.svg` | 11923 | `298fcc6fcd460d589fcc25c1f21cd874d75da95fbf433d56643e6f2037b02adb` |
+| `assets/avatars/random/r03/working.svg` | 11471 | `46af668812f6ebbbea1c2e9adc22697d2a134b3d85974f678c269ed741d43710` |
+| `assets/avatars/random/r04/error.svg` | 14415 | `c2bc9900c99c2f9548e96a58449fababc263f0c61f8be9906d36c11bc58ec356` |
+| `assets/avatars/random/r04/idle.svg` | 13360 | `9144bd7f1222a304948a10512bb4d1fcb6efaccecd61b460c25c1e42d0f27bc8` |
+| `assets/avatars/random/r04/success.svg` | 14087 | `0ee1b81e85077387bc6ec73c034314b717e3c16797a5fd25c662a792403209aa` |
+| `assets/avatars/random/r04/working.svg` | 13635 | `e06990542a02a5a295cffc665757651ca8eecc0527b5a26929957b486963a719` |
+| `assets/avatars/random/r05/error.svg` | 14746 | `f57fd4dfb318120eaec9fed2ff69be9479fe0f3ff949a5ac344be9407f2cb609` |
+| `assets/avatars/random/r05/idle.svg` | 13691 | `21d990e7ed906078d4937ba03f8d0ecf7a74fbd14887562f88661a53987003bd` |
+| `assets/avatars/random/r05/success.svg` | 14418 | `fb8d8089cc70531e6ec8a071edc790b86f1d819a9095c36d70f3925d29742582` |
+| `assets/avatars/random/r05/working.svg` | 13966 | `b50b958c3f0804b8194815d69a3547ade28c59827c2ca75960e1d291f012accb` |
+| `assets/avatars/random/r06/error.svg` | 12939 | `f958fbb504ef92f21e311b7a64a68289a9c826486104e8df0ebb16024d893b04` |
+| `assets/avatars/random/r06/idle.svg` | 11884 | `eaccfe83b0cdbd2381807cdb2a1cdc80daa5e0419116fcef8b20f0a355bbe79f` |
+| `assets/avatars/random/r06/success.svg` | 12611 | `029fb738d2acc8fccd55b19bc7166229446fe84b7145c34aa9a7921c984e5f97` |
+| `assets/avatars/random/r06/working.svg` | 12159 | `f90249495127ebc18a5f061c0f31ec8dfa80512980df455dcc657520e770ad44` |
+| `assets/avatars/random/r07/error.svg` | 15906 | `a1cca29fb022ecf2ddfd14cdf101e6408658bff460c4e98d9891ea1e0d72ef6b` |
+| `assets/avatars/random/r07/idle.svg` | 14851 | `ef8be52e87f459f93e995886f85d21198719ea0bf0127b1dc02f6751ac1c1852` |
+| `assets/avatars/random/r07/success.svg` | 15578 | `555d42cfb5b3f890112e9d9a11d719a35c6ffbf2b4207ec3441346467f751b49` |
+| `assets/avatars/random/r07/working.svg` | 15126 | `0d230d64ea0f54aae24ca8936be0654f883997cb04fa9a5e03cbfdd12bdcb8e0` |
+| `assets/avatars/random/r08/error.svg` | 13717 | `09d4ac6b6a835ae43fe48d76fa63b0946b5a98b033afe6d6de7f45b6f14a96a5` |
+| `assets/avatars/random/r08/idle.svg` | 12662 | `60e9d6324bbaccadfc135fd8017bdc5822b9d93d5f9947535a16cc40449d0ff0` |
+| `assets/avatars/random/r08/success.svg` | 13389 | `1d05ab7eaf3e9622f805cd092b243e1cf7e50890e90ac0e1c7907eb1b584ab55` |
+| `assets/avatars/random/r08/working.svg` | 12937 | `6b143e1ea630cc0dc0c0ecf189252852f75a08678365795f53b2b6267c4482df` |
+| `assets/avatars/random/r09/error.svg` | 13677 | `04251ee8696bc16e26062b5cbd3852f1af3b71c9396f66537a289071925156d6` |
+| `assets/avatars/random/r09/idle.svg` | 12622 | `83056ef4333995e6abc96205d25583f214a278d6f4cf5e0ae9d01b9329861d74` |
+| `assets/avatars/random/r09/success.svg` | 13349 | `14144bfe4befbff26598dd3f7d40d3a5b6450b95cc2cbbfad47d8a976f1ce983` |
+| `assets/avatars/random/r09/working.svg` | 12897 | `45303c7fb62ea965309651636b82553726cd2255325ce92c76bb24c883e048a6` |
+| `assets/avatars/random/r10/error.svg` | 11701 | `8f74138552f5696d6e0f1267d2c3cfaa2b3f3cdee051fac48d3505bb0e30795c` |
+| `assets/avatars/random/r10/idle.svg` | 10646 | `eee44513343626bb91a09f7decd3f64b03ec2daffaba0e6f908d59da5fe1def7` |
+| `assets/avatars/random/r10/success.svg` | 11373 | `7c29e98b46ebb9a383f3b32e840861b63e33c7ff6fad1d77d21bd4cd9556bde8` |
+| `assets/avatars/random/r10/working.svg` | 10921 | `f0b27c6a624b8a967b05d4fff335c626be3120a93537905d044343738d01cc13` |
+| `assets/avatars/random/r11/error.svg` | 11947 | `b395dce43c090468ddbfbf544241f4600d2dd6e69c30b011501be88b62e7fc46` |
+| `assets/avatars/random/r11/idle.svg` | 10892 | `75d559a5323130572c9d08d6833eca66a526e0410af4b712ace4a9e9dca0e540` |
+| `assets/avatars/random/r11/success.svg` | 11619 | `bbbf448d0337dc2be1331e8edabd0bd95c2f4d13af5a1cafe999dcafb30aa839` |
+| `assets/avatars/random/r11/working.svg` | 11167 | `997fbf2c3b445efae942ac2f2762aab06a2dabf8d178ecaae4f2e92f5960ebb4` |
+| `assets/avatars/random/r12/error.svg` | 12020 | `3f74434c9bd53fba488025b01433ecffda038ae32ab827262f746f171b8d0492` |
+| `assets/avatars/random/r12/idle.svg` | 10965 | `8a005b7ced6da5decfef08b3f6a953123984c0b248f530e904834fd76f0f3baa` |
+| `assets/avatars/random/r12/success.svg` | 11692 | `e65198f121047bde34b6a2f96e481b1c1709b0e9149dacc18265c97b0d4d9ba2` |
+| `assets/avatars/random/r12/working.svg` | 11240 | `a11c6bcbb0a76f7f540f6c419f2a086620de48d5d0cd32a3eadb4640e79a99cc` |
+| `expressions.js` | 11804 | `741c10ad696f3d2f0d8f7ee16493bb61746cc12c1c8eddee9bc985ea8bdd55f6` |
 
-Hash combinado (SHA-256 sobre `caminho\0conteúdo` de todos os 161 arquivos acima, em ordem de caminho): `c896e24bc861f64b9e37597bdc19645475b62da6519081b86d59079f7933aff4`.
+Hash combinado (SHA-256 sobre `caminho\0conteúdo` de todos os 161 arquivos acima, em ordem de caminho): `16b99513d91f2fcb4415cea21c3810a68ced8db247c31e63a13138fe7811e13a`.
 
 Os IDs internos (`react-path-*`) gerados pelo renderer podem variar em downloads futuros; estes hashes identificam os arquivos locais entregues.
 
@@ -467,89 +478,91 @@ Cada URL é a composição das opções fixas da pessoa (tabelas acima) com o tr
 
 ### Identidades aleatórias
 
+Opções fixas da tabela anterior × triple do preset — URLs exatas de origem (regeneradas em **2026-09-29**):
+
 #### r01
 
-- `assets/avatars/random/r01/idle.svg` — https://avataaars.io/?avatarStyle=Transparent&eyeType=Default&eyebrowType=DefaultNatural&topType=LongHairFrida&hairColor=Blue&accessoriesType=Prescription01&facialHairType=BeardLight&facialHairColor=Black&clotheType=BlazerSweater&clotheColor=PastelBlue&mouthType=Smile&skinColor=Light
-- `assets/avatars/random/r01/working.svg` — https://avataaars.io/?avatarStyle=Transparent&eyeType=Happy&eyebrowType=DefaultNatural&topType=LongHairFrida&hairColor=Blue&accessoriesType=Prescription01&facialHairType=BeardLight&facialHairColor=Black&clotheType=BlazerSweater&clotheColor=PastelBlue&mouthType=Twinkle&skinColor=Light
-- `assets/avatars/random/r01/success.svg` — https://avataaars.io/?avatarStyle=Transparent&eyeType=Happy&eyebrowType=RaisedExcitedNatural&topType=LongHairFrida&hairColor=Blue&accessoriesType=Prescription01&facialHairType=BeardLight&facialHairColor=Black&clotheType=BlazerSweater&clotheColor=PastelBlue&mouthType=Smile&skinColor=Light
-- `assets/avatars/random/r01/error.svg` — https://avataaars.io/?avatarStyle=Transparent&eyeType=Cry&eyebrowType=AngryNatural&topType=LongHairFrida&hairColor=Blue&accessoriesType=Prescription01&facialHairType=BeardLight&facialHairColor=Black&clotheType=BlazerSweater&clotheColor=PastelBlue&mouthType=Grimace&skinColor=Light
+- `assets/avatars/random/r01/idle.svg` — https://avataaars.io/?avatarStyle=Transparent&eyeType=Default&eyebrowType=DefaultNatural&topType=LongHairBob&hairColor=BrownDark&accessoriesType=Blank&facialHairType=Blank&facialHairColor=BrownDark&clotheType=ShirtCrewNeck&clotheColor=PastelBlue&mouthType=Smile&skinColor=Pale
+- `assets/avatars/random/r01/working.svg` — https://avataaars.io/?avatarStyle=Transparent&eyeType=Happy&eyebrowType=DefaultNatural&topType=LongHairBob&hairColor=BrownDark&accessoriesType=Blank&facialHairType=Blank&facialHairColor=BrownDark&clotheType=ShirtCrewNeck&clotheColor=PastelBlue&mouthType=Twinkle&skinColor=Pale
+- `assets/avatars/random/r01/success.svg` — https://avataaars.io/?avatarStyle=Transparent&eyeType=Happy&eyebrowType=RaisedExcitedNatural&topType=LongHairBob&hairColor=BrownDark&accessoriesType=Blank&facialHairType=Blank&facialHairColor=BrownDark&clotheType=ShirtCrewNeck&clotheColor=PastelBlue&mouthType=Smile&skinColor=Pale
+- `assets/avatars/random/r01/error.svg` — https://avataaars.io/?avatarStyle=Transparent&eyeType=Cry&eyebrowType=AngryNatural&topType=LongHairBob&hairColor=BrownDark&accessoriesType=Blank&facialHairType=Blank&facialHairColor=BrownDark&clotheType=ShirtCrewNeck&clotheColor=PastelBlue&mouthType=Grimace&skinColor=Pale
 
 #### r02
 
-- `assets/avatars/random/r02/idle.svg` — https://avataaars.io/?avatarStyle=Transparent&eyeType=Default&eyebrowType=DefaultNatural&topType=LongHairStraightStrand&hairColor=SilverGray&accessoriesType=Blank&facialHairType=BeardMedium&facialHairColor=Black&clotheType=CollarSweater&clotheColor=Pink&mouthType=Smile&skinColor=DarkBrown
-- `assets/avatars/random/r02/working.svg` — https://avataaars.io/?avatarStyle=Transparent&eyeType=Happy&eyebrowType=DefaultNatural&topType=LongHairStraightStrand&hairColor=SilverGray&accessoriesType=Blank&facialHairType=BeardMedium&facialHairColor=Black&clotheType=CollarSweater&clotheColor=Pink&mouthType=Twinkle&skinColor=DarkBrown
-- `assets/avatars/random/r02/success.svg` — https://avataaars.io/?avatarStyle=Transparent&eyeType=Happy&eyebrowType=RaisedExcitedNatural&topType=LongHairStraightStrand&hairColor=SilverGray&accessoriesType=Blank&facialHairType=BeardMedium&facialHairColor=Black&clotheType=CollarSweater&clotheColor=Pink&mouthType=Smile&skinColor=DarkBrown
-- `assets/avatars/random/r02/error.svg` — https://avataaars.io/?avatarStyle=Transparent&eyeType=Cry&eyebrowType=AngryNatural&topType=LongHairStraightStrand&hairColor=SilverGray&accessoriesType=Blank&facialHairType=BeardMedium&facialHairColor=Black&clotheType=CollarSweater&clotheColor=Pink&mouthType=Grimace&skinColor=DarkBrown
+- `assets/avatars/random/r02/idle.svg` — https://avataaars.io/?avatarStyle=Transparent&eyeType=Default&eyebrowType=DefaultNatural&topType=LongHairCurly&hairColor=Black&accessoriesType=Round&facialHairType=Blank&facialHairColor=Black&clotheType=CollarSweater&clotheColor=PastelGreen&mouthType=Smile&skinColor=DarkBrown
+- `assets/avatars/random/r02/working.svg` — https://avataaars.io/?avatarStyle=Transparent&eyeType=Happy&eyebrowType=DefaultNatural&topType=LongHairCurly&hairColor=Black&accessoriesType=Round&facialHairType=Blank&facialHairColor=Black&clotheType=CollarSweater&clotheColor=PastelGreen&mouthType=Twinkle&skinColor=DarkBrown
+- `assets/avatars/random/r02/success.svg` — https://avataaars.io/?avatarStyle=Transparent&eyeType=Happy&eyebrowType=RaisedExcitedNatural&topType=LongHairCurly&hairColor=Black&accessoriesType=Round&facialHairType=Blank&facialHairColor=Black&clotheType=CollarSweater&clotheColor=PastelGreen&mouthType=Smile&skinColor=DarkBrown
+- `assets/avatars/random/r02/error.svg` — https://avataaars.io/?avatarStyle=Transparent&eyeType=Cry&eyebrowType=AngryNatural&topType=LongHairCurly&hairColor=Black&accessoriesType=Round&facialHairType=Blank&facialHairColor=Black&clotheType=CollarSweater&clotheColor=PastelGreen&mouthType=Grimace&skinColor=DarkBrown
 
 #### r03
 
-- `assets/avatars/random/r03/idle.svg` — https://avataaars.io/?avatarStyle=Transparent&eyeType=Default&eyebrowType=DefaultNatural&topType=ShortHairShortFlat&hairColor=Brown&accessoriesType=Prescription01&facialHairType=BeardLight&facialHairColor=Blonde&clotheType=Overall&clotheColor=Red&mouthType=Smile&skinColor=Brown
-- `assets/avatars/random/r03/working.svg` — https://avataaars.io/?avatarStyle=Transparent&eyeType=Happy&eyebrowType=DefaultNatural&topType=ShortHairShortFlat&hairColor=Brown&accessoriesType=Prescription01&facialHairType=BeardLight&facialHairColor=Blonde&clotheType=Overall&clotheColor=Red&mouthType=Twinkle&skinColor=Brown
-- `assets/avatars/random/r03/success.svg` — https://avataaars.io/?avatarStyle=Transparent&eyeType=Happy&eyebrowType=RaisedExcitedNatural&topType=ShortHairShortFlat&hairColor=Brown&accessoriesType=Prescription01&facialHairType=BeardLight&facialHairColor=Blonde&clotheType=Overall&clotheColor=Red&mouthType=Smile&skinColor=Brown
-- `assets/avatars/random/r03/error.svg` — https://avataaars.io/?avatarStyle=Transparent&eyeType=Cry&eyebrowType=AngryNatural&topType=ShortHairShortFlat&hairColor=Brown&accessoriesType=Prescription01&facialHairType=BeardLight&facialHairColor=Blonde&clotheType=Overall&clotheColor=Red&mouthType=Grimace&skinColor=Brown
+- `assets/avatars/random/r03/idle.svg` — https://avataaars.io/?avatarStyle=Transparent&eyeType=Default&eyebrowType=DefaultNatural&topType=LongHairStraight2&hairColor=Blonde&accessoriesType=Blank&facialHairType=Blank&facialHairColor=Blonde&clotheType=ShirtScoopNeck&clotheColor=Pink&mouthType=Smile&skinColor=Light
+- `assets/avatars/random/r03/working.svg` — https://avataaars.io/?avatarStyle=Transparent&eyeType=Happy&eyebrowType=DefaultNatural&topType=LongHairStraight2&hairColor=Blonde&accessoriesType=Blank&facialHairType=Blank&facialHairColor=Blonde&clotheType=ShirtScoopNeck&clotheColor=Pink&mouthType=Twinkle&skinColor=Light
+- `assets/avatars/random/r03/success.svg` — https://avataaars.io/?avatarStyle=Transparent&eyeType=Happy&eyebrowType=RaisedExcitedNatural&topType=LongHairStraight2&hairColor=Blonde&accessoriesType=Blank&facialHairType=Blank&facialHairColor=Blonde&clotheType=ShirtScoopNeck&clotheColor=Pink&mouthType=Smile&skinColor=Light
+- `assets/avatars/random/r03/error.svg` — https://avataaars.io/?avatarStyle=Transparent&eyeType=Cry&eyebrowType=AngryNatural&topType=LongHairStraight2&hairColor=Blonde&accessoriesType=Blank&facialHairType=Blank&facialHairColor=Blonde&clotheType=ShirtScoopNeck&clotheColor=Pink&mouthType=Grimace&skinColor=Light
 
 #### r04
 
-- `assets/avatars/random/r04/idle.svg` — https://avataaars.io/?avatarStyle=Transparent&eyeType=Default&eyebrowType=DefaultNatural&topType=LongHairCurly&hairColor=SilverGray&accessoriesType=Blank&facialHairType=MoustacheFancy&facialHairColor=Blonde&clotheType=ShirtVNeck&clotheColor=White&mouthType=Smile&skinColor=Tanned
-- `assets/avatars/random/r04/working.svg` — https://avataaars.io/?avatarStyle=Transparent&eyeType=Happy&eyebrowType=DefaultNatural&topType=LongHairCurly&hairColor=SilverGray&accessoriesType=Blank&facialHairType=MoustacheFancy&facialHairColor=Blonde&clotheType=ShirtVNeck&clotheColor=White&mouthType=Twinkle&skinColor=Tanned
-- `assets/avatars/random/r04/success.svg` — https://avataaars.io/?avatarStyle=Transparent&eyeType=Happy&eyebrowType=RaisedExcitedNatural&topType=LongHairCurly&hairColor=SilverGray&accessoriesType=Blank&facialHairType=MoustacheFancy&facialHairColor=Blonde&clotheType=ShirtVNeck&clotheColor=White&mouthType=Smile&skinColor=Tanned
-- `assets/avatars/random/r04/error.svg` — https://avataaars.io/?avatarStyle=Transparent&eyeType=Cry&eyebrowType=AngryNatural&topType=LongHairCurly&hairColor=SilverGray&accessoriesType=Blank&facialHairType=MoustacheFancy&facialHairColor=Blonde&clotheType=ShirtVNeck&clotheColor=White&mouthType=Grimace&skinColor=Tanned
+- `assets/avatars/random/r04/idle.svg` — https://avataaars.io/?avatarStyle=Transparent&eyeType=Default&eyebrowType=DefaultNatural&topType=LongHairBun&hairColor=Auburn&accessoriesType=Prescription01&facialHairType=Blank&facialHairColor=Auburn&clotheType=BlazerShirt&clotheColor=Black&mouthType=Smile&skinColor=Tanned
+- `assets/avatars/random/r04/working.svg` — https://avataaars.io/?avatarStyle=Transparent&eyeType=Happy&eyebrowType=DefaultNatural&topType=LongHairBun&hairColor=Auburn&accessoriesType=Prescription01&facialHairType=Blank&facialHairColor=Auburn&clotheType=BlazerShirt&clotheColor=Black&mouthType=Twinkle&skinColor=Tanned
+- `assets/avatars/random/r04/success.svg` — https://avataaars.io/?avatarStyle=Transparent&eyeType=Happy&eyebrowType=RaisedExcitedNatural&topType=LongHairBun&hairColor=Auburn&accessoriesType=Prescription01&facialHairType=Blank&facialHairColor=Auburn&clotheType=BlazerShirt&clotheColor=Black&mouthType=Smile&skinColor=Tanned
+- `assets/avatars/random/r04/error.svg` — https://avataaars.io/?avatarStyle=Transparent&eyeType=Cry&eyebrowType=AngryNatural&topType=LongHairBun&hairColor=Auburn&accessoriesType=Prescription01&facialHairType=Blank&facialHairColor=Auburn&clotheType=BlazerShirt&clotheColor=Black&mouthType=Grimace&skinColor=Tanned
 
 #### r05
 
-- `assets/avatars/random/r05/idle.svg` — https://avataaars.io/?avatarStyle=Transparent&eyeType=Default&eyebrowType=DefaultNatural&topType=LongHairNotTooLong&hairColor=BlondeGolden&accessoriesType=Round&facialHairType=Blank&facialHairColor=Black&clotheType=ShirtCrewNeck&clotheColor=Blue01&mouthType=Smile&skinColor=Tanned
-- `assets/avatars/random/r05/working.svg` — https://avataaars.io/?avatarStyle=Transparent&eyeType=Happy&eyebrowType=DefaultNatural&topType=LongHairNotTooLong&hairColor=BlondeGolden&accessoriesType=Round&facialHairType=Blank&facialHairColor=Black&clotheType=ShirtCrewNeck&clotheColor=Blue01&mouthType=Twinkle&skinColor=Tanned
-- `assets/avatars/random/r05/success.svg` — https://avataaars.io/?avatarStyle=Transparent&eyeType=Happy&eyebrowType=RaisedExcitedNatural&topType=LongHairNotTooLong&hairColor=BlondeGolden&accessoriesType=Round&facialHairType=Blank&facialHairColor=Black&clotheType=ShirtCrewNeck&clotheColor=Blue01&mouthType=Smile&skinColor=Tanned
-- `assets/avatars/random/r05/error.svg` — https://avataaars.io/?avatarStyle=Transparent&eyeType=Cry&eyebrowType=AngryNatural&topType=LongHairNotTooLong&hairColor=BlondeGolden&accessoriesType=Round&facialHairType=Blank&facialHairColor=Black&clotheType=ShirtCrewNeck&clotheColor=Blue01&mouthType=Grimace&skinColor=Tanned
+- `assets/avatars/random/r05/idle.svg` — https://avataaars.io/?avatarStyle=Transparent&eyeType=Default&eyebrowType=DefaultNatural&topType=LongHairFro&hairColor=Brown&accessoriesType=Blank&facialHairType=Blank&facialHairColor=Brown&clotheType=Hoodie&clotheColor=Red&mouthType=Smile&skinColor=Black
+- `assets/avatars/random/r05/working.svg` — https://avataaars.io/?avatarStyle=Transparent&eyeType=Happy&eyebrowType=DefaultNatural&topType=LongHairFro&hairColor=Brown&accessoriesType=Blank&facialHairType=Blank&facialHairColor=Brown&clotheType=Hoodie&clotheColor=Red&mouthType=Twinkle&skinColor=Black
+- `assets/avatars/random/r05/success.svg` — https://avataaars.io/?avatarStyle=Transparent&eyeType=Happy&eyebrowType=RaisedExcitedNatural&topType=LongHairFro&hairColor=Brown&accessoriesType=Blank&facialHairType=Blank&facialHairColor=Brown&clotheType=Hoodie&clotheColor=Red&mouthType=Smile&skinColor=Black
+- `assets/avatars/random/r05/error.svg` — https://avataaars.io/?avatarStyle=Transparent&eyeType=Cry&eyebrowType=AngryNatural&topType=LongHairFro&hairColor=Brown&accessoriesType=Blank&facialHairType=Blank&facialHairColor=Brown&clotheType=Hoodie&clotheColor=Red&mouthType=Grimace&skinColor=Black
 
 #### r06
 
-- `assets/avatars/random/r06/idle.svg` — https://avataaars.io/?avatarStyle=Transparent&eyeType=Default&eyebrowType=DefaultNatural&topType=Hat&hairColor=PastelPink&accessoriesType=Blank&facialHairType=BeardMajestic&facialHairColor=Brown&clotheType=Overall&clotheColor=Black&mouthType=Smile&skinColor=Yellow
-- `assets/avatars/random/r06/working.svg` — https://avataaars.io/?avatarStyle=Transparent&eyeType=Happy&eyebrowType=DefaultNatural&topType=Hat&hairColor=PastelPink&accessoriesType=Blank&facialHairType=BeardMajestic&facialHairColor=Brown&clotheType=Overall&clotheColor=Black&mouthType=Twinkle&skinColor=Yellow
-- `assets/avatars/random/r06/success.svg` — https://avataaars.io/?avatarStyle=Transparent&eyeType=Happy&eyebrowType=RaisedExcitedNatural&topType=Hat&hairColor=PastelPink&accessoriesType=Blank&facialHairType=BeardMajestic&facialHairColor=Brown&clotheType=Overall&clotheColor=Black&mouthType=Smile&skinColor=Yellow
-- `assets/avatars/random/r06/error.svg` — https://avataaars.io/?avatarStyle=Transparent&eyeType=Cry&eyebrowType=AngryNatural&topType=Hat&hairColor=PastelPink&accessoriesType=Blank&facialHairType=BeardMajestic&facialHairColor=Brown&clotheType=Overall&clotheColor=Black&mouthType=Grimace&skinColor=Yellow
+- `assets/avatars/random/r06/idle.svg` — https://avataaars.io/?avatarStyle=Transparent&eyeType=Default&eyebrowType=DefaultNatural&topType=LongHairMiaWallace&hairColor=SilverGray&accessoriesType=Blank&facialHairType=Blank&facialHairColor=SilverGray&clotheType=GraphicShirt&graphicType=Hola&clotheColor=PastelYellow&mouthType=Smile&skinColor=Brown
+- `assets/avatars/random/r06/working.svg` — https://avataaars.io/?avatarStyle=Transparent&eyeType=Happy&eyebrowType=DefaultNatural&topType=LongHairMiaWallace&hairColor=SilverGray&accessoriesType=Blank&facialHairType=Blank&facialHairColor=SilverGray&clotheType=GraphicShirt&graphicType=Hola&clotheColor=PastelYellow&mouthType=Twinkle&skinColor=Brown
+- `assets/avatars/random/r06/success.svg` — https://avataaars.io/?avatarStyle=Transparent&eyeType=Happy&eyebrowType=RaisedExcitedNatural&topType=LongHairMiaWallace&hairColor=SilverGray&accessoriesType=Blank&facialHairType=Blank&facialHairColor=SilverGray&clotheType=GraphicShirt&graphicType=Hola&clotheColor=PastelYellow&mouthType=Smile&skinColor=Brown
+- `assets/avatars/random/r06/error.svg` — https://avataaars.io/?avatarStyle=Transparent&eyeType=Cry&eyebrowType=AngryNatural&topType=LongHairMiaWallace&hairColor=SilverGray&accessoriesType=Blank&facialHairType=Blank&facialHairColor=SilverGray&clotheType=GraphicShirt&graphicType=Hola&clotheColor=PastelYellow&mouthType=Grimace&skinColor=Brown
 
 #### r07
 
-- `assets/avatars/random/r07/idle.svg` — https://avataaars.io/?avatarStyle=Transparent&eyeType=Default&eyebrowType=DefaultNatural&topType=ShortHairShortWaved&hairColor=Blonde&accessoriesType=Round&facialHairType=BeardMajestic&facialHairColor=Blonde&clotheType=BlazerSweater&clotheColor=Blue03&mouthType=Smile&skinColor=Tanned
-- `assets/avatars/random/r07/working.svg` — https://avataaars.io/?avatarStyle=Transparent&eyeType=Happy&eyebrowType=DefaultNatural&topType=ShortHairShortWaved&hairColor=Blonde&accessoriesType=Round&facialHairType=BeardMajestic&facialHairColor=Blonde&clotheType=BlazerSweater&clotheColor=Blue03&mouthType=Twinkle&skinColor=Tanned
-- `assets/avatars/random/r07/success.svg` — https://avataaars.io/?avatarStyle=Transparent&eyeType=Happy&eyebrowType=RaisedExcitedNatural&topType=ShortHairShortWaved&hairColor=Blonde&accessoriesType=Round&facialHairType=BeardMajestic&facialHairColor=Blonde&clotheType=BlazerSweater&clotheColor=Blue03&mouthType=Smile&skinColor=Tanned
-- `assets/avatars/random/r07/error.svg` — https://avataaars.io/?avatarStyle=Transparent&eyeType=Cry&eyebrowType=AngryNatural&topType=ShortHairShortWaved&hairColor=Blonde&accessoriesType=Round&facialHairType=BeardMajestic&facialHairColor=Blonde&clotheType=BlazerSweater&clotheColor=Blue03&mouthType=Grimace&skinColor=Tanned
+- `assets/avatars/random/r07/idle.svg` — https://avataaars.io/?avatarStyle=Transparent&eyeType=Default&eyebrowType=DefaultNatural&topType=ShortHairShortCurly&hairColor=BlondeGolden&accessoriesType=Blank&facialHairType=BeardLight&facialHairColor=BlondeGolden&clotheType=BlazerSweater&clotheColor=Black&mouthType=Smile&skinColor=Tanned
+- `assets/avatars/random/r07/working.svg` — https://avataaars.io/?avatarStyle=Transparent&eyeType=Happy&eyebrowType=DefaultNatural&topType=ShortHairShortCurly&hairColor=BlondeGolden&accessoriesType=Blank&facialHairType=BeardLight&facialHairColor=BlondeGolden&clotheType=BlazerSweater&clotheColor=Black&mouthType=Twinkle&skinColor=Tanned
+- `assets/avatars/random/r07/success.svg` — https://avataaars.io/?avatarStyle=Transparent&eyeType=Happy&eyebrowType=RaisedExcitedNatural&topType=ShortHairShortCurly&hairColor=BlondeGolden&accessoriesType=Blank&facialHairType=BeardLight&facialHairColor=BlondeGolden&clotheType=BlazerSweater&clotheColor=Black&mouthType=Smile&skinColor=Tanned
+- `assets/avatars/random/r07/error.svg` — https://avataaars.io/?avatarStyle=Transparent&eyeType=Cry&eyebrowType=AngryNatural&topType=ShortHairShortCurly&hairColor=BlondeGolden&accessoriesType=Blank&facialHairType=BeardLight&facialHairColor=BlondeGolden&clotheType=BlazerSweater&clotheColor=Black&mouthType=Grimace&skinColor=Tanned
 
 #### r08
 
-- `assets/avatars/random/r08/idle.svg` — https://avataaars.io/?avatarStyle=Transparent&eyeType=Default&eyebrowType=DefaultNatural&topType=Hat&hairColor=Blonde&accessoriesType=Round&facialHairType=MoustacheFancy&facialHairColor=Black&clotheType=BlazerShirt&clotheColor=PastelOrange&mouthType=Smile&skinColor=Light
-- `assets/avatars/random/r08/working.svg` — https://avataaars.io/?avatarStyle=Transparent&eyeType=Happy&eyebrowType=DefaultNatural&topType=Hat&hairColor=Blonde&accessoriesType=Round&facialHairType=MoustacheFancy&facialHairColor=Black&clotheType=BlazerShirt&clotheColor=PastelOrange&mouthType=Twinkle&skinColor=Light
-- `assets/avatars/random/r08/success.svg` — https://avataaars.io/?avatarStyle=Transparent&eyeType=Happy&eyebrowType=RaisedExcitedNatural&topType=Hat&hairColor=Blonde&accessoriesType=Round&facialHairType=MoustacheFancy&facialHairColor=Black&clotheType=BlazerShirt&clotheColor=PastelOrange&mouthType=Smile&skinColor=Light
-- `assets/avatars/random/r08/error.svg` — https://avataaars.io/?avatarStyle=Transparent&eyeType=Cry&eyebrowType=AngryNatural&topType=Hat&hairColor=Blonde&accessoriesType=Round&facialHairType=MoustacheFancy&facialHairColor=Black&clotheType=BlazerShirt&clotheColor=PastelOrange&mouthType=Grimace&skinColor=Light
+- `assets/avatars/random/r08/idle.svg` — https://avataaars.io/?avatarStyle=Transparent&eyeType=Default&eyebrowType=DefaultNatural&topType=ShortHairShortFlat&hairColor=Platinum&accessoriesType=Prescription02&facialHairType=Blank&facialHairColor=Platinum&clotheType=ShirtCrewNeck&clotheColor=White&mouthType=Smile&skinColor=Light
+- `assets/avatars/random/r08/working.svg` — https://avataaars.io/?avatarStyle=Transparent&eyeType=Happy&eyebrowType=DefaultNatural&topType=ShortHairShortFlat&hairColor=Platinum&accessoriesType=Prescription02&facialHairType=Blank&facialHairColor=Platinum&clotheType=ShirtCrewNeck&clotheColor=White&mouthType=Twinkle&skinColor=Light
+- `assets/avatars/random/r08/success.svg` — https://avataaars.io/?avatarStyle=Transparent&eyeType=Happy&eyebrowType=RaisedExcitedNatural&topType=ShortHairShortFlat&hairColor=Platinum&accessoriesType=Prescription02&facialHairType=Blank&facialHairColor=Platinum&clotheType=ShirtCrewNeck&clotheColor=White&mouthType=Smile&skinColor=Light
+- `assets/avatars/random/r08/error.svg` — https://avataaars.io/?avatarStyle=Transparent&eyeType=Cry&eyebrowType=AngryNatural&topType=ShortHairShortFlat&hairColor=Platinum&accessoriesType=Prescription02&facialHairType=Blank&facialHairColor=Platinum&clotheType=ShirtCrewNeck&clotheColor=White&mouthType=Grimace&skinColor=Light
 
 #### r09
 
-- `assets/avatars/random/r09/idle.svg` — https://avataaars.io/?avatarStyle=Transparent&eyeType=Default&eyebrowType=DefaultNatural&topType=WinterHat1&hairColor=Blue&accessoriesType=Sunglasses&facialHairType=BeardLight&facialHairColor=Brown&clotheType=BlazerSweater&clotheColor=Blue03&mouthType=Smile&skinColor=Black
-- `assets/avatars/random/r09/working.svg` — https://avataaars.io/?avatarStyle=Transparent&eyeType=Happy&eyebrowType=DefaultNatural&topType=WinterHat1&hairColor=Blue&accessoriesType=Sunglasses&facialHairType=BeardLight&facialHairColor=Brown&clotheType=BlazerSweater&clotheColor=Blue03&mouthType=Twinkle&skinColor=Black
-- `assets/avatars/random/r09/success.svg` — https://avataaars.io/?avatarStyle=Transparent&eyeType=Happy&eyebrowType=RaisedExcitedNatural&topType=WinterHat1&hairColor=Blue&accessoriesType=Sunglasses&facialHairType=BeardLight&facialHairColor=Brown&clotheType=BlazerSweater&clotheColor=Blue03&mouthType=Smile&skinColor=Black
-- `assets/avatars/random/r09/error.svg` — https://avataaars.io/?avatarStyle=Transparent&eyeType=Cry&eyebrowType=AngryNatural&topType=WinterHat1&hairColor=Blue&accessoriesType=Sunglasses&facialHairType=BeardLight&facialHairColor=Brown&clotheType=BlazerSweater&clotheColor=Blue03&mouthType=Grimace&skinColor=Black
+- `assets/avatars/random/r09/idle.svg` — https://avataaars.io/?avatarStyle=Transparent&eyeType=Default&eyebrowType=DefaultNatural&topType=ShortHairDreads01&hairColor=BrownDark&accessoriesType=Blank&facialHairType=Blank&facialHairColor=BrownDark&clotheType=Overall&clotheColor=Gray01&mouthType=Smile&skinColor=Brown
+- `assets/avatars/random/r09/working.svg` — https://avataaars.io/?avatarStyle=Transparent&eyeType=Happy&eyebrowType=DefaultNatural&topType=ShortHairDreads01&hairColor=BrownDark&accessoriesType=Blank&facialHairType=Blank&facialHairColor=BrownDark&clotheType=Overall&clotheColor=Gray01&mouthType=Twinkle&skinColor=Brown
+- `assets/avatars/random/r09/success.svg` — https://avataaars.io/?avatarStyle=Transparent&eyeType=Happy&eyebrowType=RaisedExcitedNatural&topType=ShortHairDreads01&hairColor=BrownDark&accessoriesType=Blank&facialHairType=Blank&facialHairColor=BrownDark&clotheType=Overall&clotheColor=Gray01&mouthType=Smile&skinColor=Brown
+- `assets/avatars/random/r09/error.svg` — https://avataaars.io/?avatarStyle=Transparent&eyeType=Cry&eyebrowType=AngryNatural&topType=ShortHairDreads01&hairColor=BrownDark&accessoriesType=Blank&facialHairType=Blank&facialHairColor=BrownDark&clotheType=Overall&clotheColor=Gray01&mouthType=Grimace&skinColor=Brown
 
 #### r10
 
-- `assets/avatars/random/r10/idle.svg` — https://avataaars.io/?avatarStyle=Transparent&eyeType=Default&eyebrowType=DefaultNatural&topType=ShortHairShortFlat&hairColor=Red&accessoriesType=Round&facialHairType=BeardLight&facialHairColor=Auburn&clotheType=ShirtVNeck&clotheColor=Pink&mouthType=Smile&skinColor=Yellow
-- `assets/avatars/random/r10/working.svg` — https://avataaars.io/?avatarStyle=Transparent&eyeType=Happy&eyebrowType=DefaultNatural&topType=ShortHairShortFlat&hairColor=Red&accessoriesType=Round&facialHairType=BeardLight&facialHairColor=Auburn&clotheType=ShirtVNeck&clotheColor=Pink&mouthType=Twinkle&skinColor=Yellow
-- `assets/avatars/random/r10/success.svg` — https://avataaars.io/?avatarStyle=Transparent&eyeType=Happy&eyebrowType=RaisedExcitedNatural&topType=ShortHairShortFlat&hairColor=Red&accessoriesType=Round&facialHairType=BeardLight&facialHairColor=Auburn&clotheType=ShirtVNeck&clotheColor=Pink&mouthType=Smile&skinColor=Yellow
-- `assets/avatars/random/r10/error.svg` — https://avataaars.io/?avatarStyle=Transparent&eyeType=Cry&eyebrowType=AngryNatural&topType=ShortHairShortFlat&hairColor=Red&accessoriesType=Round&facialHairType=BeardLight&facialHairColor=Auburn&clotheType=ShirtVNeck&clotheColor=Pink&mouthType=Grimace&skinColor=Yellow
+- `assets/avatars/random/r10/idle.svg` — https://avataaars.io/?avatarStyle=Transparent&eyeType=Default&eyebrowType=DefaultNatural&topType=ShortHairFrizzle&hairColor=Red&accessoriesType=Round&facialHairType=MoustacheFancy&facialHairColor=Red&clotheType=ShirtVNeck&clotheColor=Blue02&mouthType=Smile&skinColor=Pale
+- `assets/avatars/random/r10/working.svg` — https://avataaars.io/?avatarStyle=Transparent&eyeType=Happy&eyebrowType=DefaultNatural&topType=ShortHairFrizzle&hairColor=Red&accessoriesType=Round&facialHairType=MoustacheFancy&facialHairColor=Red&clotheType=ShirtVNeck&clotheColor=Blue02&mouthType=Twinkle&skinColor=Pale
+- `assets/avatars/random/r10/success.svg` — https://avataaars.io/?avatarStyle=Transparent&eyeType=Happy&eyebrowType=RaisedExcitedNatural&topType=ShortHairFrizzle&hairColor=Red&accessoriesType=Round&facialHairType=MoustacheFancy&facialHairColor=Red&clotheType=ShirtVNeck&clotheColor=Blue02&mouthType=Smile&skinColor=Pale
+- `assets/avatars/random/r10/error.svg` — https://avataaars.io/?avatarStyle=Transparent&eyeType=Cry&eyebrowType=AngryNatural&topType=ShortHairFrizzle&hairColor=Red&accessoriesType=Round&facialHairType=MoustacheFancy&facialHairColor=Red&clotheType=ShirtVNeck&clotheColor=Blue02&mouthType=Grimace&skinColor=Pale
 
 #### r11
 
-- `assets/avatars/random/r11/idle.svg` — https://avataaars.io/?avatarStyle=Transparent&eyeType=Default&eyebrowType=DefaultNatural&topType=LongHairFrida&hairColor=Blue&accessoriesType=Sunglasses&facialHairType=Blank&facialHairColor=Brown&clotheType=GraphicShirt&clotheColor=PastelYellow&mouthType=Smile&skinColor=Yellow
-- `assets/avatars/random/r11/working.svg` — https://avataaars.io/?avatarStyle=Transparent&eyeType=Happy&eyebrowType=DefaultNatural&topType=LongHairFrida&hairColor=Blue&accessoriesType=Sunglasses&facialHairType=Blank&facialHairColor=Brown&clotheType=GraphicShirt&clotheColor=PastelYellow&mouthType=Twinkle&skinColor=Yellow
-- `assets/avatars/random/r11/success.svg` — https://avataaars.io/?avatarStyle=Transparent&eyeType=Happy&eyebrowType=RaisedExcitedNatural&topType=LongHairFrida&hairColor=Blue&accessoriesType=Sunglasses&facialHairType=Blank&facialHairColor=Brown&clotheType=GraphicShirt&clotheColor=PastelYellow&mouthType=Smile&skinColor=Yellow
-- `assets/avatars/random/r11/error.svg` — https://avataaars.io/?avatarStyle=Transparent&eyeType=Cry&eyebrowType=AngryNatural&topType=LongHairFrida&hairColor=Blue&accessoriesType=Sunglasses&facialHairType=Blank&facialHairColor=Brown&clotheType=GraphicShirt&clotheColor=PastelYellow&mouthType=Grimace&skinColor=Yellow
+- `assets/avatars/random/r11/idle.svg` — https://avataaars.io/?avatarStyle=Transparent&eyeType=Default&eyebrowType=DefaultNatural&topType=ShortHairTheCaesar&hairColor=Brown&accessoriesType=Blank&facialHairType=BeardMedium&facialHairColor=Brown&clotheType=CollarSweater&clotheColor=PastelOrange&mouthType=Smile&skinColor=Black
+- `assets/avatars/random/r11/working.svg` — https://avataaars.io/?avatarStyle=Transparent&eyeType=Happy&eyebrowType=DefaultNatural&topType=ShortHairTheCaesar&hairColor=Brown&accessoriesType=Blank&facialHairType=BeardMedium&facialHairColor=Brown&clotheType=CollarSweater&clotheColor=PastelOrange&mouthType=Twinkle&skinColor=Black
+- `assets/avatars/random/r11/success.svg` — https://avataaars.io/?avatarStyle=Transparent&eyeType=Happy&eyebrowType=RaisedExcitedNatural&topType=ShortHairTheCaesar&hairColor=Brown&accessoriesType=Blank&facialHairType=BeardMedium&facialHairColor=Brown&clotheType=CollarSweater&clotheColor=PastelOrange&mouthType=Smile&skinColor=Black
+- `assets/avatars/random/r11/error.svg` — https://avataaars.io/?avatarStyle=Transparent&eyeType=Cry&eyebrowType=AngryNatural&topType=ShortHairTheCaesar&hairColor=Brown&accessoriesType=Blank&facialHairType=BeardMedium&facialHairColor=Brown&clotheType=CollarSweater&clotheColor=PastelOrange&mouthType=Grimace&skinColor=Black
 
 #### r12
 
-- `assets/avatars/random/r12/idle.svg` — https://avataaars.io/?avatarStyle=Transparent&eyeType=Default&eyebrowType=DefaultNatural&topType=LongHairStraight2&hairColor=Red&accessoriesType=Wayfarers&facialHairType=MoustacheMagnum&facialHairColor=Blonde&clotheType=BlazerSweater&clotheColor=Pink&mouthType=Smile&skinColor=Tanned
-- `assets/avatars/random/r12/working.svg` — https://avataaars.io/?avatarStyle=Transparent&eyeType=Happy&eyebrowType=DefaultNatural&topType=LongHairStraight2&hairColor=Red&accessoriesType=Wayfarers&facialHairType=MoustacheMagnum&facialHairColor=Blonde&clotheType=BlazerSweater&clotheColor=Pink&mouthType=Twinkle&skinColor=Tanned
-- `assets/avatars/random/r12/success.svg` — https://avataaars.io/?avatarStyle=Transparent&eyeType=Happy&eyebrowType=RaisedExcitedNatural&topType=LongHairStraight2&hairColor=Red&accessoriesType=Wayfarers&facialHairType=MoustacheMagnum&facialHairColor=Blonde&clotheType=BlazerSweater&clotheColor=Pink&mouthType=Smile&skinColor=Tanned
-- `assets/avatars/random/r12/error.svg` — https://avataaars.io/?avatarStyle=Transparent&eyeType=Cry&eyebrowType=AngryNatural&topType=LongHairStraight2&hairColor=Red&accessoriesType=Wayfarers&facialHairType=MoustacheMagnum&facialHairColor=Blonde&clotheType=BlazerSweater&clotheColor=Pink&mouthType=Grimace&skinColor=Tanned
+- `assets/avatars/random/r12/idle.svg` — https://avataaars.io/?avatarStyle=Transparent&eyeType=Default&eyebrowType=DefaultNatural&topType=NoHair&hairColor=Black&accessoriesType=Blank&facialHairType=BeardMajestic&facialHairColor=Black&clotheType=Hoodie&clotheColor=Black&mouthType=Smile&skinColor=DarkBrown
+- `assets/avatars/random/r12/working.svg` — https://avataaars.io/?avatarStyle=Transparent&eyeType=Happy&eyebrowType=DefaultNatural&topType=NoHair&hairColor=Black&accessoriesType=Blank&facialHairType=BeardMajestic&facialHairColor=Black&clotheType=Hoodie&clotheColor=Black&mouthType=Twinkle&skinColor=DarkBrown
+- `assets/avatars/random/r12/success.svg` — https://avataaars.io/?avatarStyle=Transparent&eyeType=Happy&eyebrowType=RaisedExcitedNatural&topType=NoHair&hairColor=Black&accessoriesType=Blank&facialHairType=BeardMajestic&facialHairColor=Black&clotheType=Hoodie&clotheColor=Black&mouthType=Smile&skinColor=DarkBrown
+- `assets/avatars/random/r12/error.svg` — https://avataaars.io/?avatarStyle=Transparent&eyeType=Cry&eyebrowType=AngryNatural&topType=NoHair&hairColor=Black&accessoriesType=Blank&facialHairType=BeardMajestic&facialHairColor=Black&clotheType=Hoodie&clotheColor=Black&mouthType=Grimace&skinColor=DarkBrown
 
 ## Dormir (Modo jogo do plugin)
 

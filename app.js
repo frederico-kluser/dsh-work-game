@@ -276,10 +276,45 @@ function telemetryTick() {
 }
 
 /* ---------- people, avatars and expressions ---------- */
-function randomName() { return `${pick(DATA.firstNames)} ${pick(DATA.lastNames)}`; }
-function randomAvatarId() {
-  const pool = EXPR.randomIdentityIds && EXPR.randomIdentityIds.length ? EXPR.randomIdentityIds : EXPR.namedIdentityIds;
+/* REGRA 2026-09-29: o gênero do boneco bate SEMPRE com o gênero do nome — nome
+   e avatar nascem do mesmo sorteio (sortearPessoa), nunca em separado. O avatar
+   sorteado ainda evita repetir quem já está na sala (o "boneco repetido" saiu). */
+const GENEROS_SORTEIO = ['f', 'm'];
+function genderOfName(name) {
+  const primeiro = String(name || '').trim().split(/\s+/)[0] || '';
+  const g = (DATA.nameGenders || {})[primeiro];
+  return g === 'f' || g === 'm' ? g : 'any';
+}
+function avatarGenderOf(id) {
+  const ident = (EXPR.identities || {})[id];
+  return ident && (ident.gender === 'f' || ident.gender === 'm') ? ident.gender : 'any';
+}
+function nomesDoGenero(gender) {
+  const pool = DATA.firstNames.filter((n) => { const g = genderOfName(n); return g === gender || g === 'any'; });
+  return pool.length ? pool : DATA.firstNames;
+}
+function avataresDoGenero(gender) {
+  const todos = (EXPR.randomIdentityIds && EXPR.randomIdentityIds.length) ? EXPR.randomIdentityIds : EXPR.namedIdentityIds;
+  const pool = todos.filter((id) => { const g = avatarGenderOf(id); return g === gender || g === 'any'; });
+  return pool.length ? pool : todos;
+}
+function avataresEmUso(extra) {
+  const emUso = new Set(state.people.map((p) => p.avatarId));
+  if (extra) emUso.add(extra);
+  return emUso;
+}
+function randomName(gender) { return `${pick(nomesDoGenero(gender || pick(GENEROS_SORTEIO)))} ${pick(DATA.lastNames)}`; }
+function randomAvatarId(gender, evitar) {
+  let pool = avataresDoGenero(gender || pick(GENEROS_SORTEIO));
+  if (evitar && evitar.size) {
+    const livres = pool.filter((id) => !evitar.has(id));
+    if (livres.length) pool = livres;
+  }
   return pick(pool);
+}
+function sortearPessoa(evitarAvatar) {
+  const gender = pick(GENEROS_SORTEIO);
+  return { gender, name: randomName(gender), avatarId: randomAvatarId(gender, avataresEmUso(evitarAvatar)) };
 }
 function avatarKindOf(id) { return (EXPR.randomIdentityIds || []).includes(id) ? 'random' : 'named'; }
 function avatarSrc(person, presetId) {
@@ -293,9 +328,17 @@ function expressionOf(person) {
   return person.expressionPreset || (STATUS[person.status] || STATUS.available).preset || EXPR.basePreset || 'idle';
 }
 function makePerson({ name, avatarId, teamId }) {
-  const id = avatarId || randomAvatarId();
+  /* Nome e avatar nascem juntos, do MESMO gênero; só o que faltar é sorteado. */
+  let id = avatarId || null;
+  let nome = name || null;
+  if (!id || !nome) {
+    const gender = id ? avatarGenderOf(id) : (nome ? genderOfName(nome) : null);
+    const g = gender === 'f' || gender === 'm' ? gender : pick(GENEROS_SORTEIO);
+    if (!id) id = randomAvatarId(g, avataresEmUso());
+    if (!nome) nome = randomName(g);
+  }
   return {
-    id: uid('person'), name: name || randomName(), avatarId: id,
+    id: uid('person'), name: nome, avatarId: id,
     avatarKind: avatarKindOf(id), teamId,
     homeModuleId: null, homeSeat: null, away: false,
     status: 'available', context: 0, hasComputer: false, task: '',
@@ -1009,7 +1052,8 @@ function selectAgent(id) {
 }
 function openRecruit(teamId, slot, moduleId) {
   const team = teamById(teamId) || state.teams[0];
-  recruitRoll = { teamId: team.id, slot: slot ?? null, moduleId: moduleId || null, name: randomName(), avatarId: randomAvatarId() };
+  const sorteio = sortearPessoa();
+  recruitRoll = { teamId: team.id, slot: slot ?? null, moduleId: moduleId || null, name: sorteio.name, avatarId: sorteio.avatarId };
   $('#recruit-team').innerHTML = state.teams.map((t) => `<option value="${t.id}" ${t.id === team.id ? 'selected' : ''}>${esc(t.name)}</option>`).join('');
   paintRecruitRoll();
   $('#recruit-dialog').showModal();
@@ -1330,7 +1374,16 @@ function handleAction(el) {
     case 'close-inspector': state.selected = null; render({ fit: true }); break;
     case 'tab': state.tab = d.tab; renderInspector(); break;
     case 'recruit-slot': openRecruit(d.workspace, d.slot !== undefined && d.slot !== '' ? Number(d.slot) : null, d.moduleId || d.module || null); break;
-    case 'reroll': recruitRoll.name = randomName(); recruitRoll.avatarId = randomAvatarId(); paintRecruitRoll(); break;
+    case 'reroll': {
+      /* "Sortear outro" muda mesmo: nome novo e avatar novo (mesmo gênero,
+         sem repetir quem está na sala nem o avatar anterior). */
+      let sorteio = sortearPessoa(recruitRoll.avatarId);
+      for (let t = 0; t < 8 && sorteio.name === recruitRoll.name; t += 1) sorteio = sortearPessoa(recruitRoll.avatarId);
+      recruitRoll.name = sorteio.name;
+      recruitRoll.avatarId = sorteio.avatarId;
+      paintRecruitRoll();
+      break;
+    }
     case 'delegate-agent': openDelegate(d.agent); break;
     case 'more-children': if (found) openDelegate(found.person.id); break;
     case 'add-module': {

@@ -582,6 +582,24 @@ window.__ModuleLoader__.load({
     ];
     const NOMES_VALIDOS = new Set([...NOMES, ...NOMES_ANTERIORES]);
 
+    // Gênero — nome e boneco nascem do MESMO gênero (regra 2026-09-29: "os
+    // gêneros dos bonecos têm de bater com os nomes"). 'any' = nome neutro,
+    // serve para qualquer boneco. Os bonecos são as 8 identidades nomeadas da
+    // demo; o gênero é o que o busto mostra (rui/codigo/pesquisa/alex
+    // masculinos, bia/lia/testes/maya femininos).
+    const GENERO_NOME = {
+      Lia: 'f', Bia: 'f', Maya: 'f', Nara: 'f', Iris: 'f', Nina: 'f', Zoe: 'f',
+      Cleo: 'f', Lila: 'f', Mila: 'f', Lara: 'f', Sofia: 'f', Dara: 'f', Yara: 'f',
+      Tati: 'f', Bel: 'f', Duda: 'f', Hana: 'f', Iara: 'f', 'Júlia': 'f', Manu: 'f',
+      Rui: 'm', Tom: 'm', Caio: 'm', Otto: 'm', Davi: 'm', 'Léo': 'm', Ivo: 'm',
+      Ravi: 'm', 'Théo': 'm', Enzo: 'm', 'Téo': 'm', Gael: 'm', Ruan: 'm', Iuri: 'm',
+      Levi: 'm', Vitor: 'm', 'Cauã': 'm', 'Fábio': 'm', Gil: 'm', Luan: 'm', Nilo: 'm',
+      Alex: 'any', Noa: 'any', Mel: 'any', Ari: 'any', Ely: 'any', Kai: 'any',
+    };
+    const GENERO_AVATAR = {
+      rui: 'm', bia: 'f', lia: 'f', pesquisa: 'm', codigo: 'm', testes: 'f', alex: 'm', maya: 'f',
+    };
+
     // Banco de estilos: forma do avatar + paleta (fundo/borde/acento).
     const ESTILOS = [
       { id: 'azul', forma: 'circulo', paleta: { fundo: '#2e5a86', borde: '#1d3a55', acento: '#4a90d9' } },
@@ -607,28 +625,37 @@ window.__ModuleLoader__.load({
     // Identidade de uma conversa DERIVADA do id (nada de sorteio): a mesma
     // conversa é a mesma pessoa — nome, boneco e estilo — em qualquer browser
     // ou perfil, e dá para a encontrar pelo nome em testes e verificações.
+    // O gênero vem de um hash próprio e o nome e o boneco saem AMBOS desse
+    // gênero (2026-09-29): um "Rui" nunca ganha um boneco de mulher e uma
+    // "Maya" nunca ganha um boneco de homem.
     // Desempate contra homónimos: se o nome preferido já é de outra pessoa
-    // (`ocupado(nome)`), o seguinte da lista (sondagem linear, também fixa).
+    // (`ocupado(nome)`), o seguinte da lista DO GÊNERO (sondagem linear, fixa).
     function identidadeDe(id, ocupado = () => false) {
-      const ids = identidades();
-      const base = hashEstavel(`${id}|nome`) % NOMES.length;
-      let nome = NOMES[base];
-      for (let k = 0; k < NOMES.length; k += 1) {
-        const n = NOMES[(base + k) % NOMES.length];
+      const genero = hashEstavel(`${id}|genero`) % 2 === 0 ? 'f' : 'm';
+      const nomes = NOMES.filter((n) => {
+        const g = GENERO_NOME[n] || 'any';
+        return g === genero || g === 'any';
+      });
+      const avatares = identidades().filter((a) => GENERO_AVATAR[a] === genero);
+      const base = hashEstavel(`${id}|nome`) % nomes.length;
+      let nome = nomes[base];
+      for (let k = 0; k < nomes.length; k += 1) {
+        const n = nomes[(base + k) % nomes.length];
         if (!ocupado(n)) { nome = n; break; }
       }
       return {
         name: nome,
-        avatar: ids[hashEstavel(`${id}|avatar`) % ids.length],
+        avatar: avatares[hashEstavel(`${id}|avatar`) % avatares.length],
         style: ESTILOS[hashEstavel(`${id}|estilo`) % ESTILOS.length],
       };
     }
 
     // Associador: cache em memória + localStorage da identidade DERIVADA
-    // (identidadeDe) — marcada `v: 2`. Entradas antigas (sorteadas com
-    // Math.random, ou nomes que eram o título da conversa) são trocadas UMA
-    // vez pela derivada, para a mesma conversa ter o mesmo nome em todo o lado.
-    const VERSAO_ASSOC = 2;
+    // (identidadeDe) — marcada `v: 3`. Entradas antigas (sorteadas com
+    // Math.random, nomes que eram o título da conversa, ou `v: 2` com nome e
+    // boneco de gêneros trocados) são trocadas UMA vez pela derivada, para a
+    // mesma conversa ter o mesmo nome em todo o lado.
+    const VERSAO_ASSOC = 3;
     function criarAssociador() {
       let cache = null; // null = ainda não lido
 
@@ -6695,6 +6722,8 @@ window.__ModuleLoader__.load({
     exports.__hashEstavel = hashEstavel;
     exports.__criarAssociador = criarAssociador;
     exports.__NOMES = NOMES;
+    exports.__GENERO_NOME = GENERO_NOME;
+    exports.__GENERO_AVATAR = GENERO_AVATAR;
     exports.__CSS_PAINEL = CSS_PAINEL;
     exports.__modeloSidebar = modeloSidebar;
     exports.__FILTROS_PADRAO = FILTROS_PADRAO;
