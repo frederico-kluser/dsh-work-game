@@ -9,16 +9,20 @@
  *     linhas discretas; o fallback cru pelos eventos do eventSource;
  *   - as linhas do iMessage: agrupamento, cauda na última bolha do grupo,
  *     separadores de hora ("Hoje 14:32", "Ontem…"), recibos ("Entregue",
- *     "na fila", "Não entregue"), "a escrever…", DOM limitado;
+ *     "na fila", "a entrar no turno…", "Não entregue"), "a escrever…", DOM limitado;
  *   - o controlador (criarConversaTelefone) com um ctx falso: retain com o
  *     rótulo PRÓPRIO 'dshWorkGame' (nunca 'mainView'), assinaturas, ecos sem
  *     bolha dupla, envio com beginSubmission + prompt(requestId) em 'queue',
- *     subagentes sem eco do DSH, erros ("Não entregue"), release UMA vez e só
- *     depois de desligar tudo;
+ *     a FILA (padrão da QueueDock do DSH): sempre a última mensagem, com
+ *     "Enviar agora" (steer) e "Remover" por updateQueue, subagentes sem eco do
+ *     DSH, erros ("Não entregue"), release UMA vez e só depois de desligar tudo;
  *   - o núcleo: trocar de pessoa faz retain da nova antes do release da
  *     anterior; fechar, trocar a seleção, desmontar o painel e o dispose
  *     libertam — nenhuma referência fica pendurada;
- *   - segurança: o texto das mensagens nunca passa por innerHTML.
+ *   - segurança: o texto das mensagens nunca passa por innerHTML;
+ *   - o RENDER (react falso que guarda a árvore): os botões "Enviar agora" e
+ *     "Remover" desenham-se na mensagem em fila, vêm desativados quando deve e
+ *     chamam o controlador com o id da mensagem.
  *
  * Executar: node --test tests/plugin/telefone.test.mjs
  */
@@ -27,11 +31,23 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 
 let moduloBundle = null;
+// React falso: createElement guarda a ÁRVORE (e não null) para se poderem
+// inspecionar os componentes sem browser; os hooks são mínimos — o que interessa
+// é o que se desenha e o que os botões chamam.
+const noDe = (tipo, props, ...filhos) => ({ tipo, props: props || {}, filhos: filhos.flat(Infinity).filter((f) => f != null && f !== false) });
+const reactFalso = {
+  createElement: noDe,
+  useState: (v) => [typeof v === 'function' ? v() : v, () => {}],
+  useEffect: () => {},
+  useLayoutEffect: () => {},
+  useMemo: (f) => f(),
+  useRef: (v) => ({ current: v }),
+};
 globalThis.window = {
   __ModuleLoader__: {
     load({ factory }) {
       moduloBundle = factory((nome) => {
-        if (nome === 'react') return { createElement: () => null };
+        if (nome === 'react') return reactFalso;
         throw new Error(`módulo inesperado: ${nome}`);
       });
     },
@@ -40,6 +56,14 @@ globalThis.window = {
 await import('../../dsh-plugin/src/client.js');
 const B = moduloBundle;
 const BUNDLE = readFileSync(new URL('../../dsh-plugin/src/client.js', import.meta.url), 'utf8');
+
+// Percorrer a árvore do render (nós do react falso).
+const nosDe = (no, pred, fora = []) => {
+  if (!no || typeof no !== 'object') return fora;
+  if (pred(no)) fora.push(no);
+  for (const f of no.filhos || []) nosDe(f, pred, fora);
+  return fora;
+};
 
 /* ---------- formas reais do alvo 'chat' (ui-chat/contract/chat-nodes.ts) ---------- */
 
@@ -201,20 +225,39 @@ test('linhas: separadores de hora no início, após 15 min de silêncio e noutro
 test('linhas: eco pendente, fila ("na fila"), envio falhado ("Não entregue") e erro do agente', () => {
   const { linhas } = B.__linhasDoTelefone(conversa([msg('a', 'eu', T0), msg('b', 'ele', T0 + 1000)], {
     ecos: [{ requestId: 'rq-5', texto: 'já vai', time: T0 + 2000, placement: 'transcript' }],
-    fila: [{ id: 'q1', texto: 'depois isto', anexos: [] }, { id: 'q2', texto: 'e isto', anexos: [] }],
+    fila: [{ id: 'q1', texto: 'depois isto', anexos: [] }, { id: 'q2', texto: 'e isto', anexos: [], alvo: 'next-step' }],
     falhados: [{ id: 'f1', texto: 'não foi', time: T0 + 3000, erro: 'sem rede' }],
     erroAgente: 'provider 500',
   }), { agora: T0 });
   const m = sóMsgs(linhas);
   assert.deepEqual(m.map((l) => `${l.key}:${l.estado}:${l.recibo}`), [
-    'a:ok:Entregue', 'b:ok:null', 'eco:rq-5:pendente:null', 'fila:q1:fila:null', 'fila:q2:fila:na fila', 'falhou:f1:falhou:Não entregue',
-  ]);
-  assert.equal(m[5].erro, 'sem rede');
-  assert.equal(m[5].id, 'f1', 'o id serve para "tentar de novo"');
-  const ultimo = linhas[linhas.length - 1];
-  assert.equal(ultimo.tipo, 'sistema');
-  assert.equal(ultimo.variante, 'erro');
-  assert.match(ultimo.texto, /provider 500/);
+    'a:ok:Entregue', 'b:ok:null', 'eco:rq-5:pendente:null', 'falhou:f1:falhou:Não entregue',
+    'fila:q1:fila:na fila', 'fila:q2:fila:a entrar no turno…',
+  ], 'a FILA fica SEMPRE no fim (padrão do DSH) e cada linha traz o recibo dela');
+  assert.deepEqual(m.slice(4).map((l) => [l.id, l.alvo]), [['q1', 'next-turn'], ['q2', 'next-step']],
+    'as linhas de fila trazem id e alvo — é o que os botões "Enviar agora"/"Remover" usam');
+  assert.equal(m[3].erro, 'sem rede');
+  assert.equal(m[3].id, 'f1', 'o id serve para "tentar de novo"');
+  const sistema = linhas.filter((l) => l.tipo === 'sistema');
+  assert.equal(sistema.length, 1);
+  assert.equal(sistema[0].variante, 'erro');
+  assert.match(sistema[0].texto, /provider 500/);
+  assert.ok(linhas.indexOf(sistema[0]) < linhas.findIndex((l) => l.estado === 'fila'),
+    'o erro do agente fica com a conversa — a fila é que manda no fim');
+});
+
+test('linhas: a fila é SEMPRE a última coisa do ecrã — mesmo depois do "a escrever…" (padrão DSH)', () => {
+  const { linhas } = B.__linhasDoTelefone(conversa([msg('a', 'eu', T0)], {
+    aCorrer: true,
+    fila: [{ id: 'q1', texto: 'e depois?', anexos: [] }],
+    ecos: [{ requestId: 'rq-9', texto: 'ainda a entrar', time: T0, placement: 'queued' }],
+  }), { agora: T0 });
+  assert.deepEqual(linhas.filter((l) => l.tipo !== 'data').map((l) => (l.tipo === 'msg' ? `${l.estado}:${l.recibo}` : l.tipo)),
+    ['ok:Entregue', 'a-escrever', 'fila:a enviar…', 'fila:na fila'],
+    'o estado do turno ("a escrever…") vem antes; o eco da fila e a fila ficam por baixo de tudo');
+  assert.equal(linhas[linhas.length - 1].id, 'q1', 'a mensagem em fila é sempre a última mensagem');
+  assert.ok(sóMsgs(linhas).filter((l) => l.estado === 'fila').every((l) => l.recibo),
+    'todas as linhas de fila mostram o estado delas (não só a última)');
 });
 
 test('"a escrever…": a correr, à espera do 1.º turno, entre steps ou com ferramenta — e nunca parada, apagada ou com erro', () => {
@@ -236,7 +279,7 @@ test('"a escrever…": a correr, à espera do 1.º turno, entre steps ou com fer
   assert.equal(B.__aEscrever(conversa(base, { aCorrer: true, removida: true })), false);
   assert.equal(B.__aEscrever(conversa(base, { aCorrer: true, fase: 'erro' })), false);
   const { linhas } = B.__linhasDoTelefone(conversa(base, { aCorrer: true }), { agora: T0 });
-  assert.equal(linhas[linhas.length - 1].tipo, 'a-escrever', 'os três pontos ficam sempre no fim');
+  assert.equal(linhas[linhas.length - 1].tipo, 'a-escrever', 'sem fila, os três pontos ficam no fim (com fila, a fila fica depois deles)');
 });
 
 test('DOM limitado: só as últimas N linhas; as antigas ficam contadas para "Mensagens anteriores"', () => {
@@ -365,8 +408,8 @@ test('resumo de ferramentas: comando sem o "cd", caminho pelo fim, JSON estragad
 
 /* ---------- controlador com um ctx falso do DSH ---------- */
 
-function dshFalso({ snapshot = {}, nos = [], comUiConversation = true, retainLanca = null, resposta = { ok: true, value: { accepted: true } }, promptLanca = null, eventos = null } = {}) {
-  const reg = { retains: [], releases: 0, ordem: [], submissions: [], prompts: [], abandonos: 0, antigas: 0, abortado: false };
+function dshFalso({ snapshot = {}, nos = [], comUiConversation = true, retainLanca = null, resposta = { ok: true, value: { accepted: true } }, promptLanca = null, eventos = null, updateQueueLanca = null, filaResposta = null } = {}) {
+  const reg = { retains: [], releases: 0, ordem: [], submissions: [], prompts: [], abandonos: 0, antigas: 0, abortado: false, acoesFila: [] };
   let snap = {
     sessionId: 's1', pendingSubmissions: [], running: false, subagent: null, removed: false, openState: 'open',
     openError: null, hasMore: true, loadingOlder: false, promptError: null, blank: false, lastAgentError: null,
@@ -388,6 +431,7 @@ function dshFalso({ snapshot = {}, nos = [], comUiConversation = true, retainLan
   const fCaixa = fonte('inbox', () => caixa);
   const fEventos = fonte('eventos', () => eventos ?? { entries: [], hasMore: false, revision: 0 });
   let n = 0;
+  let atualFilaResposta = filaResposta;
   const sessao = {
     sessionId: 's1',
     getSnapshot: fSessao.getSnapshot,
@@ -411,6 +455,11 @@ function dshFalso({ snapshot = {}, nos = [], comUiConversation = true, retainLan
       return resposta;
     },
     async loadOlder() { reg.antigas += 1; },
+    async updateQueue(itemId, acao) {
+      reg.acoesFila.push({ itemId, acao });
+      if (updateQueueLanca) throw updateQueueLanca;
+      return atualFilaResposta ?? { ok: true, value: { accepted: true } };
+    },
     cancel: async () => ({ ok: true }),
   };
   const binding = { sessionId: 's1', session: sessao, eventSource: fEventos, ctx: {} };
@@ -437,10 +486,11 @@ function dshFalso({ snapshot = {}, nos = [], comUiConversation = true, retainLan
     },
   };
   return {
-    ctx, reg, fSessao, fChat, fCaixa,
+    ctx, reg, sessao, fSessao, fChat, fCaixa,
     mudarSessao(p) { snap = { ...snap, ...p }; fSessao.avisar(); },
     mudarChat(nos2) { chat = chatDe(nos2); fChat.avisar(); },
     mudarCaixa(c) { caixa = c; fCaixa.avisar(); },
+    mudarFila(r) { atualFilaResposta = r; },
   };
 }
 const esperar = () => new Promise((r) => setTimeout(r, 0));
@@ -497,7 +547,7 @@ test('controlador: a correr, a mensagem entra na fila ("na fila") — eco "queue
   const [eco] = c.getSnapshot().ecos;
   assert.equal(eco.placement, 'queued');
   let m = sóMsgs(B.__linhasDoTelefone(c.getSnapshot(), { agora: T0 }).linhas);
-  assert.equal(m[m.length - 1].recibo, 'na fila');
+  assert.equal(m[m.length - 1].recibo, 'a enviar…', 'o eco ainda não é entrada da fila — o recibo diz "a enviar…"');
   // o host admite-a na fila: a inbox traz a ocorrência com o mesmo rpcId
   d.mudarCaixa({ 'next-turn': [{ id: 'm7', role: 'user', content: [{ type: 'text', text: 'e depois isto' }], source: { kind: 'user', rpcId: 'rq-1' } }], 'next-step': [] });
   assert.deepEqual(c.getSnapshot().ecos, [], 'o eco sai quando a fila o mostra');
@@ -505,6 +555,82 @@ test('controlador: a correr, a mensagem entra na fila ("na fila") — eco "queue
   m = sóMsgs(B.__linhasDoTelefone(c.getSnapshot(), { agora: T0 }).linhas);
   assert.deepEqual(m.map((l) => `${l.estado}:${l.recibo}`), ['fila:na fila']);
   c.libertar();
+});
+
+test('fila: "Enviar agora" = steer do DSH (updateQueue) e "Remover" = remove — por mensagem', async () => {
+  const d = dshFalso({ snapshot: { running: true } });
+  const c = B.__criarConversaTelefone(d.ctx, 's1');
+  await esperar();
+  const item = (id, texto) => ({ id, role: 'user', content: [{ type: 'text', text: texto }], source: { kind: 'user' } });
+  d.mudarCaixa({ 'next-turn': [item('m1', 'primeira'), item('m2', 'segunda')], 'next-step': [] });
+  let m = sóMsgs(B.__linhasDoTelefone(c.getSnapshot(), { agora: T0 }).linhas);
+  assert.deepEqual(m.map((l) => [l.id, l.alvo, l.recibo]), [
+    ['m1', 'next-turn', 'na fila'], ['m2', 'next-turn', 'na fila'],
+  ], 'cada mensagem em fila traz id/alvo e o recibo dela');
+
+  await c.enviarAgora('m2');
+  assert.deepEqual(d.reg.acoesFila, [{ itemId: 'm2', acao: { kind: 'steer' } }], 'o "Enviar agora" é o steer da QueueDock do DSH');
+  // o DSH tirou-a de next-turn e pô-la em next-step: a linha fica "a entrar no turno…"
+  // (como no DSH, a interjeição mostra-se ACIMA das mensagens ainda em fila)
+  d.mudarCaixa({ 'next-turn': [item('m1', 'primeira')], 'next-step': [item('m2', 'segunda')] });
+  m = sóMsgs(B.__linhasDoTelefone(c.getSnapshot(), { agora: T0 }).linhas);
+  assert.deepEqual(m.map((l) => [l.recibo, l.alvo]), [['a entrar no turno…', 'next-step'], ['na fila', 'next-turn']],
+    'depois do steer a mensagem já não espera turno — só o próximo step');
+
+  await c.descartar('m1');
+  assert.deepEqual(d.reg.acoesFila[1], { itemId: 'm1', acao: { kind: 'remove' } }, '"Remover" é o remove da QueueDock do DSH');
+  d.mudarCaixa({ 'next-turn': [], 'next-step': [item('m2', 'segunda')] });
+  assert.deepEqual(sóMsgs(B.__linhasDoTelefone(c.getSnapshot(), { agora: T0 }).linhas).map((l) => l.id), ['m2']);
+  c.libertar();
+});
+
+test('fila: "Enviar agora" só com turno em curso; fechada não faz nada; item já saído converge em silêncio', async () => {
+  const d = dshFalso({ snapshot: { running: true } });
+  const c = B.__criarConversaTelefone(d.ctx, 's1');
+  await esperar();
+  d.mudarSessao({ running: false });
+  assert.deepEqual(await c.enviarAgora('m1'), { ok: false, motivo: 'parada' }, 'sem turno em curso não há steer (como no DSH)');
+  assert.deepEqual(d.reg.acoesFila, [], 'nem sequer chama o DSH');
+  d.mudarSessao({ running: true });
+  await c.descartar('m1');
+  assert.deepEqual(d.reg.acoesFila.map((a) => a.itemId), ['m1']);
+  c.libertar();
+  assert.deepEqual(await c.enviarAgora('m1'), { ok: false, motivo: 'fechada' }, 'depois de libertar, nada vai para o DSH');
+
+  // item já não pendente (entrou em execução entretanto): não é erro do utilizador
+  const d2 = dshFalso({ updateQueueLanca: Object.assign(new Error('queued item is no longer pending'), { code: 'session/queue-item-not-found' }) });
+  const c2 = B.__criarConversaTelefone(d2.ctx, 's1');
+  await esperar();
+  const r = await c2.descartar('m9');
+  assert.equal(r.ok, true, 'convergir em silêncio, como a QueueDock do DSH');
+  assert.equal(c2.getSnapshot().erroFila, null);
+  c2.libertar();
+});
+
+test('fila: falha da ação (steer recusado, DSH fora) mostra o erro no fim da fila — nunca em silêncio', async () => {
+  const d = dshFalso({ snapshot: { running: true }, filaResposta: { ok: false, error: { code: 'session/steer-unavailable', message: 'current turn no longer accepts steering' } } });
+  const c = B.__criarConversaTelefone(d.ctx, 's1');
+  await esperar();
+  const r = await c.enviarAgora('m1');
+  assert.equal(r.ok, false);
+  assert.match(c.getSnapshot().erroFila, /Não foi possível enviar agora: current turn no longer accepts steering/);
+  const linhas = B.__linhasDoTelefone(c.getSnapshot(), { agora: T0 }).linhas;
+  const ultimo = linhas[linhas.length - 1];
+  assert.equal(ultimo.tipo, 'sistema');
+  assert.equal(ultimo.variante, 'erro');
+  assert.match(ultimo.texto, /Não foi possível enviar agora/);
+  d.mudarFila(null); // a ação seguinte já corre
+  await c.descartar('m1');
+  assert.equal(c.getSnapshot().erroFila, null, 'uma ação seguinte que corre limpa o erro');
+  c.libertar();
+
+  const d3 = dshFalso();
+  delete d3.sessao.updateQueue; // sessão sem a gestão da fila (contrato antigo)
+  const semUpdateQueue = B.__criarConversaTelefone(d3.ctx, 's1');
+  await esperar();
+  await semUpdateQueue.descartar('m1');
+  assert.match(semUpdateQueue.getSnapshot().erroFila, /não permite gerir a fila/);
+  semUpdateQueue.libertar();
 });
 
 test('controlador: envio recusado ou partido → "Não entregue" (e tentar de novo); exceção antes do prompt → abandon()', async () => {
@@ -809,6 +935,65 @@ test('aparência: iPhone + iMessage (#0B84FE / #E9E9EB, 18px, cauda, Dynamic Isl
   assert.match(BUNDLE, /className: 'wg-tel-campo',\s*\/\/[^\n]*\n\s*onClick: \(e\) => \{/, 'clicar em qualquer ponto da cápsula dá o foco à caixa');
   assert.ok(BUNDLE.includes("'Escritório')"), '"‹ Escritório" no cabeçalho');
   assert.deepEqual(B.inject, ['slots', 'layout', 'sessions'], 'o uiConversation lê-se com ctx.get — nunca no inject');
+});
+
+test('fila no celular: cada mensagem em fila tem "Enviar agora" e "Remover" (o padrão da QueueDock do DSH)', () => {
+  const comp = BUNDLE.slice(BUNDLE.indexOf('function TelefoneConversa('), BUNDLE.indexOf('const TelefoneMemo'));
+  assert.ok(comp.includes("'aria-label': 'Enviar agora'"), 'o botão pedido, com o texto exato');
+  assert.ok(comp.includes("'aria-label': 'Remover da fila'"), 'e a forma de descartar a mensagem');
+  assert.match(comp, /onClick: \(\) => \{ conversa\.enviarAgora\(l\.id\); \}/, '"Enviar agora" chama o steer da conversa');
+  assert.match(comp, /onClick: \(\) => \{ conversa\.descartar\(l\.id\); \}/, '"Remover" chama o remove da conversa');
+  assert.match(comp, /disabled: !podeEscrever \|\| !conv\.aCorrer/, 'sem turno em curso não há "enviar agora" (como no DSH)');
+  assert.match(comp, /Só enquanto \$\{nome\} está a trabalhar/, 'e o título explica porquê');
+  assert.match(comp, /'data-fila-id': l\.id \?\? undefined/, 'a linha da fila identifica-se no DOM (e2e)');
+  const css = B.__CSS_PAINEL;
+  assert.ok(css.includes('.wg-tel-fila-acoes{') && css.includes('.wg-tel-fila-enviar{') && css.includes('.wg-tel-fila-remover{'),
+    'a linha de ações da fila tem o seu CSS');
+  assert.match(css, /\.wg-tel-fila-enviar\{[^}]*background:#0b84fe/, 'o "Enviar agora" é o azul do iMessage');
+  // o mesmo pedido de "sem fila não inventa botões": só as linhas com estado 'fila'
+  assert.match(comp, /l\.estado === 'fila'\s*\n\s*\? h\('div', \{ className: 'wg-tel-fila-acoes' \}/, 'os botões vivem na mensagem em fila — não nas outras');
+});
+
+test('render: a mensagem em fila desenha "Enviar agora"/"Remover" e os botões chamam o controlador', () => {
+  const chamados = [];
+  const snap = {
+    sessionId: 's1', fase: 'aberta', erro: null, itens: [], ecos: [],
+    fila: [{ id: 'm7', texto: 'e depois isto?', anexos: [], alvo: 'next-turn' }],
+    falhados: [], aCorrer: true, aguardaPrimeiroTurno: false, temMais: false, aCarregarAntigas: false,
+    removida: false, subagente: false, erroEnvio: null, erroAgente: null, erroFila: null, fonte: 'chat', inerte: false,
+  };
+  const conversa = {
+    getSnapshot: () => snap, subscribe: () => () => {},
+    enviar: () => {}, reenviar: () => {}, maisAntigas: () => {},
+    enviarAgora: (id) => { chamados.push(`enviarAgora:${id}`); },
+    descartar: (id) => { chamados.push(`descartar:${id}`); },
+  };
+  const desenhar = () => B.__TelefoneConversa({ conversa, sessionId: 's1', nome: 'Rui', estadoRotulo: '', fechar: () => {} });
+  const arvore = desenhar();
+  const emFila = nosDe(arvore, (n) => n.props['data-estado'] === 'fila');
+  assert.equal(emFila.length, 1, 'a mensagem em fila desenha-se');
+  assert.equal(emFila[0].props['data-fila-id'], 'm7', 'com o id dela no DOM');
+  const botoes = nosDe(emFila[0], (n) => n.props['data-acao-fila']);
+  assert.deepEqual(botoes.map((b) => [b.props['data-acao-fila'], b.props.disabled, b.filhos.join('')]),
+    [['enviar-agora', false, 'Enviar agora'], ['remover', false, 'Remover']]);
+  for (const b of botoes) b.props.onClick();
+  assert.deepEqual(chamados, ['enviarAgora:m7', 'descartar:m7'], 'os botões chamam o controlador com o id da mensagem');
+
+  // A fila vem DEPOIS do "a escrever…" — é sempre a última coisa do ecrã.
+  const lista = nosDe(arvore, (n) => String(n.props.className || '').includes('wg-tel-lista'))[0];
+  const ordem = lista.filhos.map((n) => String(n.props.className || '')).filter((c) => c.startsWith('wg-tel-msg'));
+  assert.equal(ordem.length, 2);
+  assert.ok(ordem[0].includes('wg-tel-a-escrever') && ordem[1].includes('wg-tel-est-fila'),
+    `a fila vem depois do "a escrever…" (${ordem.join(' | ')})`);
+
+  // Sem turno em curso, "Enviar agora" vem desativado (o steer é só com turno).
+  snap.aCorrer = false;
+  const parada = nosDe(desenhar(), (n) => n.props['data-acao-fila'] === 'enviar-agora');
+  assert.equal(parada.length, 1);
+  assert.equal(parada[0].props.disabled, true);
+  assert.match(parada[0].props.title, /Só enquanto Rui está a trabalhar/);
+  assert.equal(nosDe(desenhar(), (n) => n.props['data-acao-fila'] === 'remover')[0].props.disabled, false,
+    'o "Remover" continua disponível');
 });
 
 /* ---------- grupos (workspaces) e o feed do grupo ---------- */

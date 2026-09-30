@@ -385,13 +385,24 @@ anima faz UMA leitura de geometria por sincronia (nunca por elemento).
   texto, o círculo azul com a seta; sem sessão viva (controlador **inerte**: id
   desconhecido, sem canal — `snapshot.inerte`) a caixa desativa-se; **Enter envia**,
   Shift+Enter muda de linha; eco imediato (bolha semitransparente) e depois a real; a
-  correr, a mensagem fica **na fila**; envio recusado → "Não entregue" a vermelho com ❗
-  (clicar reenvia). DOM limitado às últimas 200 linhas; ao chegar ao topo (ou em
+  correr, a mensagem fica **na fila** — e a fila fica **sempre no fim da conversa**,
+  como última mensagem (depois até do "a escrever…", como a QueueDock do DSH), com o
+  recibo POR MENSAGEM ("a enviar…" no eco ainda sem entrada, "na fila" à espera do
+  turno, "a entrar no turno…" depois do steer) e, na mesma linha, os botões
+  **Enviar agora** (`updateQueue(id, {kind:'steer'})` — entra já no turno em curso;
+  ativo só com `aCorrer`, fora disso desativado com o título "Só enquanto <nome> está a
+  trabalhar") e **Remover** (`updateQueue(id, {kind:'remove'})`); sem carregar em
+  nenhum, a mensagem entra sozinha quando o turno terminar (FIFO, como no DSH); envio
+  recusado → "Não entregue" a vermelho com ❗ (clicar reenvia); uma ação de fila
+  recusada mostra o erro numa linha vermelha no fim da fila (`erroFila`) — e
+  `session/queue-item-not-found` (o item já entrou em execução) converge em silêncio.
+  DOM limitado às últimas 200 linhas; ao chegar ao topo (ou em
   **Mensagens anteriores**) mostram-se as escondidas e pede-se `loadOlder`, mantendo a
   posição; rola para o fim ao abrir, ao enviar e quando chega mensagem nova se já estava
   no fim. Puro e testável: `itensDoChat` (alvo 'chat' → itens), `itensDoFluxo` (fallback
-  cru), `linhasDoTelefone` (grupos, cauda, horas, recibos, limite), `aEscrever`,
-  `segmentosDeTexto`, `resumoArgs`; controlador `criarConversaTelefone` (receita abaixo);
+  cru), `linhasDoTelefone` (grupos, cauda, horas, recibos, fila sempre no fim), `aEscrever`,
+  `rotuloDaFila`, `segmentosDeTexto`, `resumoArgs`; controlador `criarConversaTelefone`
+  com `enviar`, `enviarAgora`, `descartar` e `reenviar` (receita abaixo);
   o núcleo guarda **uma** conversa (`getConversa`) e liberta-a ao fechar, ao trocar de
   pessoa (retain da nova antes do release da anterior), em `parar()` (painel desmontado)
   e no `dispose()` (HMR). O componente é `React.memo` com props primitivas e `fechar`
@@ -463,12 +474,24 @@ macmini (DSH web 3080) com `verify-dsh-panel.mjs --conversa` e `--enviar`.
    Sempre `'queue'`: parada, inicia um turno; a correr, entra na fila (`steer` só entra no
    próximo step e não é o padrão). **Subagente** (`snapshot.subagent !== null`): o prompt
    ignora o requestId — sem `beginSubmission` (o eco ficaria preso), eco local.
-6. **Deduplicar**: o eco cujo `requestId` já aparece como `source.rpcId` num nó do
+6. **Fila (o padrão da QueueDock do DSH)**: a fila lê-se na projeção `inbox`
+   (`mensagensDaCaixa` → `id`, `texto`, `anexos`, `rpcId`, `alvo` `'next-turn'`|`'next-step'`)
+   e desenha-se **sempre no fim da conversa** (o bloco `fila` de `linhasDoTelefone`, depois
+   do "a escrever…"). Os botões da linha usam `session.updateQueue(itemId, action)` — o
+   mesmo RPC das linhas da QueueDock: **Enviar agora** = `{kind:'steer'}` (o DSH tira a
+   mensagem de `next-turn` e põe-a em `next-step`: entra já no turno em curso; só com
+   `snapshot.running`, senão `session/steer-unavailable` e o botão fica desativado) e
+   **Remover** = `{kind:'remove'}` (funciona nos dois alvos). `session/queue-item-not-found`
+   (o item já entrou em execução) converge em silêncio; as outras falhas mostram-se em
+   `erroFila`, uma linha vermelha no fim da fila. Sem carregar em nenhum botão, a fila
+   drena-se sozinha FIFO — 1 mensagem por turno, pelo `agent-loop` (`claim('next-turn')`).
+7. **Deduplicar**: o eco cujo `requestId` já aparece como `source.rpcId` num nó do
    utilizador ou numa mensagem da `inbox` esconde-se no mesmo render (a regra
-   `observedRpcIds` do `ChatView`); um eco `queued` mostra-se "na fila" até a inbox o ter.
-7. **Antigas**: `session.loadOlder()` só com `openState === 'open' && hasMore &&
+   `observedRpcIds` do `ChatView`); um eco `queued` mostra-se "a enviar…" até a inbox o ter
+   ("na fila" a partir daí).
+8. **Antigas**: `session.loadOlder()` só com `openState === 'open' && hasMore &&
    !loadingOlder` (no-op fora disso; página de 50); a UI mantém a posição do scroll.
-8. **Libertar** — por esta ordem: tirar **todos** os `unsubscribe` (sessão, inbox, alvo
+9. **Libertar** — por esta ordem: tirar **todos** os `unsubscribe` (sessão, inbox, alvo
    'chat' ou eventSource) → `abort()` do sinal → `ref.release()` **uma vez**; depois disso
    `ref.binding` lança. A última referência (de qualquer fonte) fecha o stream e o scope;
    se o painel principal do DSH tiver a mesma conversa (`mainView`), só desce a contagem.

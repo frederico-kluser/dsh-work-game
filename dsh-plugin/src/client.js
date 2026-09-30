@@ -3511,10 +3511,19 @@ window.__ModuleLoader__.load({
       return !!(ultimo && (ultimo.estado === 'a-transmitir' || (ultimo.tipo === 'ferramenta' && ultimo.estado === 'a-correr')));
     }
 
+    // Recibo de uma mensagem NA FILA: "a enviar…" (eco ainda sem entrada na
+    // fila do DSH), "na fila" (espera o seu turno — FIFO) ou "a entrar no
+    // turno…" (já mandada entrar pelo "Enviar agora", espera o próximo step).
+    const rotuloDaFila = (l) => (l.id == null ? 'a enviar…' : l.alvo === 'next-step' ? 'a entrar no turno…' : 'na fila');
+
     /**
      * Linhas do celular (pura): bolhas agrupadas com cauda, separadores de hora,
      * ferramentas seguidas numa linha só, recibos ("Entregue", "na fila", "Não
      * entregue") e o "a escrever…". Guarda só as últimas `max` linhas.
+     *
+     * No padrão do DSH (a QueueDock): o que está em fila fica SEMPRE no fim,
+     * como última mensagem — mesmo depois do "a escrever…" — e cada linha de
+     * fila traz `id` e `alvo` para os botões "Enviar agora"/"Remover".
      * @param {object} conv snapshot do controlador (criarConversaTelefone)
      * @param {{ agora?: number, max?: number }} opcoes relógio (testes) e limite do DOM
      * @returns {{ linhas: object[], escondidas: number, total: number }}
@@ -3541,17 +3550,37 @@ window.__ModuleLoader__.load({
           base.push({ ...i, contextos: [i.contexto] });
         } else base.push({ ...i });
       }
-      // 2) o que ainda não é durável fica no fim: ecos, fila e envios falhados
+      // 2) o que ainda não é durável fica no fim: ecos de entrega imediata e
+      //    envios falhados (a FILA tem o seu próprio bloco — o último — em 2d)
       for (const e of Array.isArray(conv.ecos) ? conv.ecos : []) {
-        base.push({ key: `eco:${e.requestId}`, tipo: 'msg', lado: 'eu', time: Number.isFinite(e.time) ? e.time : null, texto: String(e.texto ?? ''), anexos: [], estado: e.placement === 'queued' ? 'fila' : 'pendente' });
-      }
-      for (const f of Array.isArray(conv.fila) ? conv.fila : []) {
-        base.push({ key: `fila:${f.id}`, tipo: 'msg', lado: 'eu', time: null, texto: String(f.texto ?? ''), anexos: f.anexos ?? [], estado: 'fila' });
+        if (e.placement === 'queued' || e.placement === 'steering') continue; // bloco da fila
+        base.push({ key: `eco:${e.requestId}`, tipo: 'msg', lado: 'eu', time: Number.isFinite(e.time) ? e.time : null, texto: String(e.texto ?? ''), anexos: [], estado: 'pendente' });
       }
       for (const f of Array.isArray(conv.falhados) ? conv.falhados : []) {
         base.push({ key: `falhou:${f.id}`, id: f.id, tipo: 'msg', lado: 'eu', time: Number.isFinite(f.time) ? f.time : null, texto: String(f.texto ?? ''), anexos: [], estado: 'falhou', erro: f.erro ?? null });
       }
       if (conv.erroAgente) base.push({ key: 'erro-agente', tipo: 'sistema', variante: 'erro', time: null, texto: `Erro do agente: ${cortar(conv.erroAgente, 140)}` });
+      // 2c) o "a escrever…" vem DEPOIS da conversa e ANTES da fila (como no
+      //     DSH: o estado do turno e a QueueDock ficam por baixo de tudo)
+      if (aEscrever(conv)) base.push({ tipo: 'a-escrever', key: 'a-escrever' });
+      // 2d) A FILA: sempre as ÚLTIMAS mensagens do ecrã (o padrão do DSH — a
+      //     mensagem em fila fica embaixo, à vista, com "Enviar agora" e
+      //     "Remover" na própria linha)
+      for (const e of Array.isArray(conv.ecos) ? conv.ecos : []) {
+        if (e.placement !== 'queued' && e.placement !== 'steering') continue;
+        base.push({
+          key: `eco:${e.requestId}`, id: null, alvo: e.placement === 'steering' ? 'next-step' : 'next-turn',
+          tipo: 'msg', lado: 'eu', time: Number.isFinite(e.time) ? e.time : null,
+          texto: String(e.texto ?? ''), anexos: [], estado: 'fila',
+        });
+      }
+      for (const f of Array.isArray(conv.fila) ? conv.fila : []) {
+        base.push({
+          key: `fila:${f.id}`, id: f.id ?? null, alvo: f.alvo ?? 'next-turn', tipo: 'msg', lado: 'eu',
+          time: null, texto: String(f.texto ?? ''), anexos: f.anexos ?? [], estado: 'fila',
+        });
+      }
+      if (conv.erroFila) base.push({ key: 'erro-fila', tipo: 'sistema', variante: 'erro', time: null, texto: conv.erroFila });
 
       // 3) DOM limitado: só as últimas `max`
       const total = base.length;
@@ -3583,21 +3612,19 @@ window.__ModuleLoader__.load({
         // Os longos ("Ler mais") segmentam-se no componente: só o que se mostra.
         l.segmentos = l.texto.length > TEXTO_LONGO ? null : segmentosEmCache(l.texto);
         l.recibo = l.estado === 'falhou' ? 'Não entregue'
-          : l.estado === 'fila' && !(seg && seg.tipo === 'msg' && seg.estado === 'fila') ? 'na fila'
+          : l.estado === 'fila' ? rotuloDaFila(l) // o recibo da fila é POR MENSAGEM: muda com o estado dela
             : l.estado === 'interrompida' ? 'Interrompida' : null;
         if (l.lado === 'eu' && l.estado === 'ok') ultimaEntregue = i;
       }
       if (ultimaEntregue >= 0) linhas[ultimaEntregue].recibo = 'Entregue';
 
-      // 6) o agente a trabalhar: três pontos numa bolha cinza, sempre no fim
-      if (aEscrever(conv)) linhas.push({ tipo: 'a-escrever', key: 'a-escrever' });
       return { linhas, escondidas, total };
     }
 
     const conversaVazia = (sessionId, fase = 'a-abrir', erro = null) => ({
       sessionId: sessionId ?? null, fase, erro, itens: [], ecos: [], fila: [], falhados: [],
       aCorrer: false, aguardaPrimeiroTurno: false, temMais: false, aCarregarAntigas: false,
-      removida: false, subagente: false, erroEnvio: null, erroAgente: null, fonte: null,
+      removida: false, subagente: false, erroEnvio: null, erroAgente: null, erroFila: null, fonte: null,
       inerte: false,
     });
 
@@ -3697,6 +3724,8 @@ window.__ModuleLoader__.load({
           subscribe: () => () => {},
           enviar: async () => ({ ok: false, motivo: fase }),
           reenviar: async () => ({ ok: false, motivo: fase }),
+          enviarAgora: async () => ({ ok: false, motivo: fase }),
+          descartar: async () => ({ ok: false, motivo: fase }),
           maisAntigas: async () => {},
           libertar: () => {},
         };
@@ -3741,6 +3770,7 @@ window.__ModuleLoader__.load({
       const falhados = [];
       const locais = [];   // ecos locais dos subagentes (o DSH ignora o requestId deles)
       let erroEnvio = null;
+      let erroFila = null; // falha de "Enviar agora"/"Remover" na fila (mostra-se no fim)
       let seq = 0;
 
       function publicar() {
@@ -3777,6 +3807,7 @@ window.__ModuleLoader__.load({
           subagente: s.subagent != null,
           erroEnvio,
           erroAgente: typeof s.lastAgentError === 'string' && s.lastAgentError ? s.lastAgentError : null,
+          erroFila,
           fonte: alvoChat ? 'chat' : fluxo ? 'eventos' : null,
         };
         avisar();
@@ -3832,6 +3863,7 @@ window.__ModuleLoader__.load({
         const modo = 'queue';
         const conteudo = [{ type: 'text', text: texto }];
         erroEnvio = null;
+        erroFila = null;
         if (s.subagent != null) {
           // Subagente: o prompt vai por outro caminho e ignora o requestId —
           // sem beginSubmission (o eco ficaria preso); eco local até resolver.
@@ -3871,6 +3903,53 @@ window.__ModuleLoader__.load({
         }
       }
 
+      /**
+       * Ações sobre a FILA de mensagens (o padrão da QueueDock do DSH):
+       *  - `enviarAgora(id)` = o "steer" do DSH: a mensagem salta de `next-turn`
+       *    para `next-step` e entra JÁ no turno em curso (o botão "Enviar agora");
+       *  - `descartar(id)` = o "remove" do DSH: tira a mensagem da fila.
+       * As duas usam `session.updateQueue(id, action)` — o mesmo RPC que as
+       * linhas da QueueDock do DSH chamam. Um item que já saiu da fila
+       * (`session/queue-item-not-found`) converge em silêncio: entrou em
+       * execução entretanto, não é erro do utilizador.
+       */
+      const acaoFila = async (id, acao, rotulo) => {
+        if (!vivo) return { ok: false, motivo: 'fechada' };
+        if (id == null) return { ok: false, motivo: 'sem-id' };
+        if (!sessao || typeof sessao.updateQueue !== 'function') {
+          erroFila = 'O DSH não permite gerir a fila desta conversa.';
+          publicar();
+          return { ok: false, motivo: 'sem-updateQueue' };
+        }
+        erroFila = null;
+        trace('telefone-fila', { sessionId, acao: acao.kind, itemId: String(id) });
+        try {
+          const r = await sessao.updateQueue(String(id), acao);
+          if (r && r.ok === false) {
+            const codigo = r.error && r.error.code;
+            if (codigo === 'session/queue-item-not-found') { publicar(); return { ok: true, motivo: 'assumido' }; }
+            erroFila = `${rotulo}: ${mensagemDeErro(r.error)}`;
+          }
+          publicar();
+          return r ?? { ok: true };
+        } catch (erro) {
+          const codigo = erro && (erro.code || (erro.error && erro.error.code));
+          if (codigo === 'session/queue-item-not-found') { publicar(); return { ok: true, motivo: 'assumido' }; }
+          erroFila = `${rotulo}: ${mensagemDeErro(erro)}`;
+          publicar();
+          return { ok: false, error: erro };
+        }
+      };
+      // "Enviar agora" só faz sentido com um turno em curso (o DSH recusa o
+      // steer fora dele: "session/steer-unavailable"). Com a conversa parada, a
+      // fila entra sozinha no próximo turno — FIFO, como no DSH.
+      const enviarAgora = (id) => {
+        if (!vivo) return Promise.resolve({ ok: false, motivo: 'fechada' });
+        if (!estado.aCorrer) return Promise.resolve({ ok: false, motivo: 'parada' });
+        return acaoFila(id, { kind: 'steer' }, 'Não foi possível enviar agora');
+      };
+      const descartar = (id) => acaoFila(id, { kind: 'remove' }, 'Não foi possível remover da fila');
+
       function libertar() {
         if (!vivo) return;
         vivo = false;
@@ -3894,6 +3973,8 @@ window.__ModuleLoader__.load({
           return () => { ouvintes.delete(fn); };
         },
         enviar,
+        enviarAgora,
+        descartar,
         reenviar(id) {
           const i = falhados.findIndex((f) => f.id === id);
           if (i < 0) return Promise.resolve({ ok: false, motivo: 'desconhecido' });
@@ -4161,6 +4242,16 @@ window.__ModuleLoader__.load({
       '.wg-tel-recibo{margin:3px 4px 1px;font-size:10.5px;font-weight:500;color:#8e8e93}',
       '.wg-tel-erro{color:#ff3b30}',
       '.wg-tel-alerta{flex:none;width:19px;height:19px;margin-bottom:1px;padding:0;border:0;border-radius:50%;background:#ff3b30;color:#fff;font:800 12px/19px -apple-system,system-ui,sans-serif;cursor:pointer}',
+      // FILA (padrão do DSH): em baixo de cada mensagem em fila, o recibo dela
+      // e os botões "Enviar agora" / "Remover".
+      '.wg-tel-fila-acoes{display:flex;align-items:center;gap:6px;margin:3px 4px 1px}',
+      '.wg-tel-fila-acoes .wg-tel-recibo{margin:0}',
+      '.wg-tel-fila-enviar{flex:none;padding:2.5px 11px;border:0;border-radius:12px;background:#0b84fe;color:#fff;font:600 11px/1.45 -apple-system,system-ui,sans-serif;letter-spacing:-.1px;cursor:pointer}',
+      '.wg-tel-fila-enviar:hover{background:#0a78e8}',
+      '.wg-tel-fila-enviar:disabled{background:#a9c9f2;cursor:default}',
+      '.wg-tel-fila-remover{flex:none;padding:2.5px 7px;border:0;border-radius:9px;background:none;color:#8e8e93;font:500 11px/1.45 -apple-system,system-ui,sans-serif;cursor:pointer}',
+      '.wg-tel-fila-remover:hover{background:#f2f2f7}',
+      '.wg-tel-fila-remover:disabled{opacity:.5;cursor:default}',
       '.wg-tel-data{align-self:center;margin:14px 0 4px;font-size:10.5px;color:#8e8e93;text-align:center;flex:none}',
       '.wg-tel-data strong{font-weight:600}',
       '.wg-tel-sistema{align-self:center;max-width:86%;margin:8px 0 2px;font-size:10.5px;line-height:1.35;color:#8e8e93;text-align:center;flex:none}',
@@ -4234,7 +4325,7 @@ window.__ModuleLoader__.load({
       // O DSH dá `corner-shape: superellipse(1.5)` a tudo (cantos contínuos, como
       // o iOS — ótimo para a moldura e as bolhas); círculos, pílulas e as peças
       // da cauda precisam de `round` para serem círculos de verdade.
-      '.wg-tel-escrevendo span,.wg-tel-escrevendo::before,.wg-tel-escrevendo::after,.wg-tel-avatar,.wg-tel-enviar,.wg-tel-voz,.wg-tel-alerta,.wg-tel-ilha,.wg-tel-home,.wg-tel-cauda .wg-tel-bolha::before,.wg-tel-cauda .wg-tel-bolha::after{corner-shape:round}',
+      '.wg-tel-escrevendo span,.wg-tel-escrevendo::before,.wg-tel-escrevendo::after,.wg-tel-avatar,.wg-tel-enviar,.wg-tel-voz,.wg-tel-alerta,.wg-tel-fila-enviar,.wg-tel-fila-remover,.wg-tel-ilha,.wg-tel-home,.wg-tel-cauda .wg-tel-bolha::before,.wg-tel-cauda .wg-tel-bolha::after{corner-shape:round}',
       '@keyframes wg-tel-entrar{from{opacity:0;transform:translateY(22px) scale(.96)}to{opacity:1;transform:none}}',
       '@keyframes wg-tel-ponto{0%,60%,100%{opacity:.35;transform:translateY(0)}30%{opacity:.9;transform:translateY(-2px)}}',
       // Painel estreito (a sala ficaria com < ~600 px ao lado da barra): o
@@ -4977,7 +5068,10 @@ window.__ModuleLoader__.load({
             const classes = ['wg-tel-msg', `wg-tel-${l.lado}`, `wg-tel-est-${l.estado}`];
             if (l.inicioGrupo) classes.push('wg-tel-inicio');
             if (l.cauda) classes.push('wg-tel-cauda');
-            return h('div', { key: l.key, className: classes.join(' '), 'data-lado': l.lado, 'data-estado': l.estado },
+            return h('div', {
+              key: l.key, className: classes.join(' '), 'data-lado': l.lado, 'data-estado': l.estado,
+              ...(l.estado === 'fila' ? { 'data-fila-id': l.id ?? undefined, 'data-fila-alvo': l.alvo ?? undefined } : {}),
+            },
               h('div', { className: 'wg-tel-linha' },
                 l.estado === 'falhou'
                   ? h('button', {
@@ -4990,7 +5084,27 @@ window.__ModuleLoader__.load({
                   ...conteudoDaBolha(segmentos),
                   ...(l.anexos || []).map((a, i) => h('span', { key: `anexo-${i}`, className: 'wg-tel-anexo' }, `${a.tipo === 'imagem' ? '📷' : '📎'} ${a.nome}`)),
                   longo ? h('button', { type: 'button', key: 'ler', className: 'wg-tel-ler-mais', onClick: () => alternar(l.key) }, curto ? 'Ler mais' : 'Mostrar menos') : null)),
-              l.recibo ? h('div', { className: `wg-tel-recibo${l.estado === 'falhou' ? ' wg-tel-erro' : ''}`, title: l.erro || undefined }, l.recibo) : null);
+              // FILA (padrão do DSH): o recibo da mensagem e os botões dela —
+              // "Enviar agora" (entra já no turno em curso) e "Remover".
+              l.estado === 'fila'
+                ? h('div', { className: 'wg-tel-fila-acoes' },
+                  h('span', { className: 'wg-tel-recibo' }, l.recibo),
+                  l.id != null && l.alvo !== 'next-step'
+                    ? h('button', {
+                      type: 'button', className: 'wg-tel-fila-enviar', 'data-acao-fila': 'enviar-agora',
+                      disabled: !podeEscrever || !conv.aCorrer, 'aria-label': 'Enviar agora',
+                      title: conv.aCorrer ? 'Envia já para o turno em curso' : `Só enquanto ${nome} está a trabalhar`,
+                      onClick: () => { conversa.enviarAgora(l.id); },
+                    }, 'Enviar agora')
+                    : null,
+                  l.id != null
+                    ? h('button', {
+                      type: 'button', className: 'wg-tel-fila-remover', 'data-acao-fila': 'remover',
+                      disabled: !podeEscrever, 'aria-label': 'Remover da fila', title: 'Remover da fila',
+                      onClick: () => { conversa.descartar(l.id); },
+                    }, 'Remover')
+                    : null)
+                : l.recibo ? h('div', { className: `wg-tel-recibo${l.estado === 'falhou' ? ' wg-tel-erro' : ''}`, title: l.erro || undefined }, l.recibo) : null);
           }
           default:
             return null;
@@ -6748,6 +6862,7 @@ window.__ModuleLoader__.load({
     exports.__criarConversaTelefone = criarConversaTelefone;
     exports.__criarVigiaMensagens = criarVigiaMensagens;
     exports.__linhasDoGrupo = linhasDoGrupo;
+    exports.__TelefoneConversa = TelefoneConversa; // seam de testes: render sem browser
     exports.__emCelular = emCelular;
     exports.__partilhaReduz = partilhaReduz;
     exports.__PARTILHA_INICIAL = PARTILHA_INICIAL;
