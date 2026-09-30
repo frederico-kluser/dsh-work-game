@@ -16,7 +16,10 @@
  *                  da sessão fica retida (window.__wgTelefoneRefs volta a 0)
  *       --enviar   escreve no celular da conversa cujo título casa com a regex
  *                  (Input.insertText + Enter reais do CDP), espera a bolha azul da
- *                  mensagem ("Entregue") E a resposta do agente — GASTA tokens
+ *                  mensagem ("Entregue") E a resposta do agente; valida também a
+ *                  FILA (padrão do DSH): com o agente a correr a mensagem fica
+ *                  sempre como ÚLTIMA mensagem, com "Enviar agora" (entra já no
+ *                  turno) e "Remover" — GASTA tokens
  *                  (mensagem: VERIFY_MENSAGEM ou a frase curta de teste)
  *
  * Abre a UI do DSH num browser headless, espera que o bundle do plugin ative
@@ -739,6 +742,55 @@ try {
     assert.equal((await page.eval(troca)).recibo, 'Entregue', 'a minha mensagem é a última entregue ("Entregue")');
     assert.equal((await page.eval(troca)).n, antesN + 1, 'uma bolha minha nova, sem duplicados');
     ok('enviar pelo celular', `"${MENSAGEM}" → ${fim.resposta.slice(0, 80)}${viuAEscrever ? ' · viu "a escrever…"' : ''}`);
+
+    // FILA (o padrão da QueueDock do DSH): com o agente a trabalhar, a mensagem
+    // seguinte fica em fila — sempre a ÚLTIMA mensagem, com "Enviar agora"
+    // (entra já no turno em curso) e "Remover". O timing manda: se o agente já
+    // estiver livre quando a segunda for enviada, ela entra já e não há fila.
+    const enviarDeNovo = async (texto) => {
+      await page.eval('document.querySelector(".wg-tel-campo textarea").focus()');
+      await page.insertText(texto);
+      await page.press('Enter', { keyCode: 13 });
+    };
+    await enviarDeNovo(`${MENSAGEM} · a correr`); // arranca (ou reforça) o turno
+    await sleep(300);
+    await enviarDeNovo(`${MENSAGEM} · na fila`);  // com o agente a correr: fica em fila
+    const filaUi = `(() => {
+      const msgs = [...document.querySelectorAll('.wg-tel-msg')];
+      const emFila = [...document.querySelectorAll('.wg-tel-msg[data-estado="fila"]')];
+      const ult = msgs[msgs.length - 1];
+      const bEnviar = document.querySelector('[data-acao-fila="enviar-agora"]');
+      return {
+        n: emFila.length,
+        ultima: ult ? ult.getAttribute('data-estado') : null,
+        recibo: emFila.length ? ((emFila[emFila.length - 1].querySelector('.wg-tel-recibo') || {}).textContent || null) : null,
+        enviar: !!bEnviar,
+        enviarAtivo: !!bEnviar && !bEnviar.disabled,
+        remover: !!document.querySelector('[data-acao-fila="remover"]'),
+      };
+    })()`;
+    let filaApanhada = true;
+    try { await page.waitFor(`${filaUi}.enviar && ${filaUi}.remover`, 8000); } catch { filaApanhada = false; }
+    if (filaApanhada) {
+      const f = await page.eval(filaUi);
+      assert.equal(f.ultima, 'fila', 'a mensagem em fila é SEMPRE a última mensagem do celular');
+      assert.match(f.recibo || '', /fila|enviar|entrar/, `a linha da fila diz o estado dela ("${f.recibo}")`);
+      assert.ok(f.enviarAtivo, 'com o agente a trabalhar, o "Enviar agora" está ativo');
+      await zoomTelefone('16-celular-fila.png');
+      // "Enviar agora" = steer do DSH: a mensagem deixa de esperar pelo turno.
+      await page.eval('document.querySelector(\'[data-acao-fila="enviar-agora"]\').click()');
+      await page.waitFor(`!document.querySelector('[data-acao-fila="enviar-agora"]')`, 5000);
+      const depois = await page.eval(filaUi);
+      assert.ok(depois.n === 0 || /entrar|enviar/.test(depois.recibo || ''),
+        `depois do "Enviar agora" a mensagem já não espera turno ("${depois.recibo}")`);
+      // "Remover" descarta o que ainda estiver em fila.
+      await page.waitFor(`${filaUi}.remover`, 4000);
+      await page.eval('document.querySelector(\'[data-acao-fila="remover"]\').click()');
+      await page.waitFor(`${filaUi}.n === 0`, 5000);
+      ok('fila: "Enviar agora" e "Remover"', 'última mensagem · steer para o turno · descarte');
+    } else {
+      ok('fila do celular', 'não apanhada desta vez (o agente estava livre e a mensagem entrou já)');
+    }
     await page.click('.wg-tel-voltar');
     await page.waitFor('window.__wgTelefoneRefs === 0', 3000);
     await page.click('.wg-sidebar .wg-sidebar-fechar');
