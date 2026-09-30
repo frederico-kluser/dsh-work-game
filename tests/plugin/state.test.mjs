@@ -24,6 +24,15 @@ import {
   officeView,
   setPrices
 } from '../../dsh-plugin/src/state.js';
+import { VARIANTES_EVENTOS } from '../../dsh-plugin/src/variantes.js';
+
+/* As expressões durante o trabalho são SORTEADAS dentro dos pools de variantes
+ * (variantes.js): cada evento tem o seu pool e o disparo é aleatório, com
+ * anti-repetição e personalidade por pessoa. As asserções conferem POOL
+ * (nunca um valor fixo). */
+const POOL = (evento) => VARIANTES_EVENTOS[evento].pool;
+const dentroDoPool = (expressao, evento, contexto) =>
+  assert.ok(POOL(evento).includes(expressao), `${contexto}: '${expressao}' ∈ pool de ${evento} (${POOL(evento).join('·')})`);
 
 /** Estado com a sessão "s1" (workspace "m1", modelo deepseek-chat) pronta. */
 function office(extra = []) {
@@ -144,21 +153,21 @@ test('status running/idle alterna entre working e idle (emoji 📝/💤)', () =>
   assert.equal(v.expression, 'idle');
 });
 
-test('message: a cada mensagem durante o trabalho a expressão roda pela seleção curada', () => {
+test('message: durante o trabalho cada mensagem pode disparar uma variante nova (sorteio por pessoa)', () => {
   let state = office([{ type: 'status', sessionId: 's1', status: 'running' }]);
   assert.equal(personView(state, 's1').expression, 'working', 'sem mensagens ainda: a cara de trabalho base');
   const vistas = [];
-  for (let i = 0; i < 5; i += 1) {
+  for (let i = 0; i < 40; i += 1) {
     state = applyEvent(state, { type: 'message', sessionId: 's1', side: i % 2 ? 'assistant' : 'user' });
     vistas.push(personView(state, 's1').expression);
   }
-  assert.deepEqual(vistas, ['focused', 'thinking', 'searching', 'wink', 'working'],
-    'roda toda a seleção curada (working·focused·thinking·searching·wink) e volta ao início');
+  for (const v of vistas) dentroDoPool(v, 'working', 'durante o trabalho');
+  assert.ok(new Set(vistas).size >= 3, `ao longo de 40 mensagens aparecem várias caras (${[...new Set(vistas)].join('·')})`);
   // Os estados fortes mandam na cara mesmo com mensagens a chegar.
   state = applyEvent(state, { type: 'question', sessionId: 's1', id: 'q1', text: 'ok?' });
   state = applyEvent(state, { type: 'message', sessionId: 's1', side: 'assistant' });
-  assert.equal(personView(state, 's1').expression, 'waiting', 'esperar resposta manda sobre a rotação');
-  // Fora do trabalho, a rotação fica guardada mas não manda (idle).
+  assert.equal(personView(state, 's1').expression, 'waiting', 'esperar resposta manda sobre as variantes');
+  // Fora do trabalho, as variantes ficam guardadas mas não mandam (idle).
   state = applyEvent(state, { type: 'question/answered', sessionId: 's1', id: 'q1' });
   state = applyEvent(state, { type: 'status', sessionId: 's1', status: 'idle' });
   assert.equal(personView(state, 's1').expression, 'idle');
@@ -180,7 +189,7 @@ test('só turn/end completed produz done — nenhum outro evento conta como conc
   assert.equal(v.status, 'done');
   assert.equal(v.statusLabel, 'Concluído');
   assert.equal(v.emoji, '✅');
-  assert.equal(v.expression, 'success');
+  dentroDoPool(v.expression, 'success', 'turno concluído');
 });
 
 test('mapeamento completo de turn/end.kind para status e emoji', () => {
@@ -197,7 +206,7 @@ test('mapeamento completo de turn/end.kind para status e emoji', () => {
     const v = personView(state, 's1');
     assert.equal(v.status, status, `turn/end ${kind} → status`);
     assert.equal(v.emoji, emoji, `turn/end ${kind} → emoji`);
-    if (kind === 'error') assert.equal(v.expression, 'error');
+    if (kind === 'error') dentroDoPool(v.expression, 'error', 'turno em erro');
   }
 });
 
@@ -244,7 +253,7 @@ test('question mostra ❓/waiting e é persistente por cima de turn/end complete
   v = personView(state, 's1');
   assert.equal(v.question, null);
   assert.equal(v.emoji, '✅');
-  assert.equal(v.expression, 'success');
+  dentroDoPool(v.expression, 'success', 'pergunta respondida em turno concluído');
 });
 
 test('pergunta nova substitui a ativa e a antiga fica no painel', () => {
@@ -320,7 +329,7 @@ test('ferramentas: 🔧 por omissão, 🔍 para leitura/pesquisa, ❓ e ⚖️ a
   let state = office();
   state = applyEvent(state, { type: 'tool', sessionId: 's1', phase: 'call', name: 'bash' });
   assert.equal(personView(state, 's1').emoji, '🔧');
-  assert.equal(personView(state, 's1').expression, 'tool');
+  dentroDoPool(personView(state, 's1').expression, 'tool', 'ferramenta a correr');
   state = applyEvent(state, { type: 'tool', sessionId: 's1', phase: 'call', name: 'read_file' });
   assert.equal(personView(state, 's1').emoji, '🔍');
   state = applyEvent(state, { type: 'tool', sessionId: 's1', phase: 'call', name: 'search_src' });
@@ -518,7 +527,7 @@ test('anti-dupla-contagem: eventos herdados (seq < inheritedEventCount) não cus
 /* Expressão derivada e override                                       */
 /* ------------------------------------------------------------------ */
 
-test('expressão derivada completa: idle/working/tool/waiting/success/error', () => {
+test('expressão derivada completa: bases fortes + variante sorteada do pool do evento', () => {
   const casos = [
     [{ type: 'status', sessionId: 's1', status: 'running' }, 'working'],
     [{ type: 'tool', sessionId: 's1', phase: 'call', name: 'bash' }, 'tool'],
@@ -529,7 +538,9 @@ test('expressão derivada completa: idle/working/tool/waiting/success/error', ()
   for (const [evento, esperado] of casos) {
     const state = office();
     const depois = applyEvent(state, evento);
-    assert.equal(personView(depois, 's1').expression, esperado, `após ${evento.type}`);
+    // Os eventos de trabalho disparam SORTEIOS dentro do pool do estado — a
+    // asserção é de POOL; as bases ('working'/'waiting') estão nos seus pools.
+    dentroDoPool(personView(depois, 's1').expression, esperado, `após ${evento.type}`);
   }
   assert.equal(personView(office(), 's1').expression, 'idle');
   const comAprovacao = applyEvent(office(), { type: 'approval', sessionId: 's1', id: 'a1', toolName: 'bash' });

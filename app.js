@@ -4,12 +4,14 @@
  * Teams, people, outputs, tasks and context numbers are in-memory presentation data.
  * Faces are ORIGINAL Avataaars SVGs bundled in assets/ — never redrawn here.
  *
- * VISUAL IDEAS FOR EXPRESSIONS (kept as code hooks, not wired to real events):
+ * VISUAL IDEAS FOR EXPRESSIONS (code hooks; #3/#5 WIRED via the variant reator):
  *   1. STATUS → PRESET: each status maps to one Avataaars preset (see STATUS below).
  *   2. DIRECT PRESET: the "Expressões" tab sets person.expressionPreset explicitly.
- *   3. OUTPUT KIND → PRESET: tool/file lines nudge toward `tool`, results toward `success`.
+ *   3. EVENT → VARIANT: status changes/tool lines fire RANDOM draws from the
+ *      event's variant pool (dsh-plugin/src/variantes.js) — each person has
+ *      their own trigger; tool/file lines nudge toward the `tool` pool.
  *   4. CONTEXT PRESSURE → PRESET: high simulated CTX can switch to `thinking`/`focused`.
- *   5. ONE-SHOT REACTION: `success`/`error` for 1.2s, then back to the status preset.
+ *   5. ONE-SHOT REACTION: `success`/`error` variants for 1.2s, then back to the status preset.
  *   6. IDENTITY IS FIXED: only eyeType/eyebrowType/mouthType change — hair/skin/clothes never do.
  * Real integration later would replace the simulator below with DSH events.
  */
@@ -325,7 +327,13 @@ function avatarSrc(person, presetId) {
   return `assets/avatars/random/${person.avatarId}/${EXPR.basePreset || 'idle'}.svg`;
 }
 function expressionOf(person) {
-  return person.expressionPreset || (STATUS[person.status] || STATUS.available).preset || EXPR.basePreset || 'idle';
+  if (person.expressionPreset) return person.expressionPreset;
+  /* CODE HOOK #5 — reação one-shot: a variante sorteada pelo reator fica à
+     vista durante a sua duração (1,2s em erro/sucesso) e depois a cara volta
+     à do estado. */
+  const auto = person.autoExpression;
+  if (auto && Date.now() - auto.at < auto.duracao) return auto.preset;
+  return (STATUS[person.status] || STATUS.available).preset || EXPR.basePreset || 'idle';
 }
 function makePerson({ name, avatarId, teamId }) {
   /* Nome e avatar nascem juntos, do MESMO gênero; só o que faltar é sorteado. */
@@ -343,6 +351,7 @@ function makePerson({ name, avatarId, teamId }) {
     homeModuleId: null, homeSeat: null, away: false,
     status: 'available', context: 0, hasComputer: false, task: '',
     outputs: [], expressionPreset: null,
+    autoExpression: null, reator: null,
     model: pick(MODEL_IDS),
     usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     tokenSpeed: 0, contextPeak: 0, ctxWarned: false,
@@ -350,15 +359,52 @@ function makePerson({ name, avatarId, teamId }) {
     actions: [], startedAt: Date.now()
   };
 }
-function setExpression(person, presetId) {
-  /* CODE HOOK #2 — direct preset change. Identity stays untouched. */
-  person.expressionPreset = presetId || null;
-  render();
+function animarExpressao(person) {
   const node = $(`[data-character-id="${person.id}"] image`);
   /* WAAPI fora do alcance do CSS: reduced-motion E visibilidade à mão. */
   if (node && !matchMedia('(prefers-reduced-motion: reduce)').matches && pessoaNoEcrã(person)) {
     node.animate([{ opacity: 0.25 }, { opacity: 1 }], { duration: 180, easing: 'ease-out' });
   }
+}
+function setExpression(person, presetId) {
+  /* CODE HOOK #2 — direct preset change. Identity stays untouched. */
+  person.expressionPreset = presetId || null;
+  person.autoExpression = null;
+  render();
+  animarExpressao(person);
+}
+
+/* ---------- reator de variantes: expressões DURANTE o trabalho ---------- */
+/* CODE HOOKS #3/#5 — os eventos do trabalho disparam SORTEIOS de variantes da
+   biblioteca (dsh-plugin/src/variantes.js, embutido em expressions.js): pools
+   por evento (tool/error/working/success), disparo aleatório PRÓPRIO de cada
+   pessoa e anti-repetição. Uma variante de erro/sucesso é reação one-shot de
+   1,2s (HOOK #5) e depois a cara volta à do estado; as restantes ficam à
+   vista enquanto durarem. A identidade nunca muda (HOOK #6). */
+const EVENTO_DE_STATUS = {
+  available: 'idle', working: 'working', tool: 'tool',
+  waiting: 'waiting', error: 'error', done: 'success'
+};
+const DURACAO_REACAO = { error: 1200, success: 1200 }; /* one-shot (HOOK #5) */
+function reatorDe(person) {
+  if (!person.reator) {
+    const v = EXPR.variantes;
+    person.reator = v.criarReator({
+      identidade: person.avatarId,
+      semente: v.hash(String(person.id)),
+      disponiveis: (EXPR.identities[person.avatarId] || {}).presets || null
+    });
+  }
+  return person.reator;
+}
+function reagir(person, evento) {
+  const sorteado = reatorDe(person).aoEvento(evento, expressionOf(person), Date.now());
+  if (!sorteado) return;
+  person.autoExpression = { preset: sorteado, at: Date.now(), duracao: DURACAO_REACAO[evento] || 3500 };
+  render();
+  animarExpressao(person);
+  /* A reação expira sozinha: novo render para a cara voltar à do estado. */
+  setTimeout(render, person.autoExpression.duracao + 40);
 }
 
 /* ---------- layout: 3 columns × infinite rows ---------- */
@@ -425,6 +471,7 @@ function seed() {
     id, name, avatarId, avatarKind: avatarKindOf(avatarId), teamId,
     homeModuleId: null, homeSeat: null, away: false,
     status, context, hasComputer, task: '', outputs: [], expressionPreset: null,
+    autoExpression: null, reator: null,
     model: 'deepseek-chat', usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     tokenSpeed: 0, contextPeak: context, ctxWarned: context >= CONTEXT_WARN_K,
     taskQueue: [], questions: [], finish: null, actions: [], startedAt: Date.now() - 3600e3,
@@ -584,6 +631,8 @@ function emitOutput(person, text, kind = 'result') {
   if (person.outputs.length > 24) person.outputs.shift();
   logAction(person, text, kind);
   showBubble(person, text, kind);
+  /* CODE HOOK #3 — uma linha de ferramenta dispara o pool de ferramenta. */
+  if (kind === 'tool' || kind === 'file') reagir(person, 'tool');
 }
 function kindMatchesStatus(kind, status) {
   if (status === 'tool') return kind === 'tool' || kind === 'file';
@@ -600,7 +649,9 @@ function activityTick() {
     if (Math.random() < 0.42) {
       const next = pick(['working', 'tool', 'working', 'done', 'working', 'error']);
       person.status = next;
-      /* CODE HOOK #3 — output kind nudges the expression, status decides the base. */
+      /* CODE HOOK #3 — a mudança de estado dispara o pool de expressões desse
+         estado (erro/sucesso em one-shot de 1,2s — HOOK #5). */
+      reagir(person, EVENTO_DE_STATUS[next] || 'working');
       render();
     }
     const pool = DATA.outputs.filter((o) => kindMatchesStatus(o.kind, person.status));
@@ -1396,9 +1447,11 @@ function handleAction(el) {
       if (!found) break;
       found.person.status = d.status;
       found.person.expressionPreset = null;
+      found.person.autoExpression = null;
       if (d.status !== 'available') { found.person.hasComputer = true; if (!found.person.context) found.person.context = rand(12, 30); }
       const label = (STATUS[d.status] || STATUS.available).label.toLowerCase();
       emitOutput(found.person, `estado: ${label}`, d.status === 'error' ? 'message' : 'result');
+      reagir(found.person, EVENTO_DE_STATUS[d.status] || 'working');
       render();
       break;
     }

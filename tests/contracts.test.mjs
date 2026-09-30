@@ -218,6 +218,36 @@ test('todos os mouthType dos presets pertencem ao enum real do Avataaars', () =>
   );
 });
 
+test('DSH_EXPRESSIONS.variantes: o reator cobre os 14 presets e respeita a identidade', () => {
+  const v = EXPR?.variantes;
+  assert.ok(v && typeof v.criarReator === 'function' && typeof v.sortear === 'function'
+    && typeof v.pool === 'function' && v.eventos && typeof v.hash === 'function',
+  'window.DSH_EXPRESSIONS.variantes expõe eventos/hash/pool/sortear/criarReator');
+  // As variantes TODAS da biblioteca podem acontecer durante o trabalho.
+  const cobertos = new Set(Object.values(v.eventos).flatMap((ev) => ev.pool));
+  for (const p of presets) assert.ok(cobertos.has(p.id), `preset ${p.id} pertence a pelo menos um pool de evento`);
+  // Identidades aleatórias (só 4 presets): o evento cai no base que a identidade tem.
+  // (Espalhar com [...]: os arrays do sandbox vm têm outro protótipo que o
+  // deepStrictEqual do host reprova — o padrão já usado nos testes acima.)
+  const reduzidos = ['idle', 'working', 'success', 'error'];
+  assert.deepEqual([...v.pool('tool', reduzidos)], ['working'], 'sem ferramenta: o base do evento');
+  assert.deepEqual([...v.pool('error', reduzidos)], ['error']);
+  assert.deepEqual([...v.pool('success', reduzidos)], ['success']);
+  assert.deepEqual([...v.pool('waiting', reduzidos)], [], 'sem base: nada a sortear');
+  // Nomeadas (os 14): o pool inteiro.
+  assert.deepEqual([...v.pool('tool', null)], [...v.eventos.tool.pool]);
+  // O reator sorteia dentro do pool, com anti-repetição (disparo determinístico
+  // no teste; o disparo real é aleatório — ver tests/plugin/variantes.test.mjs).
+  const r = v.criarReator({ semente: 11, probabilidade: 1 });
+  let atual = 'working';
+  for (let i = 0; i < 20; i += 1) {
+    const p = r.aoEvento('working', atual, i);
+    assert.ok(v.eventos.working.pool.includes(p), `sorteio dentro do pool (${p})`);
+    assert.notEqual(p, atual, 'nunca repete a cara atual');
+    atual = p;
+  }
+});
+
 test('namedIdentityIds é exatamente [rui, bia, lia, pesquisa, codigo, testes, alex, maya]', () => {
   const obtidos = Array.isArray(EXPR?.namedIdentityIds) ? [...EXPR.namedIdentityIds] : null;
   assert.deepEqual(

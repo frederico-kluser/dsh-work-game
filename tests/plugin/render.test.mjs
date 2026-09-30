@@ -969,9 +969,9 @@ test('REGRA DE OURO: cada corpo embutido é byte a byte o SVG da demo (expressio
   for (const m of bloco.matchAll(/\n\s{6}(\w+): \{\n((?:\s{8}\w+: \{ vb: '[^']+', corpo: `[^`]*` \},\n)+)/g)) {
     for (const e of m[2].matchAll(/\s{8}(\w+): \{ vb: '([^']+)', corpo: `([^`]*)` \}/g)) {
       // O preset 'sleeping' (olhos fechados, quem está Disponível) vem de
-      // assets/avatars/sleeping/<id>.svg; os restantes vêm de
-      // assets/avatars/expressions/<id>/<preset>.svg (6 de estado da demo +
-      // focused/thinking/searching/wink da seleção curada por mensagem).
+      // assets/avatars/sleeping/<id>.svg; os restantes 14 (os presets TODOS da
+      // biblioteca, para o reator de variantes disparar qualquer cara) vêm de
+      // assets/avatars/expressions/<id>/<preset>.svg.
       const ficheiro = e[1] === 'sleeping'
         ? new URL(`assets/avatars/sleeping/${m[1]}.svg`, RAIZ)
         : new URL(`assets/avatars/expressions/${m[1]}/${e[1]}.svg`, RAIZ);
@@ -983,7 +983,7 @@ test('REGRA DE OURO: cada corpo embutido é byte a byte o SVG da demo (expressio
     }
   }
   assert.equal(aDormir.length, 8, `todas as identidades dormem: ${aDormir.join(', ')}`);
-  assert.equal(conferidos, 88, '8 identidades × 11 presets embutidos (6 de estado + sleeping + 4 da seleção curada)');
+  assert.equal(conferidos, 120, '8 identidades × 15 presets embutidos (os 14 da biblioteca + sleeping)');
 });
 
 test('REGRA DE OURO: o mobiliário embutido é o furniture.svg da demo (ids com prefixo wg-)', () => {
@@ -1558,31 +1558,71 @@ test('câmara: a zona à vista segue a posição REAL do celular e da barra late
   assert.ok(!BUNDLE.includes('tel.offsetLeft - 24'), 'a suposição antiga saiu');
 });
 
-/* ---------- expressão por mensagem (seleção curada) + vigia ---------- */
+/* ---------- expressões DURANTE o trabalho (reator de variantes) + vigia ---------- */
 
-test('expressão por mensagem: a seleção curada roda a cada mensagem e os estados fortes mandam', () => {
-  assert.deepEqual(B.__SELECAO_CURADA, ['working', 'focused', 'thinking', 'searching', 'wink'],
-    'a curadoria: cinco caras de trabalho da biblioteca Avataaars');
+test('variantes durante o trabalho: cada evento sorteia a SUA expressão e os estados fortes mandam', () => {
+  // Os pools cobrem os 14 presets da biblioteca — qualquer variante pode
+  // acontecer durante o trabalho (variantes.js / assets/AVATARS-EXPRESSIONS.md).
+  assert.deepEqual(Object.keys(B.__VARIANTES_EVENTOS).sort(), ['error', 'idle', 'success', 'tool', 'waiting', 'working']);
+  const todos = new Set(Object.values(B.__VARIANTES_EVENTOS).flatMap((ev) => ev.pool));
+  assert.deepEqual([...todos].sort(),
+    ['approval', 'celebrating', 'disbelief', 'error', 'focused', 'idle', 'searching', 'success',
+      'surprised', 'thinking', 'tool', 'waiting', 'wink', 'working']);
   let e = escritorio([{ type: 'session/added', sessionId: 'a' }, { type: 'status', sessionId: 'a', status: 'running' }]);
   const cara = () => B.__presetDe(e.people.get('a'));
-  assert.equal(cara(), 'working', 'sem mensagens ainda: a cara de trabalho base');
+  assert.equal(cara(), 'working', 'sem eventos de expressão ainda: a cara de trabalho base');
+  // Disparo determinístico para o teste (probabilidade 1, semente fixa): o
+  // sorteio real usa a semente da pessoa + o carimbo do evento (ver variantes.js).
+  e.people.get('a').reator = B.__criarReatorVariante({ semente: 7, probabilidade: 1 });
   const vistas = [];
-  for (let i = 0; i < 5; i += 1) {
-    e = B.__applyEvent(e, { type: 'message', sessionId: 'a', side: i % 2 ? 'assistant' : 'user' });
+  for (let i = 0; i < 8; i += 1) {
+    e = B.__applyEvent(e, { type: 'message', sessionId: 'a', side: i % 2 ? 'assistant' : 'user', at: 1000 + i });
     vistas.push(cara());
   }
-  assert.deepEqual(vistas, ['focused', 'thinking', 'searching', 'wink', 'working'],
-    'A CADA mensagem a cara muda — e a seleção roda inteira e volta ao início');
-  // Os estados fortes mandam por cima da rotação…
+  for (const v of vistas) {
+    assert.ok(['working', 'focused', 'thinking', 'searching', 'wink'].includes(v), `variante de trabalho (${v})`);
+  }
+  assert.ok(new Set(vistas).size > 1, 'as mensagens mudam de cara — o disparo é aleatório, nunca uma rotação fixa');
+  // Os estados fortes mandam por cima das variantes…
   e = B.__applyEvent(e, { type: 'question', sessionId: 'a', id: 'q1', text: 'ok?' });
   assert.equal(cara(), 'waiting', 'quem pergunta espera');
   e = B.__applyEvent(e, { type: 'question/answered', sessionId: 'a', id: 'q1' });
-  assert.equal(cara(), 'working', 'de volta à rotação, no índice onde parou');
-  e = B.__applyEvent(e, { type: 'tool', sessionId: 'a', phase: 'call', name: 'bash' });
-  assert.equal(cara(), 'tool', 'com ferramenta a correr');
-  e = B.__applyEvent(e, { type: 'tool', sessionId: 'a', phase: 'result', name: 'bash', ok: true });
-  e = B.__applyEvent(e, { type: 'status', sessionId: 'a', status: 'idle' });
+  assert.ok(['working', 'focused', 'thinking', 'searching', 'wink'].includes(cara()), 'de volta às variantes de trabalho');
+  // Executar uma ferramenta → variante do pool de ferramenta.
+  e = B.__applyEvent(e, { type: 'tool', sessionId: 'a', phase: 'call', name: 'bash', at: 2000 });
+  assert.ok(['tool', 'searching', 'focused', 'thinking'].includes(cara()), `com ferramenta: pool de ferramenta (${cara()})`);
+  // Erro → variante do pool de erro.
+  e = B.__applyEvent(e, { type: 'tool', sessionId: 'a', phase: 'result', name: 'bash', ok: false, at: 2100 });
+  assert.ok(['error', 'surprised', 'disbelief'].includes(cara()), `erro: pool de erro (${cara()})`);
+  // Turno concluído → variante do pool de sucesso.
+  e = B.__applyEvent(e, { type: 'status', sessionId: 'a', status: 'running', at: 3000 });
+  e = B.__applyEvent(e, { type: 'turn/end', sessionId: 'a', kind: 'completed', at: 3100 });
+  assert.ok(['success', 'celebrating', 'approval', 'wink'].includes(cara()), `concluído: pool de sucesso (${cara()})`);
+  // Disponível dorme sempre.
+  e = B.__applyEvent(e, { type: 'status', sessionId: 'a', status: 'idle', at: 4000 });
   assert.equal(cara(), 'sleeping', '…e quem está Disponível dorme');
+});
+
+test('variantes: o disparo é DE CADA PESSOA — sorteios independentes e anti-repetição', () => {
+  const um = B.__criarReatorVariante({ semente: 7, probabilidade: 1 });
+  const outro = B.__criarReatorVariante({ semente: 99, probabilidade: 1 });
+  const sequencia = (reator) => {
+    let atual = 'working';
+    const saida = [];
+    for (let i = 0; i < 12; i += 1) {
+      const p = reator.aoEvento('working', atual, 500 + i);
+      if (p) { saida.push(p); atual = p; }
+    }
+    return saida;
+  };
+  const a = sequencia(um);
+  const b = sequencia(outro);
+  assert.ok(a.length > 3 && b.length > 3, 'com probabilidade 1 os eventos todos disparam');
+  assert.notDeepEqual(a, b, 'pessoas diferentes, sequências diferentes (cada um tem a sua)');
+  for (let i = 1; i < a.length; i += 1) assert.notEqual(a[i], a[i - 1], 'nunca repete a cara atual');
+  // O disparo é aleatório: com probabilidade 0 nada acontece.
+  const parado = B.__criarReatorVariante({ semente: 7, probabilidade: 0 });
+  assert.equal(parado.aoEvento('error', 'working', 1), null, 'sem disparo, sem troca');
 });
 
 test('vigia de mensagens: conta user/assistant message das conversas a correr e liberta ao parar', async () => {

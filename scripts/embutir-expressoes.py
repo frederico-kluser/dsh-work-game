@@ -16,7 +16,10 @@ Uso:
 
 Sem `--presets` embebe os presets canónicos (nesta ordem):
   idle, working, focused, tool, searching, thinking, waiting, error,
-  success, sleeping, wink
+  success, sleeping, wink, approval, celebrating, surprised, disbelief
+
+  (= os 14 presets da biblioteca + sleeping; as 14 variantes TODAS ficam
+  disponíveis no Modo jogo para o reator de variantes disparar)
 
 Regras:
   - `sleeping` vem de `assets/avatars/sleeping/<id>.svg`; os restantes de
@@ -41,6 +44,7 @@ IDENTIDADES = ['rui', 'bia', 'lia', 'pesquisa', 'codigo', 'testes', 'alex', 'may
 PRESETS_CANONICOS = [
     'idle', 'working', 'focused', 'tool', 'searching', 'thinking',
     'waiting', 'error', 'success', 'sleeping', 'wink',
+    'approval', 'celebrating', 'surprised', 'disbelief',
 ]
 
 INICIO_BLOCO = 'const EXPR_AVATARS = {'

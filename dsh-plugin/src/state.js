@@ -3,7 +3,8 @@
  *
  * Não vê o DSH: recebe apenas eventos normalizados {type, ...} (docs/contratos-plugin.md,
  * secção 1) e devolve SEMPRE um estado NOVO — nunca muta o estado de entrada e não usa
- * relógio, timers nem aleatoriedade (determinístico e testável).
+ * relógio, timers nem Math.random (determinístico e testável: os sorteios de
+ * expressão são o PRNG puro de variantes.js, com o estado uint32 na própria pessoa).
  *
  * API exportada (contrato, secção 2, nada mais):
  *   createOfficeState()          -> estado inicial vazio
@@ -73,24 +74,44 @@ function deriveEmoji(person) {
   }
 }
 
-/* SELEÇÃO CURADA de expressões (biblioteca Avataaars): as caras que se trocam
- * A CADA MENSAGEM durante o trabalho — o índice avança no evento `message` e a
- * mesma pessoa não fica sempre com a mesma cara. Os estados fortes (espera,
- * erro, ferramenta, sucesso) continuam a mandar; isto só manda enquanto se
- * trabalha. Curação nossa (só caras de trabalho), igual à do Modo jogo. */
-const SELECAO_CURADA = ['working', 'focused', 'thinking', 'searching', 'wink'];
+/* VARIANTES de expressão durante o trabalho (biblioteca Avataaars): eventos
+ * reais (mensagem, ferramenta, erro, sucesso) disparam SORTEIOS de variantes
+ * dentro de pools semânticos — cada variante tem o(s) seu(s) disparo(s) e cada
+ * pessoa tem O SEU (probabilidade própria + anti-repetição). O sorteio é o
+ * PRNG PURO de variantes.js: o estado (uint32) vive na pessoa, clona-se com o
+ * resto e a sequência é determinística por pessoa — sem relógio nem
+ * Math.random. Os estados fortes (espera, erro, ferramenta, sucesso) continuam
+ * a mandar; as variantes mandam enquanto se trabalha. */
+import { varianteHash, varianteSorteio } from './variantes.js';
 
-/* Expressão Avataaars derivada — vocabulário fechado idle/working/tool/waiting/
- * success/error — com override vencedor quando definido (ex.: 'approval') e a
- * rotação da seleção curada a mandar enquanto se trabalha. */
+/* Sorteia a variante de UM evento para uma pessoa e guarda o novo estado do
+ * PRNG. Devolve o preset sorteado ou null (o disparo não aconteceu). */
+function drawVariante(person, evento, sal) {
+  const r = varianteSorteio({
+    estado: person.varianteEstado,
+    evento,
+    atual: deriveExpression(person),
+    semente: person.varianteSemente,
+    sal: sal == null ? null : sal,
+    disponiveis: null,
+    probabilidade: null
+  });
+  person.varianteEstado = r.estado;
+  return r.preset;
+}
+
+/* Expressão Avataaars derivada — override vencedor quando definido (ex.:
+ * 'approval'), estados fortes com a SUA variante sorteada (erro pode ser
+ * 'surprised'/'disbelief', sucesso 'celebrating'/'approval'…) e, enquanto se
+ * trabalha, a variante sorteada a cada mensagem. */
 function deriveExpression(person) {
   if (person.expressionOverride) return person.expressionOverride;
   if (person.question) return 'waiting';
   if (person.approvals.length > 0) return 'waiting';
-  if (person.status === 'error') return 'error';
-  if (person.lastTool && person.lastTool.phase === 'call') return 'tool';
-  if (person.status === 'done') return 'success';
-  if (person.status === 'working') return SELECAO_CURADA[person.expressionIndex ?? 0] ?? 'working';
+  if (person.status === 'error') return person.varianteErro || 'error';
+  if (person.lastTool && person.lastTool.phase === 'call') return person.varianteFerramenta || 'tool';
+  if (person.status === 'done') return person.varianteSucesso || 'success';
+  if (person.status === 'working') return person.varianteTrabalho || 'working';
   return 'idle';
 }
 
@@ -125,7 +146,14 @@ function createPerson(sessionId, event) {
     outputs: [],
     /* campos internos (não apresentar diretamente) */
     expressionOverride: null,
-    expressionIndex: 0, /* rotação na SELECAO_CURADA, avança a cada `message` */
+    /* Reator de variantes: PRNG determinístico por pessoa (estado uint32
+     * clonável) + a personalidade/propensão DELE (semente do id). */
+    varianteSemente: varianteHash('pessoa|' + sessionId),
+    varianteEstado: varianteHash('estado|' + sessionId) || 1,
+    varianteTrabalho: null,
+    varianteFerramenta: null,
+    varianteErro: null,
+    varianteSucesso: null,
     retrying: false,
     compacting: false,
     lastTool: null,
@@ -199,6 +227,17 @@ export function applyEvent(state, event) {
       break;
     }
     case 'turn/end': {
+      /* O fim do turno dispara a variante de 'success' (completed) ou de
+       * 'error' (error/blocked) ANTES de mudar o estado — a anti-repetição
+       * compara com a cara que estava visível. */
+      const fim = TURN_END_STATUS[event.kind];
+      if (fim === 'done') {
+        const p = drawVariante(person, 'success', event.at);
+        if (p) person.varianteSucesso = p;
+      } else if (fim === 'error') {
+        const p = drawVariante(person, 'error', event.at);
+        if (p) person.varianteErro = p;
+      }
       if (Object.hasOwn(TURN_END_STATUS, event.kind)) person.status = TURN_END_STATUS[event.kind];
       person.retrying = false;
       person.compacting = false;
@@ -206,16 +245,28 @@ export function applyEvent(state, event) {
       break;
     }
     case 'message': {
-      /* A cada mensagem durante o trabalho, a cara roda para a próxima da
-       * seleção curada (side: 'user' | 'assistant'). Os estados fortes mandam
-       * na expressão — isto só manda enquanto se trabalha (deriveExpression). */
-      person.expressionIndex = ((person.expressionIndex ?? 0) + 1) % SELECAO_CURADA.length;
+      /* A cada mensagem durante o trabalho PODE disparar uma variante nova do
+       * pool de trabalho (o disparo é aleatório e de cada pessoa; nunca repete
+       * a cara atual). Os estados fortes mandam na expressão — isto só manda
+       * enquanto se trabalha (deriveExpression). */
+      const p = drawVariante(person, 'working', event.at);
+      if (p) person.varianteTrabalho = p;
       break;
     }
     case 'tool': {
+      /* Executar uma ferramenta dispara a variante do pool de ferramenta;
+       * um resultado com erro dispara a do pool de erro. */
+      if (event.phase === 'call') {
+        const p = drawVariante(person, 'tool', event.at);
+        if (p) person.varianteFerramenta = p;
+      }
       person.lastTool = { name: event.name ?? 'desconhecida', phase: event.phase, ok: event.ok ?? true };
       if (event.phase === 'result') {
-        if (event.ok === false) person.status = 'error'; /* ⚠️ também por tool/result */
+        if (event.ok === false) {
+          const p = drawVariante(person, 'error', event.at);
+          if (p) person.varianteErro = p;
+          person.status = 'error'; /* ⚠️ também por tool/result */
+        }
         pushOutput(person, { kind: 'tool', text: person.lastTool.name, ok: event.ok !== false });
       }
       break;

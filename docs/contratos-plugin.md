@@ -58,7 +58,7 @@ O `state.js` nunca vê o DSH: recebe apenas objetos `{type, ...}`:
 | `model` | `sessionId, provider, model, contextWindow?` | `request/header` + `request/context` |
 | `retry` | `sessionId` | `llm/retry-started` |
 | `compaction` | `sessionId, phase: 'start'\|'end'` | `compaction/*` |
-| `message` | `sessionId, side: 'user'\|'assistant'` | `user/message`, `assistant/message` (log da sessão) — sem conteúdo; cada uma troca a cara da pessoa (seleção curada) |
+| `message` | `sessionId, side: 'user'\|'assistant'` | `user/message`, `assistant/message` (log da sessão) — sem conteúdo; cada uma pode disparar uma expressão nova da pessoa (reator de variantes) |
 
 ## 2. `dsh-plugin/src/state.js` — API
 
@@ -79,9 +79,13 @@ Regras (verificados no DSH):
 - CTX: `used = projectedTokens ?? pressureTokens`, `window = contextWindow`; sem ambos → `null` (UI mostra `CTX —`).
 - Custo: deltas dos 4 buckets × tabela de preços (state aceita `setPrices(map)`); sem preço → `null` ("custo indisponível").
 - Agregados pai/filho: **filtrar `seq >= inheritedEventCount`** quando o evento o trouxer (anti-dupla-contagem).
-- Expressão Avataaars derivada: idle/working/tool/waiting/success/error (+ override); a
-  trabalhar, a rotação da **seleção curada** (`working · focused · thinking · searching ·
-  wink`) avança com cada evento `message` — durante o trabalho, a cara muda a cada mensagem.
+- Expressão Avataaars derivada: bases `idle/working/tool/waiting/success/error` (+ override),
+  cada uma com a **variante sorteada** do seu pool (ferramenta → `tool·searching·focused·thinking`;
+  erro → `error·surprised·disbelief`; trabalho → `working·focused·thinking·searching·wink`;
+  sucesso → `success·celebrating·approval·wink`). Os eventos do trabalho (`message`, `tool`,
+  `turn/end`) disparam **sorteios** nesses pools — disparo aleatório, probabilidade e
+  personalidade **próprias de cada pessoa**, com anti-repetição (reator de variantes,
+  `dsh-plugin/src/variantes.js`).
 
 ## 3. `dsh-plugin/src/adapter.js` — API
 
@@ -97,7 +101,7 @@ Mapeamento (fonte: fact-check 2026-09-27):
 - `TokenUsage` acumulado → converter em `usage` por delta (guardar snapshot anterior por sessão).
 - `request/header` (`EpochHeader.config`) + `request/context` → `model` (com `contextWindow`).
 - `user/message` e `assistant/message` (log da sessão) → `message` com `side` — sem conteúdo;
-  é o que faz a cara da pessoa trocar a cada mensagem (seleção curada).
+  é um dos gatilhos do reator de variantes (pode disparar uma expressão nova a cada mensagem).
 - Sem sessão local (`subagent/*​.local === false`) → mostrar `telemetria indisponível`, nunca inventar.
 
 ## 4. `dwg-cli` — comandos (todos com `--json` e saída em `logs/`)
@@ -547,12 +551,19 @@ grupoId, origem }` com `abrirGrupos()`, `abrirGrupo(wsId, membros)`, `voltarTele
    as referências vivas (diagnóstico). Sem canal ou sem `eventSource`, a vigia fica quieta:
    nunca se inventa uma mensagem.
 
-A rotação da **seleção curada** (`working · focused · thinking · searching · wink`, em
-`state.js` e no `client.js`) avança com cada `message`; `presetDe(p)` mostra-a enquanto a
-pessoa trabalha e deixa os estados fortes (dormir, ferramenta, espera, erro, sucesso)
-mandarem. Os corpos das expressões embutem-se a partir de `assets/avatars/` com
-`python3 scripts/embutir-expressoes.py --embutir` (idempotente; `--verificar` confere — o
-teste REGRA DE OURO de `tests/plugin/render.test.mjs` garante a igualdade byte a byte).
+As expressões **acontecem durante o trabalho**: o reator de variantes (fonte única
+`dsh-plugin/src/variantes.js` — `state.js` importa-a; `client.js` e `expressions.js` levam
+cópia embutida regenerada por `python3 scripts/embutir-variantes.py --embutir`, com paridade
+imposta por `tests/plugin/variantes.test.mjs`) sorteia expressões por evento: `message` →
+pool de trabalho, `tool` (call) → pool de ferramenta, `tool` (result com erro) e turnos em
+erro → pool de erro, `turn/end` completed → pool de sucesso. O disparo é aleatório e
+**próprio de cada pessoa** (probabilidade × personalidade, derivadas do id), com
+anti-repetição; `presetDe(p)` mostra a variante sorteada do estado e os estados fortes
+(dormir, ferramenta, espera, erro, sucesso) continuam a mandar. Os corpos das expressões
+embutem-se a partir de `assets/avatars/` com `python3 scripts/embutir-expressoes.py --embutir`
+(8 identidades × 15 presets = 120 — os 14 da biblioteca + `sleeping`; idempotente;
+`--verificar` confere — o teste REGRA DE OURO de `tests/plugin/render.test.mjs` garante a
+igualdade byte a byte).
 
 ### Paragem em cascata — "Parar pessoa e equipa" (a feature que o DSH não tem)
 

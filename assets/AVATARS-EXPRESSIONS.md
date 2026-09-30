@@ -57,6 +57,37 @@ Cada preset troca somente `eyeType`/`eyebrowType`/`mouthType`; a identidade é f
 
 Observação de deduplicação: **`approval` e `wink` compartilham o mesmo triple** (`Wink`/`RaisedExcited`/`Smile`) — a aprovação é dada com uma piscada. O conteúdo SVG é o mesmo arquivo copiado, sem novo download. São **13 triples distintos** para 14 presets.
 
+## Variantes em ação — o reator de expressões durante o trabalho
+
+Os 14 presets **acontecem durante o trabalho**: eventos reais disparam **sorteios** de
+variantes dentro de pools semânticos (reator em [`dsh-plugin/src/variantes.js`](../dsh-plugin/src/variantes.js),
+fonte única; `expressions.js` e `dsh-plugin/src/client.js` levam cópia embutida regenerada por
+`python3 scripts/embutir-variantes.py --embutir`, com paridade imposta por
+`tests/plugin/variantes.test.mjs`). Cada variante tem o(s) seu(s) **disparo(s)** — o pool de
+eventos a que pertence — e **cada pessoa tem o seu disparo aleatório**: probabilidade própria
+(evento × pessoa) e sorteio com **anti-repetição** (nunca repete a cara atual).
+
+| Evento (disparo) | Pool de variantes | `base` (fallback) | Prob. base |
+| --- | --- | --- | --- |
+| `tool` (executar ferramenta) | `tool · searching · focused · thinking` | `working` | 0,85 |
+| `error` (erro de ferramenta/turno) | `error · surprised · disbelief` | `error` | 1,0 |
+| `working` (cada mensagem) | `working · focused · thinking · searching · wink` | `working` | 0,5 |
+| `success` (turno concluído) | `success · celebrating · approval · wink` | `success` | 0,9 |
+| `waiting` (pergunta/aprovação) | `waiting` | `waiting` | 0,7 |
+| `idle` (repouso) | `idle` | `idle` | 1,0 |
+
+As 14 variantes da biblioteca pertencem pelo menos a um pool — **tudo o que a biblioteca
+desenha pode aparecer**. Identidades com presets reduzidos (as 12 aleatórias, 4 presets)
+caem no `base` do evento que tiverem. O sorteio é um PRNG puro (xorshift32, estado uint32):
+determinístico por pessoa (`semente` derivada do id) com entropia real do evento (`sal`, o
+seu carimbo de tempo) — testável sem `Math.random`, e cada pessoa tem sequência própria.
+A personalidade pesa as variantes (pesos estáveis 1–3 por pessoa × variante).
+
+Onde está ligado: **demo** (`app.js`, hooks #3/#5 — mudanças de estado e linhas de
+ferramenta disparam sorteios; erro/sucesso são reações one-shot de 1,2 s), **Modo jogo**
+(`dsh-plugin/src/client.js` — eventos `message`/`tool`/`turn/end` do DSH) e **estado puro**
+(`dsh-plugin/src/state.js` — mesmos eventos, sorteio determinístico).
+
 ## Identidades nomeadas (8) — opções fixas
 
 Opções idênticas às queries de [AVATARS-SOURCES.md](AVATARS-SOURCES.md); só olhos/sobrancelha/boca mudam entre os 14 presets de cada pessoa.
@@ -134,6 +165,16 @@ identities        // mapa id -> config: nomeadas = só referência (avatar base 
 basePreset        // 'idle'
 resolve(identityId, presetId) // -> caminho local do SVG; se faltar o preset, cai para 'idle';
                   // se ainda faltar, 'assets/avatars/<identityId>.svg' (só nomeadas); senão null
+variantes         // reator de expressões DURANTE o trabalho (dsh-plugin/src/variantes.js,
+                  // embutido neste ficheiro — cópia da fonte, regenerável com
+                  // scripts/embutir-variantes.py; ver "Variantes em ação" acima):
+                  //   eventos    map 'tool|error|working|success|waiting|idle' ->
+                  //              { pool: [presets], base, prob }
+                  //   pool(evento, disponiveis) -> pool efetivo da identidade
+                  //   sortear({estado,evento,atual,semente,sal,disponiveis,probabilidade})
+                  //              -> { estado, preset|null } (sorteio PURO)
+                  //   criarReator({identidade,semente,estado,disponiveis,probabilidade})
+                  //              -> { fator, probabilidade, aoEvento(evento, atual, sal) }
 ```
 
 Exemplos de `resolve`: `resolve("maya","disbelief")` → `assets/avatars/expressions/maya/disbelief.svg`; `resolve("r07","celebrating")` (preset sem asset para aleatórias) → `assets/avatars/random/r07/idle.svg`; `resolve("desconhecida","idle")` → `null`.
@@ -145,7 +186,7 @@ Exemplos de `resolve`: `resolve("maya","disbelief")` → `assets/avatars/express
   - `wink.svg` de cada pessoa = cópia do `approval.svg` (mesmo triple) → 8 cópias;
   - 12 identidades aleatórias × 4 presets = **48 downloads** — os 48 ficheiros foram **re-gerados em 2026-09-29** (piscina nova com género coerente; ver "Identidades aleatórias (12)"), substituindo os do sorteio de 2026-09-27.
 - **160 SVGs finais** (112 nomeados + 48 aleatórios) + `expressions.js`.
-- **Tamanho total em disco**: **2.195.654 bytes** para os 160 SVGs (2.09 MiB) — `expressions/` e `random/` — e 11.804 bytes para `expressions.js`; total **2.207.458 bytes** (~2.11 MiB).
+- **Tamanho total em disco**: **2.195.654 bytes** para os 160 SVGs (2.09 MiB) — `expressions/` e `random/` — e 20.805 bytes para `expressions.js`; total **2.216.459 bytes** (~2.11 MiB).
 
 ## Validações executadas
 
@@ -324,9 +365,9 @@ Hashes SHA-256 em minúsculas, dos bytes exatos em disco.
 | `assets/avatars/random/r12/idle.svg` | 10965 | `8a005b7ced6da5decfef08b3f6a953123984c0b248f530e904834fd76f0f3baa` |
 | `assets/avatars/random/r12/success.svg` | 11692 | `e65198f121047bde34b6a2f96e481b1c1709b0e9149dacc18265c97b0d4d9ba2` |
 | `assets/avatars/random/r12/working.svg` | 11240 | `a11c6bcbb0a76f7f540f6c419f2a086620de48d5d0cd32a3eadb4640e79a99cc` |
-| `expressions.js` | 11804 | `741c10ad696f3d2f0d8f7ee16493bb61746cc12c1c8eddee9bc985ea8bdd55f6` |
+| `expressions.js` | 20805 | `fa98931e63d27efd388b93764f5be529fddc9c08d2136c57920a15d7c9c282d9` |
 
-Hash combinado (SHA-256 sobre `caminho\0conteúdo` de todos os 161 arquivos acima, em ordem de caminho): `16b99513d91f2fcb4415cea21c3810a68ced8db247c31e63a13138fe7811e13a`.
+Hash combinado (SHA-256 sobre `caminho\0conteúdo` de todos os 161 arquivos acima, em ordem de caminho): `26e3cc05177396e0c3cd27d07072a2191e8892d396a6b9daf56b94ef21ed1975`.
 
 Os IDs internos (`react-path-*`) gerados pelo renderer podem variar em downloads futuros; estes hashes identificam os arquivos locais entregues.
 
