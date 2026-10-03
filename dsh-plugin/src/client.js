@@ -6210,6 +6210,7 @@ function mascararChave(chave) {
       '.wg-tel-contacto-skill-desc{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font:400 11px/1.45 -apple-system,system-ui,sans-serif;color:#8e8e93}',
       '.wg-tel-contacto-vazio{flex:none;margin:6px 0 0;font-size:11px;color:#8e8e93}',
       '.wg-tel-contacto-modelo{flex:none;width:100%;height:34px;padding:6px 11px;border:1px solid #d1d1d6;border-radius:11px;background:#fff;color:#000;font:inherit;font-size:14px}',
+      '.wg-tel-contacto-esforco{flex:none;width:100%;height:34px;padding:6px 11px;border:1px solid #d1d1d6;border-radius:11px;background:#fff;color:#000;font:inherit;font-size:14px}',
       '.wg-tel-contacto-final{flex:none;max-height:120px;margin:0;padding:9px 11px;overflow-y:auto;border:1px solid #e5e5ea;border-radius:11px;background:#f7f7fa;color:#3c3c43;font:400 11.5px/1.5 -apple-system,system-ui,sans-serif;white-space:pre-wrap;overflow-wrap:anywhere}',
       '.wg-tel-contacto-nota{flex:none;margin:8px 0 0;font-size:10.5px;line-height:1.5;color:#8e8e93}',
       // Modo telemóvel (um telemóvel a rodar o site): o celular É o ecrã
@@ -6230,7 +6231,7 @@ function mascararChave(chave) {
       // O DSH dá `corner-shape: superellipse(1.5)` a tudo (cantos contínuos, como
       // o iOS — ótimo para a moldura e as bolhas); círculos, pílulas e as peças
       // da cauda precisam de `round` para serem círculos de verdade.
-      '.wg-tel-escrevendo span,.wg-tel-escrevendo::before,.wg-tel-escrevendo::after,.wg-tel-avatar,.wg-tel-enviar,.wg-tel-voz,.wg-tel-alerta,.wg-tel-fila-enviar,.wg-tel-fila-remover,.wg-tel-ilha,.wg-tel-home,.wg-tel-cauda .wg-tel-bolha::before,.wg-tel-cauda .wg-tel-bolha::after,.wg-tel-voz-barras span,.wg-tel-voz-estatico,.wg-tel-voz-estatico i,.wg-tel-voz-repetir,.wg-tel-config-chave,.wg-tel-config-idioma,.wg-tel-config-guardar,.wg-tel-config-limpar,.wg-tel-config-icone,.wg-tel-contacto-boneco,.wg-tel-contacto-trocar,.wg-tel-contacto-nome,.wg-tel-contacto-prompt,.wg-tel-contacto-skills,.wg-tel-contacto-modelo,.wg-tel-contacto-final{corner-shape:round}',
+      '.wg-tel-escrevendo span,.wg-tel-escrevendo::before,.wg-tel-escrevendo::after,.wg-tel-avatar,.wg-tel-enviar,.wg-tel-voz,.wg-tel-alerta,.wg-tel-fila-enviar,.wg-tel-fila-remover,.wg-tel-ilha,.wg-tel-home,.wg-tel-cauda .wg-tel-bolha::before,.wg-tel-cauda .wg-tel-bolha::after,.wg-tel-voz-barras span,.wg-tel-voz-estatico,.wg-tel-voz-estatico i,.wg-tel-voz-repetir,.wg-tel-config-chave,.wg-tel-config-idioma,.wg-tel-config-guardar,.wg-tel-config-limpar,.wg-tel-config-icone,.wg-tel-contacto-boneco,.wg-tel-contacto-trocar,.wg-tel-contacto-nome,.wg-tel-contacto-prompt,.wg-tel-contacto-skills,.wg-tel-contacto-modelo,.wg-tel-contacto-esforco,.wg-tel-contacto-final{corner-shape:round}',
       '@keyframes wg-tel-entrar{from{opacity:0;transform:translateY(22px) scale(.96)}to{opacity:1;transform:none}}',
       '@keyframes wg-tel-ponto{0%,60%,100%{opacity:.35;transform:translateY(0)}30%{opacity:.9;transform:translateY(-2px)}}',
       // Painel estreito (a sala ficaria com < ~600 px ao lado da barra): o
@@ -7694,6 +7695,9 @@ function mascararChave(chave) {
       // `catalogoInicial` (testes) já vem carregado; em produção o efeito
       // abaixo puxa skills e modelos do DSH uma vez por abertura.
       const [catalogo, setCatalogo] = react.useState(() => props.catalogoInicial || null);
+      // Effort: `null` = o esforço por OMISSÃO do modelo escolhido; uma string
+      // = escolha explícita. É o que o ModelSelect do DSH guarda.
+      const [esforco, setEsforco] = react.useState(null);
       const [nota, setNota] = react.useState(null);
       const [aCriar, setACriar] = react.useState(false);
       const [agora, setAgora] = react.useState(() => Date.now());
@@ -7738,6 +7742,10 @@ function mascararChave(chave) {
         if (!porGrupo.has(m.grupo)) porGrupo.set(m.grupo, []);
         porGrupo.get(m.grupo).push(m);
       }
+      // Modelo escolhido + o seu Effort (níveis que o provedor serve).
+      const modeloAtual = modelos.find((m) => `${m.provider}/${m.model}` === modelo) || null;
+      const esforcos = modeloAtual && Array.isArray(modeloAtual.esforcos) ? modeloAtual.esforcos : [];
+      const esforcoAtual = esforco !== null ? esforco : ((modeloAtual && modeloAtual.esforcoPadrao) || '');
       const final = comporPromptContacto(texto, [...escolhidas]);
       const podeEnviar = !aCriar && nome.trim().length > 0;
       const adicionar = async () => {
@@ -7752,6 +7760,7 @@ function mascararChave(chave) {
             prompt: texto,
             skills: [...escolhidas],
             modelo: escolhido ? { provider: escolhido.provider, model: escolhido.model } : null,
+            esforco: esforcoAtual || null,
           });
         } catch (erro) {
           r = { ok: false, erro: String((erro && erro.message) || erro) };
@@ -7813,13 +7822,32 @@ function mascararChave(chave) {
             h('label', { className: 'wg-tel-config-rotulo', htmlFor: 'wg-tel-contacto-modelo' }, 'Modelo — o que corre tudo'),
             h('select', {
               id: 'wg-tel-contacto-modelo', className: 'wg-tel-contacto-modelo', value: modelo,
-              'aria-label': 'Modelo do contacto', onChange: (e) => setModelo(e.target.value),
+              'aria-label': 'Modelo do contacto',
+              onChange: (e) => { setModelo(e.target.value); setEsforco(null); },
             },
               aCarregar
                 ? h('option', { value: '' }, 'A carregar modelos…')
                 : (modelos.length === 0 ? h('option', { value: '' }, 'Modelos indisponíveis') : null),
               [...porGrupo.entries()].map(([grupo, lista]) => h('optgroup', { key: grupo, label: grupo },
                 lista.map((m) => h('option', { key: `${m.provider}/${m.model}`, value: `${m.provider}/${m.model}` }, m.nome))))),
+            // Effort (esforço de raciocínio) — a seguir ao modelo, como no
+            // seletor do DSH. Só aparece para modelos com níveis de esforço; a
+            // linha "Default" só existe quando o modelo NÃO define um por
+            // omissão (a regra é a do ModelSelect do DSH).
+            esforcos.length
+              ? h('label', { className: 'wg-tel-config-rotulo', htmlFor: 'wg-tel-contacto-esforco' }, 'Effort — o esforço de raciocínio')
+              : null,
+            esforcos.length
+              ? h('select', {
+                id: 'wg-tel-contacto-esforco', className: 'wg-tel-contacto-esforco', value: esforcoAtual,
+                'aria-label': 'Effort do modelo',
+                onChange: (e) => setEsforco(e.target.value),
+              },
+                modeloAtual && modeloAtual.esforcoPadrao
+                  ? null
+                  : h('option', { value: '' }, 'Default'),
+                esforcos.map((e) => h('option', { key: e.id, value: e.id, title: e.descricao || undefined }, e.nome)))
+              : null,
             h('div', { className: 'wg-tel-config-rotulo' }, 'Prompt final'),
             h('p', {
               className: 'wg-tel-contacto-final',
@@ -9115,15 +9143,27 @@ function mascararChave(chave) {
             try {
               const r = await canalSessao.modelCatalog();
               if (r && r.ok === true && r.value) {
+                // A MESMA lista do seletor de modelos do DSH (session.modelCatalog):
+                // provedor → modelos, cada um com os seus níveis de Effort.
                 for (const grupo of (Array.isArray(r.value.groups) ? r.value.groups : [])) {
                   if (!grupo || !Array.isArray(grupo.models)) continue;
                   for (const m of grupo.models) {
+                    const raciocinio = m && m.reasoning && typeof m.reasoning === 'object' ? m.reasoning : null;
                     saida.modelos.push({
                       provider: String(grupo.id),
                       model: String(m.id),
                       nome: String(m.name || m.id),
                       grupo: String(grupo.name || grupo.id),
+                      esforcos: (raciocinio && Array.isArray(raciocinio.efforts) ? raciocinio.efforts : [])
+                        .filter((e) => e && e.id)
+                        .map((e) => ({ id: String(e.id), nome: String(e.name || e.id), descricao: e.description ? String(e.description) : null })),
+                      esforcoPadrao: raciocinio && raciocinio.defaultEffort ? String(raciocinio.defaultEffort) : null,
                     });
+                  }
+                }
+                for (const f of (Array.isArray(r.value.failures) ? r.value.failures : [])) {
+                  if (f && (f.name || f.id)) {
+                    saida.notas.push(`Modelos de ${f.name || f.id} indisponíveis: ${f.message || 'falha do provedor'}`);
                   }
                 }
                 if (r.value.default && r.value.default.model) saida.modeloPadrao = r.value.default;
@@ -9142,6 +9182,7 @@ function mascararChave(chave) {
           }
           trace('contacto-catalogo-fim', {
             skills: saida.skills.length, modelos: saida.modelos.length, notas: saida.notas.length,
+            comEsforco: saida.modelos.filter((m) => m.esforcos && m.esforcos.length).length,
           });
           return saida;
         },
@@ -9149,7 +9190,7 @@ function mascararChave(chave) {
         // escolhida (nome + boneco) gravada ANTES de a sala a ver, modelo
         // escolhido instalado e o prompt final (texto + skills) enviado —
         // com a conversa aberta no celular, como a recruta que é.
-        criarContacto: async ({ identidade, prompt, skills, modelo } = {}) => {
+        criarContacto: async ({ identidade, prompt, skills, modelo, esforco } = {}) => {
           const nome = String((identidade && identidade.name) ?? '').trim();
           if (!nome) return { ok: false, motivo: 'nome', erro: 'O contacto precisa de nome.' };
           const wsId = recruta && recruta.workspaceId ? recruta.workspaceId : null;
@@ -9178,12 +9219,17 @@ function mascararChave(chave) {
           abrirConversaNoTelefone(id);
           estado = { ...estado, selecionada: id };
           if (historico.sessionId !== id) historico = HISTORICO_VAZIO;
-          // 4) o modelo que vai correr tudo — antes do primeiro prompt.
+          // 4) o modelo (e o Effort) que vai correr tudo — antes do primeiro prompt.
           if (modelo && modelo.provider && modelo.model) {
             try {
               if (canalSessao && typeof canalSessao.selectModel === 'function') {
+                // `reasoningEffort` só quando escolhido — a forma do ModelSelection
+                // do DSH é exatamente {provider, model, reasoningEffort?}.
                 await canalSessao.selectModel({
-                  sessionId: id, provider: String(modelo.provider), model: String(modelo.model),
+                  sessionId: id,
+                  provider: String(modelo.provider),
+                  model: String(modelo.model),
+                  ...(esforco ? { reasoningEffort: String(esforco) } : {}),
                 });
               } else {
                 trace('contacto-modelo-erro', 'sem session.selectModel');

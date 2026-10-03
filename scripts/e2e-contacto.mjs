@@ -217,6 +217,39 @@ try {
     return `${d.skills.length} skill(s)${d.vazio ? ' (sem skills neste lugar)' : ''}: ${d.skills.slice(0, 3).join(' · ')}${d.skills.length > 3 ? ' …' : ''}${d.nota ? ` | nota: ${d.nota}` : ''}`;
   });
 
+  await verificacao('o Effort vem a seguir ao modelo, com os níveis do DSH', async () => {
+    const r = await page.evaluate(async () => {
+      const t = (window.__wgTrace || []).filter((x) => x.ponto === 'contacto-catalogo-fim').pop();
+      const comEsforco = t && t.detalhe ? t.detalhe.comEsforco : null;
+      const sel = document.querySelector('.wg-tel-contacto-modelo');
+      const chaves = [...sel.options].map((o) => o.value).filter(Boolean);
+      const vistos = [];
+      for (const chave of chaves) {
+        sel.value = chave;
+        sel.dispatchEvent(new Event('change', { bubbles: true }));
+        await new Promise((r2) => setTimeout(r2, 60));
+        const ef = document.querySelector('.wg-tel-contacto-esforco');
+        vistos.push({
+          chave,
+          esforco: ef ? [...ef.options].map((o) => [o.value, o.textContent]) : null,
+          valor: ef ? ef.value : null,
+        });
+      }
+      return { comEsforco, vistos };
+    });
+    const comCampo = r.vistos.filter((v) => v.esforco);
+    if (r.comEsforco != null) {
+      assert.equal(comCampo.length, r.comEsforco,
+        `o campo Effort aparece para ${comCampo.length} modelo(s), mas ${r.comEsforco} têm níveis`);
+    }
+    for (const v of comCampo) {
+      assert.ok(v.esforco.length > 0, `modelo ${v.chave} com campo Effort sem opções`);
+      assert.ok(v.esforco.some(([valor]) => valor === v.valor),
+        `o Effort selecionado (${v.valor}) não está nas opções de ${v.chave}`);
+    }
+    return `${r.vistos.length} modelo(s) percorridos, ${comCampo.length} com Effort`;
+  });
+
   await captura(page, '01-formulario');
 
   await verificacao('o nome escolhido mostra o boneco dele e "Trocar" muda-o', async () => {

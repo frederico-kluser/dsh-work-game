@@ -967,7 +967,7 @@ de `getTelefone()` é contrato de teste (5 campos, "sem campos novos"):
 abrirAdicionarContacto({workspaceId, lugar, referencia})  // vista 'adicionar-contacto'
 getRecruta()        // {workspaceId, lugar, referencia} | null
 catalogoContacto(referencia) -> Promise<{skills, modelos, modeloPadrao, notas}>
-criarContacto({identidade, prompt, skills, modelo}) -> Promise<{ok, sessionId, aviso?} | {ok:false, motivo, erro}>
+criarContacto({identidade, prompt, skills, modelo, esforco}) -> Promise<{ok, sessionId, aviso?} | {ok:false, motivo, erro}>
 ```
 
 - `catalogoContacto`: skills vêm de `ctx.remote.skills.list({sessionId})` com a
@@ -995,6 +995,16 @@ criarContacto({identidade, prompt, skills, modelo}) -> Promise<{ok, sessionId, a
   `remote.session.selectModel({sessionId, provider, model})`; (5) o prompt
   final é enviado pela conversa (nunca sem eco). Erros: `{ok:false, motivo:
   'nome'|'criar', erro}`.
+
+**Modelo e Effort** (o mesmo seletor do DSH): a lista é `session.modelCatalog()`
+— provedor → `model.name` — a MESMA do picker de modelos do DSH; a seguir ao
+modelo vem o **Effort** (esforço de raciocínio) quando o modelo tem níveis
+(`reasoning.efforts`), com a regra do `ModelSelect` do DSH: mudar de modelo
+assenta no `defaultEffort` dele e a linha **"Default"** só existe quando o
+modelo NÃO define um. A escolha segue em `session.selectModel({sessionId,
+provider, model, reasoningEffort?})` — `reasoningEffort` só quando escolhido,
+como o `ModelSelection` do DSH. Os provedores que o catálogo não consegue servir
+aparecem em `notas` (nunca silenciosos).
 
 **Identidade escolhida** (`identidadeDeNome(nome, salto)`): o nome é livre e o
 boneco nasce do MESMO gênero (regra de 2026-09-29 — um "Rui" nunca ganha boneco

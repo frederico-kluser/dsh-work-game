@@ -248,11 +248,12 @@ test('criarContacto: cria a sessão no workspace do lugar, grava a identidade, a
       prompt: 'faz X',
       skills: ['tavily-agent-skill'],
       modelo: { provider: 'prov', model: 'gpt-x' },
+      esforco: 'high',
     });
     assert.deepEqual(r, { ok: true, sessionId: 'novo-1' });
     assert.deepEqual(reg.creates, [{ workspaceId: 'w1' }], 'a sessão nasce NO WORKSPACE da cadeira');
-    assert.deepEqual(reg.selects, [{ sessionId: 'novo-1', provider: 'prov', model: 'gpt-x' }],
-      'o modelo escolhido é instalado antes do primeiro prompt');
+    assert.deepEqual(reg.selects, [{ sessionId: 'novo-1', provider: 'prov', model: 'gpt-x', reasoningEffort: 'high' }],
+      'o modelo escolhido (com o Effort) é instalado antes do primeiro prompt');
     assert.deepEqual(conv.reg.envios, ['faz X\n\nSkills: /tavily-agent-skill'], 'o prompt final (com as skills) foi enviado');
     // A identidade escolhida fica guardada: é o nome e o boneco que a ficha
     // vai ter quando a sessão aparecer na sala.
@@ -308,13 +309,16 @@ test('criarContacto: sem canal de sessões o erro vem à vista (nada de ficar pr
 
 /* ---------- catálogo: skills e modelos ---------- */
 
-test('catalogoContacto: skills da sessão de referência e modelos do host, achatados com provider/model', async () => {
+test('catalogoContacto: skills da sessão de referência e modelos do host, achatados com provider/model + Effort', async () => {
   const { ctx, reg } = ctxFalso({
     skills: [
       { name: 'tavily-agent-skill', description: 'Pesquisa web', modelInvocable: true },
       { name: 'github-agent-skill', description: 'GitHub', modelInvocable: false },
     ],
-    modelos: [{ id: 'gpt-x', name: 'GPT-X' }, { id: 'gpt-y', name: 'GPT-Y' }],
+    modelos: [
+      { id: 'gpt-x', name: 'GPT-X', reasoning: { efforts: [{ id: 'low', name: 'Baixo' }, { id: 'high', name: 'Alto', description: 'pensa mais' }], defaultEffort: 'high' } },
+      { id: 'gpt-y', name: 'GPT-Y' },
+    ],
     padrao: { provider: 'prov', model: 'gpt-y' },
   });
   const n = B.__criarNucleo({ ctx, abrirConversa: () => conversaFalsa() });
@@ -322,9 +326,16 @@ test('catalogoContacto: skills da sessão de referência e modelos do host, acha
   assert.deepEqual(reg.skillCalls, [{ sessionId: 's-ref' }], 'o catálogo de skills é o da sessão de referência (cwd + preset)');
   assert.deepEqual(cat.skills.map((s) => s.name), ['tavily-agent-skill', 'github-agent-skill']);
   assert.deepEqual(cat.modelos, [
-    { provider: 'prov', model: 'gpt-x', nome: 'GPT-X', grupo: 'Provedor' },
-    { provider: 'prov', model: 'gpt-y', nome: 'GPT-Y', grupo: 'Provedor' },
-  ]);
+    {
+      provider: 'prov', model: 'gpt-x', nome: 'GPT-X', grupo: 'Provedor',
+      esforcos: [{ id: 'low', nome: 'Baixo', descricao: null }, { id: 'high', nome: 'Alto', descricao: 'pensa mais' }],
+      esforcoPadrao: 'high',
+    },
+    {
+      provider: 'prov', model: 'gpt-y', nome: 'GPT-Y', grupo: 'Provedor',
+      esforcos: [], esforcoPadrao: null,
+    },
+  ], 'os níveis de Effort vêm do reasoning do modelo, como no seletor do DSH');
   assert.deepEqual(cat.modeloPadrao, { provider: 'prov', model: 'gpt-y' });
   assert.deepEqual(cat.notas, [], 'sem notas quando os canais respondem');
   n.dispose();
@@ -355,8 +366,15 @@ const catalogoDeTeste = {
     { name: 'github-agent-skill', description: 'Controla o GitHub' },
   ],
   modelos: [
-    { provider: 'prov', model: 'gpt-x', nome: 'GPT-X', grupo: 'Provedor' },
-    { provider: 'prov', model: 'gpt-y', nome: 'GPT-Y', grupo: 'Provedor' },
+    {
+      provider: 'prov', model: 'gpt-x', nome: 'GPT-X', grupo: 'Provedor',
+      esforcos: [{ id: 'low', nome: 'Baixo', descricao: null }, { id: 'high', nome: 'Alto', descricao: null }],
+      esforcoPadrao: null,
+    },
+    {
+      provider: 'prov', model: 'gpt-y', nome: 'GPT-Y', grupo: 'Provedor',
+      esforcos: [], esforcoPadrao: null,
+    },
   ],
   modeloPadrao: { provider: 'prov', model: 'gpt-y' },
   notas: [],
@@ -376,6 +394,7 @@ test('tela: nome, boneco, prompt, skills por checkbox, modelo e o botão "Adicio
     assert.equal(deExato('wg-tel-contacto-skill').length, 2, 'uma linha por skill');
     assert.equal(deExato('wg-tel-contacto-trocar').length, 1, 'o boneco pode trocar-se');
     assert.equal(deExato('wg-tel-contacto-modelo').length, 1, 'o modelo escolhe-se');
+    assert.equal(deExato('wg-tel-contacto-esforco').length, 0, 'sem níveis de esforço no modelo, não há Effort (como no DSH)');
     const opcoes = nosDe(arvore, (n) => n.tipo === 'option');
     assert.deepEqual(opcoes.map((o) => o.props.value), ['prov/gpt-x', 'prov/gpt-y']);
     const botao = deExato('wg-tel-config-guardar')[0];
@@ -434,6 +453,72 @@ test('tela: o nome escolhido muda o boneco do preview e as skills entram no prom
     assert.equal(chamadas[0].prompt, 'faz X');
     assert.deepEqual(chamadas[0].skills, ['tavily-agent-skill']);
     assert.deepEqual(chamadas[0].modelo, { provider: 'prov', model: 'gpt-y' }, 'o modelo do catálogo (pré-selecionado)');
+  } finally {
+    hooks.restaurar();
+  }
+});
+
+test('tela: o Effort vem a seguir ao modelo — "Default" só quando o modelo não define um', async () => {
+  const hooks = usarHooksComEstado();
+  try {
+    const chamadas = [];
+    const desenhar = () => hooks.render(B.__TelefoneAdicionarContacto, {
+      recruta: recrutaDeTeste,
+      catalogoInicial: catalogoDeTeste,
+      criarContacto: async (dados) => { chamadas.push(dados); return { ok: true, sessionId: 'novo-1' }; },
+      voltar: () => {},
+    });
+    let arvore = desenhar();
+    const deExato = (classe) => nosDe(arvore, (n) => n.props.className === classe);
+
+    // Modelo por omissão (gpt-y) sem esforços: o campo Effort NÃO existe.
+    assert.equal(deExato('wg-tel-contacto-esforco').length, 0);
+
+    // Modelo com esforços e SEM esforço por omissão: aparece "Default" + níveis.
+    deExato('wg-tel-contacto-modelo')[0].props.onChange({ target: { value: 'prov/gpt-x' } });
+    arvore = desenhar();
+    const esforco = deExato('wg-tel-contacto-esforco');
+    assert.equal(esforco.length, 1, 'o Effort vem a seguir ao modelo');
+    assert.equal(esforco[0].props.value, '', 'sem default definido: começa em "Default"');
+    const opcoes = esforco[0].filhos.filter((f) => f.tipo === 'option');
+    assert.deepEqual(opcoes.map((o) => [o.props.value, o.filhos.join('')]), [['', 'Default'], ['low', 'Baixo'], ['high', 'Alto']]);
+
+    // Escolher o esforço e enviar: vai no payload (e o modelo também).
+    esforco[0].props.onChange({ target: { value: 'high' } });
+    arvore = desenhar();
+    assert.equal(deExato('wg-tel-contacto-esforco')[0].props.value, 'high');
+    deExato('wg-tel-contacto-nome')[0].props.onChange({ target: { value: 'Maya' } });
+    arvore = desenhar();
+    deExato('wg-tel-config-guardar')[0].props.onClick();
+    await new Promise((r) => setTimeout(r, 0));
+    assert.equal(chamadas.length, 1);
+    assert.deepEqual(chamadas[0].modelo, { provider: 'prov', model: 'gpt-x' });
+    assert.equal(chamadas[0].esforco, 'high', 'o Effort escolhido segue para o selectModel');
+
+    // Trocar de modelo repõe o esforço por omissão do NOVO (regra do DSH).
+    deExato('wg-tel-contacto-modelo')[0].props.onChange({ target: { value: 'prov/gpt-y' } });
+    arvore = desenhar();
+    assert.equal(deExato('wg-tel-contacto-esforco').length, 0, 'sem esforços, o campo desaparece');
+  } finally {
+    hooks.restaurar();
+  }
+});
+
+test('tela: com esforço por omissão definido, não há linha "Default" e ele vem pré-selecionado', () => {
+  const hooks = usarHooksComEstado();
+  try {
+    const cat = {
+      ...catalogoDeTeste,
+      modelos: [{ ...catalogoDeTeste.modelos[0], esforcoPadrao: 'low' }, catalogoDeTeste.modelos[1]],
+      modeloPadrao: { provider: 'prov', model: 'gpt-x' },
+    };
+    const arvore = hooks.render(B.__TelefoneAdicionarContacto, {
+      recruta: recrutaDeTeste, catalogoInicial: cat, voltar: () => {},
+    });
+    const esforco = nosDe(arvore, (n) => n.props.className === 'wg-tel-contacto-esforco')[0];
+    const opcoes = esforco.filhos.filter((f) => f.tipo === 'option');
+    assert.deepEqual(opcoes.map((o) => o.props.value), ['low', 'high'], 'sem "Default" — a regra do ModelSelect do DSH');
+    assert.equal(esforco.props.value, 'low', 'pré-selecionado no esforço por omissão do modelo');
   } finally {
     hooks.restaurar();
   }
