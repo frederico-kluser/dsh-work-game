@@ -33,6 +33,7 @@ const valor = (nome) => {
   return i >= 0 && args[i + 1] ? args[i + 1] : null;
 };
 const DSH = valor('--dsh');
+const COOKIE_FILE = valor('--cookie-file'); // autenticação por cookie (instância viva) em vez de ?token=
 const PASTA = valor('--pasta') || join(ROOT, 'logs', 'e2e-voz');
 const CHAVE_E2E = 'sk-e2e-falsa-nunca-real-0000000000';
 const TEXTO_MOCK = 'Olá mundo, transcrição de voz a funcionar';
@@ -79,6 +80,11 @@ const browser = await chromium.launch({
 });
 const ctx = await browser.newContext({ viewport: { width: 1440, height: 900 } });
 await ctx.grantPermissions(['microphone'], { origin: new URL(DSH).origin });
+if (COOKIE_FILE) {
+  const { readFileSync } = await import('node:fs');
+  const [name, value] = readFileSync(COOKIE_FILE, 'utf8').trim().split('=');
+  await ctx.addCookies([{ name, value, domain: new URL(DSH).hostname, path: '/' }]);
+}
 const page = await ctx.newPage();
 
 /* API OpenAI interceptada: nunca sai rede real, e prova-se o pedido feito. */
@@ -109,8 +115,19 @@ try {
   await page.waitForTimeout(1500);
 
   await verificacao('botão "Modo jogo" abre o painel', async () => {
-    await page.click('button[aria-label="Modo jogo"]');
-    await page.waitForSelector('.wg-painel', { timeout: 15000 });
+    // O botão é um TOGGLE e a seleção de layout persiste no servidor: um clique
+    // pode estar a FECHAR o painel que uma sessão anterior abriu. Garante-se o
+    // estado ABERTO pelo resultado (lugares na sala), não pelo clique.
+    for (let tentativa = 0; tentativa < 3; tentativa += 1) {
+      const lugares = await page.evaluate(() => document.querySelectorAll('.wg-svg .seat[data-session-id]').length);
+      if (lugares > 0) return `já aberto (${lugares} lugares)`;
+      await page.click('button[aria-label="Modo jogo"]');
+      try {
+        await page.waitForFunction(() => document.querySelectorAll('.wg-svg .seat[data-session-id]').length > 0, null, { timeout: 12000 });
+        return 'aberto';
+      } catch { /* toggle: tenta de novo */ }
+    }
+    throw new Error('o painel não abriu (3 tentativas)');
   });
 
   await verificacao('clicar numa pessoa abre o telemóvel com composer', async () => {
