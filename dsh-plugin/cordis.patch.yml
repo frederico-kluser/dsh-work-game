@@ -1,16 +1,24 @@
-# cordis.patch.yml — camada de ativação do bundle dsh-work-game-plugin
+# cordis.patch.yml — camada de ativação do bundle dsh-work-game (raiz) / dsh-work-game-plugin (standalone)
 #
 # Padrão de layers do DSH (verificado no checkout local 0.1.6-alpha.2,
 # packages/bundle/web-app/cordis.patch.yml):
-#   - a ativação só acontece porque package.json declara dsh.bundle.patch;
-#     um bloco dsh.bundle vazio não ativa nada;
+#   - a ativação só acontece porque um package.json declara dsh.bundle.patch;
+#     um bloco dsh.bundle vazio não ativa nada. ESTE ficheiro serve as duas
+#     formas de instalação: a raiz do repo (package.json da raiz declara
+#     dsh.bundle.patch=./dsh-plugin/cordis.patch.yml — `dsh plugin add
+#     https://github.com/frederico-kluser/dsh-work-game`) e o pacote standalone
+#     de dsh-plugin/ (link:|file: de dsh-plugin).
 #   - `insert` cria uma linha com id PRÓPRIO: nunca apontar para o id de
 #     outra linha (a resolução é whole-entry replace, nunca merge);
-#   - `name` é o pacote a carregar, resolvido dos bundles instalados
-#     (ex.: "dsh plugin --profile web add dsh-work-game-plugin");
-#   - o lado browser é descoberto automaticamente: o módulo `modules` do
-#     web-app lê o bloco dsh.client do pacote (inject + platform) e serve o
-#     entrypoint exports["./client"] — por isso esta patch não declara client.
+#   - `name` é resolvido RELATIVAMENTE a ESTE ficheiro: a app-boot converte
+#     './…' num file:// URL ancorado no diretório do patch
+#     (anchorInsertedPluginNames, packages/boot/app-boot/src/index.ts) —
+#     './src/index.js' resolve para dsh-plugin/src/index.js nas DUAS formas de
+#     instalação, sem depender do nome do pacote instalado na raiz;
+#   - o lado browser é descoberto pelo módulo `modules` do web-app a partir do
+#     package.json MAIS PRÓXIMO do módulo da linha (dsh-plugin/package.json:
+#     bloco dsh.client + exports["./client"]), que fixa o id de módulo de
+#     browser 'dsh-work-game-plugin' — o mesmo registado em client.js.
 - insert:
     - id: dsh-work-game
-      name: 'dsh-work-game-plugin'
+      name: './src/index.js'

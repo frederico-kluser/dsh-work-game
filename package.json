@@ -10,5 +10,19 @@
   },
   "engines": {
     "node": ">=22"
+  },
+  "main": "./dsh-plugin/src/index.js",
+  "exports": {
+    ".": "./dsh-plugin/src/index.js",
+    "./client": "./dsh-plugin/src/client.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dsh-plugin"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./dsh-plugin/cordis.patch.yml"
+    }
   }
 }

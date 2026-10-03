@@ -7,8 +7,12 @@
 > conversas visíveis (mesma regra da barra lateral), running/idle, modelo, contexto,
 > custo estimado, velocidade de tokens e a delegação em curso (subagentes a correr), com
 > as ações Abrir conversa / Nova sessão da API pública `uiWorkspace` — sem inventar nada
-> (ver §7 de `docs/contratos-plugin.md`). Instalar por `link:` (a instalação `file:` é uma
-> cópia congelada que o DSH continua a servir). **Mensagens já ligadas**: o primeiro sinal
+> (ver §7 de `docs/contratos-plugin.md`). Instalar com
+> `dsh plugin --profile web add https://github.com/frederico-kluser/dsh-work-game`
+> (desde 2026-10-02 a raiz do repo declara `dsh.bundle.patch` e a linha do patch resolve
+> `./src/index.js` por caminho relativo — serve a instalação Git, `link:` e `file:`;
+> `file:` continua a ser uma cópia congelada que o DSH serve mesmo depois de o
+> repositório mudar). **Mensagens já ligadas**: o primeiro sinal
 > de fio em tempo real no browser é `user/message` / `assistant/message` → `message`, que
 > troca a cara da pessoa a cada mensagem (vigia de `client.js`: `retain` + `eventSource`
 > enquanto a conversa corre, libertada ao parar — ver §7 de `docs/contratos-plugin.md`).
