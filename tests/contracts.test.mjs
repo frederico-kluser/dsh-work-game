@@ -248,6 +248,35 @@ test('DSH_EXPRESSIONS.variantes: o reator cobre os 14 presets e respeita a ident
   }
 });
 
+test('DSH_EXPRESSIONS.expressoes: o motor de expressões está exposto e cobre os 14 presets', () => {
+  const x = EXPR?.expressoes;
+  assert.ok(x && typeof x.criarMotor === 'function' && typeof x.sortear === 'function'
+    && typeof x.cenarioDeEvento === 'function' && typeof x.aplicavel === 'function'
+    && typeof x.base === 'function' && typeof x.hash === 'function'
+    && x.cenarios && x.limiares,
+  'window.DSH_EXPRESSIONS.expressoes expõe cenarios/limiares/hash/pool/base/cenarioDeEvento/sortear/aplicavel/criarMotor');
+  // Os cenários cobrem TODOS os presets da biblioteca (mais o 'sleeping' do Modo jogo).
+  const cobertos = new Set(Object.values(x.cenarios).flatMap((c) => [...c.pool]));
+  for (const p of presets) assert.ok(cobertos.has(p.id), `preset ${p.id} pertence a pelo menos um pool de cenário`);
+  // Limiares do motor (Q10/Q12) e mapeamento do vocabulário de eventos (§1).
+  assert.equal(x.limiares.minDwellMs, 1200);
+  assert.equal(x.limiares.minMudancaMs, 1000);
+  assert.equal(x.limiares.duracaoMensagemMs, 2800);
+  assert.equal(x.cenarioDeEvento({ type: 'question' }, null), 'pergunta');
+  assert.equal(x.cenarioDeEvento({ type: 'turn/end', kind: 'error' }, null), 'erro');
+  assert.equal(x.cenarioDeEvento({ type: 'tool', phase: 'result', ok: false }, null), 'ferramenta-erro');
+  // O motor sorteia dentro do pool, com anti-repetição (disparo determinístico
+  // no teste; o disparo real é aleatório — ver tests/plugin/expressoes.test.mjs).
+  const m = x.criarMotor({ semente: 11, probabilidade: 1 });
+  let atual = null;
+  for (let i = 0; i < 12; i += 1) {
+    const p = m.aoEvento('mensagem', atual, i);
+    assert.ok(x.cenarios.mensagem.pool.includes(p), `sorteio dentro do pool (${p})`);
+    if (atual) assert.notEqual(p, atual, 'nunca repete a cara atual');
+    atual = p;
+  }
+});
+
 test('namedIdentityIds é exatamente [rui, bia, lia, pesquisa, codigo, testes, alex, maya]', () => {
   const obtidos = Array.isArray(EXPR?.namedIdentityIds) ? [...EXPR.namedIdentityIds] : null;
   assert.deepEqual(

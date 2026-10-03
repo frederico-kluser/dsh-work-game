@@ -8,7 +8,7 @@
  *   1. STATUS → PRESET: each status maps to one Avataaars preset (see STATUS below).
  *   2. DIRECT PRESET: the "Expressões" tab sets person.expressionPreset explicitly.
  *   3. EVENT → VARIANT: status changes/tool lines fire RANDOM draws from the
- *      event's variant pool (dsh-plugin/src/variantes.js) — each person has
+ *      event's scenario pool (dsh-plugin/src/expressoes.js) — each person has
  *      their own trigger; tool/file lines nudge toward the `tool` pool.
  *   4. CONTEXT PRESSURE → PRESET: high simulated CTX can switch to `thinking`/`focused`.
  *   5. ONE-SHOT REACTION: `success`/`error` variants for 1.2s, then back to the status preset.
@@ -132,6 +132,28 @@ const FALLBACK_EXPRESSIONS = {
   resolve(identityId, presetId) {
     if (this.namedIdentityIds.includes(identityId)) return `assets/avatars/${identityId}.svg`;
     return null;
+  },
+  /* Espelho da API usada pela demo quando expressions.js falta: identidades e
+     motor de expressões (window.DSH_EXPRESSIONS.expressoes, dsh-plugin/src/
+     expressoes.js). Sem o módulo real, os sorteios não disparam (aoEvento
+     devolve null — "o disparo não aconteceu") e a cara segue o estado:
+     degradação graciosa, nunca um erro de runtime. */
+  identities: {},
+  expressoes: {
+    cenarios: {},
+    terminais: ['sucesso', 'erro', 'cancelado'],
+    limiares: {
+      aviso: 0.7, sobrecarga: 0.85, histerese: 0.05,
+      minDwellMs: 1200, minMudancaMs: 1000, duracaoMensagemMs: 2800, avisoAbsoluto: 200000
+    },
+    hash(texto) {
+      let h = 2166136261 >>> 0;
+      for (const c of String(texto ?? '')) { h ^= c.charCodeAt(0); h = Math.imul(h, 16777619) >>> 0; }
+      return h >>> 0;
+    },
+    criarMotor(opts = {}) {
+      return { fator: 1, probabilidade: null, estado: () => 1, sacos: {}, aoEvento: () => null };
+    }
   }
 };
 const EXPR = window.DSH_EXPRESSIONS || FALLBACK_EXPRESSIONS;
@@ -351,7 +373,7 @@ function makePerson({ name, avatarId, teamId }) {
     homeModuleId: null, homeSeat: null, away: false,
     status: 'available', context: 0, hasComputer: false, task: '',
     outputs: [], expressionPreset: null,
-    autoExpression: null, reator: null,
+    autoExpression: null, motor: null,
     model: pick(MODEL_IDS),
     usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     tokenSpeed: 0, contextPeak: 0, ctxWarned: false,
@@ -374,33 +396,37 @@ function setExpression(person, presetId) {
   animarExpressao(person);
 }
 
-/* ---------- reator de variantes: expressões DURANTE o trabalho ---------- */
-/* CODE HOOKS #3/#5 — os eventos do trabalho disparam SORTEIOS de variantes da
-   biblioteca (dsh-plugin/src/variantes.js, embutido em expressions.js): pools
-   por evento (tool/error/working/success), disparo aleatório PRÓPRIO de cada
-   pessoa e anti-repetição. Uma variante de erro/sucesso é reação one-shot de
-   1,2s (HOOK #5) e depois a cara volta à do estado; as restantes ficam à
-   vista enquanto durarem. A identidade nunca muda (HOOK #6). */
+/* ---------- motor de expressões: expressões DURANTE o trabalho ---------- */
+/* CODE HOOKS #3/#5 — os eventos do trabalho disparam SORTEIOS de variantes do
+   MOTOR DE EXPRESSÕES (dsh-plugin/src/expressoes.js, embutido em expressions.js):
+   cada estado/evento mapeia-se num cenário (ferramenta/erro/sucesso/mensagem/
+   pergunta/ocioso…) e o sorteio é um shuffle bag PRÓPRIO de cada pessoa com
+   anti-repetição. Uma variante de erro/sucesso é reação one-shot de 1,2s
+   (HOOK #5) e depois a cara volta à do estado; as restantes ficam à vista
+   durante a duração da reação (Q10: ~2,8s por mensagem). A identidade nunca
+   muda (HOOK #6). */
 const EVENTO_DE_STATUS = {
-  available: 'idle', working: 'working', tool: 'tool',
-  waiting: 'waiting', error: 'error', done: 'success'
+  available: 'ocioso', working: 'mensagem', tool: 'ferramenta',
+  waiting: 'pergunta', error: 'erro', done: 'sucesso'
 };
-const DURACAO_REACAO = { error: 1200, success: 1200 }; /* one-shot (HOOK #5) */
-function reatorDe(person) {
-  if (!person.reator) {
-    const v = EXPR.variantes;
-    person.reator = v.criarReator({
-      identidade: person.avatarId,
-      semente: v.hash(String(person.id)),
+/* one-shot (HOOK #5): terminais curtos (1,2s); os restantes cenários duram a
+   duração por mensagem do motor (limiares.duracaoMensagemMs, Q10). */
+const DURACAO_REACAO = { erro: 1200, sucesso: 1200, cancelado: 1200, 'ferramenta-erro': 1200 };
+function motorDe(person) {
+  if (!person.motor) {
+    const e = EXPR.expressoes;
+    person.motor = e.criarMotor({
+      semente: e.hash(String(person.id)),
       disponiveis: (EXPR.identities[person.avatarId] || {}).presets || null
     });
   }
-  return person.reator;
+  return person.motor;
 }
-function reagir(person, evento) {
-  const sorteado = reatorDe(person).aoEvento(evento, expressionOf(person), Date.now());
+function reagir(person, cenario) {
+  const sorteado = motorDe(person).aoEvento(cenario, expressionOf(person), Date.now());
   if (!sorteado) return;
-  person.autoExpression = { preset: sorteado, at: Date.now(), duracao: DURACAO_REACAO[evento] || 3500 };
+  const duracaoMs = (EXPR.expressoes.limiares && EXPR.expressoes.limiares.duracaoMensagemMs) || 2800;
+  person.autoExpression = { preset: sorteado, at: Date.now(), duracao: DURACAO_REACAO[cenario] || duracaoMs };
   render();
   animarExpressao(person);
   /* A reação expira sozinha: novo render para a cara voltar à do estado. */
@@ -471,7 +497,7 @@ function seed() {
     id, name, avatarId, avatarKind: avatarKindOf(avatarId), teamId,
     homeModuleId: null, homeSeat: null, away: false,
     status, context, hasComputer, task: '', outputs: [], expressionPreset: null,
-    autoExpression: null, reator: null,
+    autoExpression: null, motor: null,
     model: 'deepseek-chat', usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     tokenSpeed: 0, contextPeak: context, ctxWarned: context >= CONTEXT_WARN_K,
     taskQueue: [], questions: [], finish: null, actions: [], startedAt: Date.now() - 3600e3,
@@ -632,7 +658,7 @@ function emitOutput(person, text, kind = 'result') {
   logAction(person, text, kind);
   showBubble(person, text, kind);
   /* CODE HOOK #3 — uma linha de ferramenta dispara o pool de ferramenta. */
-  if (kind === 'tool' || kind === 'file') reagir(person, 'tool');
+  if (kind === 'tool' || kind === 'file') reagir(person, 'ferramenta');
 }
 function kindMatchesStatus(kind, status) {
   if (status === 'tool') return kind === 'tool' || kind === 'file';
@@ -651,7 +677,7 @@ function activityTick() {
       person.status = next;
       /* CODE HOOK #3 — a mudança de estado dispara o pool de expressões desse
          estado (erro/sucesso em one-shot de 1,2s — HOOK #5). */
-      reagir(person, EVENTO_DE_STATUS[next] || 'working');
+      reagir(person, EVENTO_DE_STATUS[next] || 'mensagem');
       render();
     }
     const pool = DATA.outputs.filter((o) => kindMatchesStatus(o.kind, person.status));
@@ -1451,7 +1477,7 @@ function handleAction(el) {
       if (d.status !== 'available') { found.person.hasComputer = true; if (!found.person.context) found.person.context = rand(12, 30); }
       const label = (STATUS[d.status] || STATUS.available).label.toLowerCase();
       emitOutput(found.person, `estado: ${label}`, d.status === 'error' ? 'message' : 'result');
-      reagir(found.person, EVENTO_DE_STATUS[d.status] || 'working');
+      reagir(found.person, EVENTO_DE_STATUS[d.status] || 'mensagem');
       render();
       break;
     }

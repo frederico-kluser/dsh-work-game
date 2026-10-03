@@ -12,6 +12,7 @@ dsh-plugin/
   cordis.patch.yml      # camada de ativação do bundle
   src/index.js          # entry host (Cordis): a rota /api da PARTILHA (link + QR) — ver §8
   src/state.js          # lógica PURA do escritório (sem imports do DSH)
+  src/expressoes.js     # motor de expressões PURO (cenários, sorteio, arbitragem) — ver §9
   src/adapter.js        # eventos/projeções DSH → eventos normalizados
   src/client.js         # painel no browser (slots do DSH) que renderiza a sala
   src/render.js         # SVG do escritório (reutiliza assets/furniture.svg)
@@ -21,6 +22,7 @@ dsh-plugin/
                         #   LICENSE) — viaja COM o plugin, sem skill instalada
 scripts/gerar-fundo-escritorio.py # FONTE do fundo: gera o .svg e o .txt (--embutir: client.js; --verificar)
 scripts/embutir-expressoes.py # FONTE dos corpos de expressão: assets/avatars → EXPR_AVATARS do client.js
+scripts/embutir-expressoes-motor.py # embute expressoes.js em expressions.js/client.js (--alvo; ver §9)
 dwg-cli/
   bin/dwg               # executável Node (#!/usr/bin/env node)
   lib/commands.js       # implementação dos comandos
@@ -46,7 +48,7 @@ O `state.js` nunca vê o DSH: recebe apenas objetos `{type, ...}`:
 | `session/added` | `sessionId, model?, title?, cwd?, parentId?, subagent, blank` | catálogo de sessões |
 | `session/meta` | `sessionId, title?, cwd?, parentId?, subagent, blank` (só em mudança) | catálogo de sessões |
 | `session/removed` | `sessionId` | catálogo de sessões |
-| `workspaces` | `fonte: 'dsh'\|'nenhuma', items: [{id, title, path, sessionIds}], archived` | `ctx.get('workspaces').list` |
+| `workspaces` | `fonte: 'dsh'\|'nenhuma', items: [{id, title, path, sessionIds}], archived: string[]\|null` (null = arquivo desconhecido) | `ctx.get('workspaces').list` |
 | `ctx` | `sessionId, used, window?` | projeção `contextPressure` |
 | `status` | `sessionId, status: 'idle'\|'running'` | `agent/status` |
 | `turn/end` | `sessionId, kind: 'completed'\|'aborted'\|'blocked'\|'error'\|'max-tokens'\|'interrupted'` | `turn/end.reason.kind` |
@@ -168,7 +170,11 @@ máquinas com `reasoningEfforts` (obrigatório no schema pi-ai).
 com `WorkspaceView { workspaceId, path, title, sessionIds }` na ordem do DSH. A pertença de
 uma conversa vem **só** de `sessionIds` (primeiro workspace que a reclama — o
 `owningGroupKey` de `ui-workspace/tree.ts`); o resto é *Ungrouped*. Enquanto `phase` é
-`'pending'` não se emite nada (a sala agrupa por pasta até a baseline chegar).
+`'pending'` não se emite nada (a sala agrupa por pasta até a baseline chegar). O arquivo do
+DSH vive no **registo de workspaces** (`archivedSessionIds` do `WorkspaceBaseline`), nunca no
+cabeçalho da sessão: o evento `workspaces` leva `archived: string[]` quando a lista é
+conhecida e `null` quando é desconhecida (sem serviço ou sem o campo — nunca "limpo"
+inventado).
 
 `extrairSuperficie(ctx, {agora, intervaloWorkspaces})` devolve
 `{catalogo(), assinar(fn), velocidadeDe(id)}` ou `null` sem canal (e o painel diz "à
@@ -223,19 +229,30 @@ anima faz UMA leitura de geometria por sincronia (nunca por elemento).
   órfãs em **Sem workspace**; sem serviço de workspaces, agrupa por pasta (`cwd`).
 - **Visibilidade** = barra do DSH (`ui-workspace/tree.ts`) por omissão: sem lugar próprio
   para subagentes, arquivadas (`archivedSessionIds`) e conversas em branco que não correm.
+  As arquivadas só se escondem quando o arquivo é **conhecido** (`archived: string[]`);
+  desconhecido, ninguém sai por arquivamento e as conversas sentadas contam à parte
+  (`escondidas.arquivoDesconhecido` — a sala nunca finge que está limpa).
 - **Filtros** (`montarEscritorio(pessoas, workspaces, filtros)`, puro; botão **Filtros ▾**
   na toolbar, menu com interruptores `role="switch"`, guardados em `localStorage`
   `dsh-work-game:filtros` com `try/catch` — sem armazenamento, valem só na página):
-  `mostrarArquivadas` (falso: arquivadas não se sentam; verdadeiro: sentam-se na mesa do
-  seu workspace ou em "Sem workspace", com a ficha **Arquivada** em cinzento),
+  `mostrarArquivadas` (falso: arquivadas não se sentam quando o arquivo é conhecido;
+  verdadeiro: sentam-se na mesa do seu workspace ou em "Sem workspace", com a ficha
+  **Arquivada** em cinzento),
   `mostrarSemWorkspace` (verdadeiro; falso tira a mesa das órfãs e a delegação dos seus
   líderes), `soTrabalhando` (falso; verdadeiro esconde quem está parado **e as mesas sem
-  ninguém a trabalhar** — lugares "livres" de gente escondida convidariam a recrutar) e
-  `mostrarEmBranco` (falso). Subagentes nunca contam: não têm lugar próprio. O layout
-  devolve `escondidas {total, arquivadas, emBranco, semWorkspace, paradas}` e a toolbar
+  ninguém a trabalhar** — lugares "livres" de gente escondida convidariam a recrutar),
+  `mostrarEmBranco` (falso) e `mostrarAbertos` (verdadeiro por omissão: "Manter workspaces
+  abertos sem ação" — um workspace ABERTO, com pelo menos uma conversa-membro presente e
+  não arquivada, mantém todas as pessoas sentadas mesmo sem ação, sem o "em branco" nem o
+  "Só quem está a trabalhar" as esconderem ou tirarem a mesa; "Sem workspace" não é
+  workspace. Desligado = comportamento antigo exato. Payloads antigos de `localStorage`
+  sem a chave completam com o padrão). Subagentes nunca contam: não têm lugar próprio. O
+  layout devolve `escondidas {total, arquivadas, emBranco, semWorkspace, paradas, fechados,
+  arquivoDesconhecido}` (`fechados` = workspaces suprimidos pelas regras) e a toolbar
   mostra "N escondidas pelos filtros" (detalhe no tooltip e no rodapé do menu); com a sala
   vazia por causa dos filtros, a cena e o aviso dizem-no (nunca "à espera de telemetria").
   O menu é um diálogo não-modal (`aria-haspopup="dialog"`, `role="dialog"`), não um menu.
+  A vista de GRUPOS do celular honra o mesmo filtro (as arquivadas não entram — `semArquivadas`).
 - **Toolbar em painéis estreitos**: o painel é um contentor de consultas
   (`container: wg-painel / inline-size` — conta a largura do PAINEL, não da janela: a
   barra do DSH abre e fecha). Botões `white-space:nowrap; flex:none` (nunca "＋" / "Zoom"
@@ -772,3 +789,82 @@ exacta **`/api/dsh-work-game/partilha`** no canal partilhado `/api` do DSH.
   abrir→online→fechar, `down` sempre com o host exacto (e `all` SÓ em `encerrar`), rotas
   permanentes ignoradas, contrato de erros da rota, QR seguro e a guarda "só desktop"
   (`celular ? null : …`). Verificação ao vivo: `scripts/verify-partilha.mjs [--encerrar]`.
+
+## 9. `dsh-plugin/src/expressoes.js` — Motor de expressões (2026-10-02)
+
+Módulo PURO (sem relógio, sem `Math.random`) que decide a cara de uma pessoa a cada
+evento. Base de evidência: `pesquisas/2026-10-02-que-taxonomia-de-expressoes-faciais-regras-de-mapeamento-eve.md`
+(Q3/Q8 transições · Q9 shuffle bag · Q10 tempos · Q11 dose-resposta · Q12 limiares de
+contexto). Descrição completa do algoritmo: `docs/ALGORITMO-EXPRESSOES.md`.
+
+**API** (fonte única; cópia embutida em `expressions.js` — `window.DSH_EXPRESSIONS.expressoes` —
+via `scripts/embutir-expressoes-motor.py --embutir --alvo expressions`, paridade por teste):
+
+```js
+EXPRESSOES_CENARIOS   // 15 cenários: {pool, base, prob, prioridade, graus?}
+EXPRESSOES_LIMIARES   // { aviso: 0.7, sobrecarga: 0.85, histerese: 0.05,
+                      //   minDwellMs: 1200, minMudancaMs: 1000,
+                      //   duracaoMensagemMs: 2800, avisoAbsoluto: 200000 }
+EXPRESSOES_TERMINAIS  // ['sucesso', 'erro', 'cancelado']
+cenarioDeEvento(evento, pessoa)  -> nome | null
+sortearExpressao(entrada)        -> { estado, sacos, preset|null }   // PURO
+expressaoAplicavel(entrada)      -> boolean                         // arbitragem temporal
+expressaoBase(cenario, disponiveis) -> preset | null
+poolDeCenario(cenario, disponiveis)  -> [presets]
+prioridadeDeCenario(cenario)         -> number
+nivelDePressao(ctx, nivelAnterior)   -> 'nenhum'|'contexto'|'sobrecarga'
+grauDeCenario(cenario, pessoa, grau) -> number | null               // dose-resposta Q11
+criarMotorExpressoes({semente, disponiveis, probabilidade?})        // reator das superfícies
+```
+
+**Taxonomia (evento → cenário → prioridade):**
+
+| cenário | gatilho (§1) | pool | base | prob | pri |
+|---|---|---|---|---|---|
+| `pergunta` | `question` | waiting·thinking·surprised | waiting | 1 | 95 |
+| `aprovacao` | `approval` | approval·waiting·surprised | waiting | 1 | 95 |
+| `erro` | `turn/end` error\|blocked\|max-tokens | error·surprised·disbelief | error | 1 | 90 |
+| `sucesso` | `turn/end` completed | success·celebrating·approval·wink | success | 0.9 | 85 |
+| `ferramenta-erro` | `tool` result ok===false | surprised·disbelief·error | error | 1 | 80 |
+| `erro-transitorio` | `retry` | surprised·thinking·disbelief | thinking | 1 | 75 |
+| `cancelado` | `turn/end` aborted\|interrupted | disbelief·waiting·idle | idle | 1 | 70 |
+| `compactacao` | `compaction` start | surprised·disbelief·thinking | thinking | 1 | 65 |
+| `sobrecarga` | `ctx`/`model` ≥ 0.85 | thinking·disbelief·surprised | thinking | 1 | 60 |
+| `ferramenta` | `tool` call / result ok | tool·searching·focused·thinking | working | 0.85 | 50 |
+| `contexto` | `ctx`/`model` ≥ 0.70 ou used ≥ 200k | focused·thinking | focused | 1 | 45 |
+| `mensagem` | `message` | working·focused·thinking·wink | working | 0.5 | 40 |
+| `subagente` | `subagent/start` | thinking·tool·focused | working | 0.6 | 35 |
+| `ocioso` | `status` idle | idle·wink | idle | 0.7 | 10 |
+| `dormir` | `status` idle (Modo jogo) | sleeping | sleeping | 1 | 5 |
+
+Sem cenário (não disparam cara nova): `question/answered`, `approval/decided`,
+`subagent/end`, `compaction` end, `usage`, `session/*`, `status` running.
+
+**Regras:**
+- **Sorteio**: shuffle bag PURO por (pessoa × cenário) — UMA cópia por variante do pool
+  efetivo, Fisher-Yates por ciclo (PRNG determinístico misturado com
+  `hash(semente|cenario|ciclo)`), consumo sem reposição, anti-repetição contra a cara
+  atual e correção de fronteira (o 1.º do ciclo novo nunca repete o último desenhado).
+  Disparo = `prob` do cenário × fator da pessoa (0.85–1.15); entropia pelo `sal` do
+  evento (ex.: `at`). `sacos` é o estado serializável (`{ordem, i, ciclo}` por cenário).
+  Pesos por multiplicidade foram REJEITADOS: quebram a não-repetição.
+- **Dose-resposta (Q11)**: os cenários com `graus` doseiam por subtipo —
+  `erro-transitorio` ESCALA com as retentativas consecutivas (`pessoa.retries`,
+  saturação no 3.º escalão), `ferramenta-erro` fixa-se no grau 1 (transitório de baixa
+  intensidade), `erro` terminal usa o pool todo (só doseia com `grau` explícito).
+- **Tempo/arbitragem (Q3/Q8/Q10)**: prioridade superior aplica-se SEMPRE (pergunta/erro
+  nunca ficam escondidos); prioridade inferior só desenha passados `minDwellMs` (1200 ms)
+  da última mudança de cara; prioridade igual respeita `minMudancaMs` (1000 ms); a cara
+  terminal (`sucesso`/`erro`/`cancelado`) fica até `message` do utilizador (novo turno)
+  ou evento de prioridade igual/superior. Sem carimbos `at`, as regras de tempo não
+  bloqueiam.
+- **Pressão de contexto (Q12)**: `used/window ≥ 0.7` (ou `used ≥ 200 000`) ⇒ `contexto`;
+  `≥ 0.85` ⇒ `sobrecarga`; com histerese de 5 pontos (deadband ANSI/ISA-18.2) um nível
+  ativo só desativa abaixo do limiar de entrada. Os limiares 0.7/0.85 são extrapolação
+  DECLARADA (não existem limiares validados). `sobrecarga` é raro e curto: o próximo
+  desenho de prioridade inferior regressa a `contexto`/`focused`; a compactação gera a
+  micro-reação breve seguida do mesmo regresso.
+- **state.js**: os desenhos vivem em campos por pessoa (`variante*`, `expressaoSacos`,
+  `expressaoCenario`, `expressaoAt`, `expressaoTerminal`, `ctxNivel`, `retries`) — tudo
+  serializável e clonável. `deriveExpression` mantém a precedência: override >
+  pergunta/aprovação ('waiting') > resultado do motor > 'idle'.

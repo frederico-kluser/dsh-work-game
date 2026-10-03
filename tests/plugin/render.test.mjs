@@ -122,9 +122,15 @@ test('layout: esconde como a barra do DSH — subagentes, arquivadas e em branco
     pessoa('nova', { blank: true, running: true }),
     pessoa('sub', { subagent: true, parentId: 'a' }),
   ];
-  const l = B.__montarEscritorio(pessoas, wsDsh([w('w1', 'site', ['a', 'arq', 'vazia', 'nova'])], ['arq']));
+  const ws = wsDsh([w('w1', 'site', ['a', 'arq', 'vazia', 'nova'])], ['arq']);
+  // As regras da barra do DSH, com "Manter workspaces abertos sem ação" DESLIGADO.
+  const l = B.__montarEscritorio(pessoas, ws, { mostrarAbertos: false });
   const sentadas = l.modules.flatMap((m) => m.seats).filter((s) => typeof s === 'string');
   assert.deepEqual(sentadas, ['a', 'nova']);
+  // Por omissão (mostrarAbertos) o workspace aberto mantém as pessoas sem ação:
+  // a em branco fica sentada e só a arquivada sai (detalhe em filtros.test.mjs).
+  const abertos = B.__montarEscritorio(pessoas, ws);
+  assert.deepEqual(abertos.modules.flatMap((m) => m.seats).filter((s) => typeof s === 'string'), ['a', 'vazia', 'nova']);
 });
 
 test('layout: delegação em curso = mesa violeta "Equipe de …" com o lugar de casa reservado', () => {
@@ -1180,16 +1186,22 @@ const salaFiltros = () => ({
   ws: wsDsh([w('w1', 'site', ['a', 'b', 'arq', 'vazia']), w('w2', 'vazio', [])], ['arq', 'orfa-arq']),
 });
 
-test('filtros: por omissão = a barra do DSH (arquivadas e em branco escondidas, e contadas)', () => {
+test('filtros: por omissão — arquivadas escondidas e contadas; workspaces abertos mantêm as pessoas sem ação', () => {
   assert.deepEqual({ ...B.__FILTROS_PADRAO }, {
-    mostrarArquivadas: false, mostrarSemWorkspace: true, soTrabalhando: false, mostrarEmBranco: false,
+    mostrarArquivadas: false, mostrarSemWorkspace: true, soTrabalhando: false, mostrarEmBranco: false, mostrarAbertos: true,
   });
   const { pessoas, ws } = salaFiltros();
   for (const l of [B.__montarEscritorio(pessoas, ws), B.__montarEscritorio(pessoas, ws, {}), B.__montarEscritorio(pessoas, ws, B.__FILTROS_PADRAO)]) {
-    assert.deepEqual(sentadas(l), ['a', 'b', 'orfa']);
-    assert.deepEqual(l.escondidas, { total: 3, arquivadas: 2, emBranco: 1, semWorkspace: 0, paradas: 0 }, 'subagentes não contam: nunca têm lugar próprio');
+    // w1 está aberto (a, b e vazia presentes e não arquivadas): a em branco
+    // fica sentada ("Manter workspaces abertos sem ação"); a arquivada sai.
+    assert.deepEqual(sentadas(l), ['a', 'b', 'vazia', 'orfa']);
+    assert.deepEqual(l.escondidas, { total: 2, arquivadas: 2, emBranco: 0, semWorkspace: 0, paradas: 0, fechados: 0, arquivoDesconhecido: 0 }, 'subagentes não contam: nunca têm lugar próprio');
     assert.deepEqual([...l.arquivadas], []);
   }
+  // Sem esse filtro: o comportamento antigo exato (a barra do DSH).
+  const antigo = B.__montarEscritorio(pessoas, ws, { mostrarAbertos: false });
+  assert.deepEqual(sentadas(antigo), ['a', 'b', 'orfa']);
+  assert.deepEqual(antigo.escondidas, { total: 3, arquivadas: 2, emBranco: 1, semWorkspace: 0, paradas: 0, fechados: 0, arquivoDesconhecido: 0 });
   assert.equal(B.__textoEscondidas({ total: 3 }), '3 escondidas pelos filtros');
   assert.equal(B.__textoEscondidas({ total: 1 }), '1 escondida pelos filtros');
   assert.equal(B.__detalheEscondidas({ total: 3, arquivadas: 2, emBranco: 1, semWorkspace: 0, paradas: 0 }), '2 arquivadas · 1 em branco');
@@ -1197,14 +1209,15 @@ test('filtros: por omissão = a barra do DSH (arquivadas e em branco escondidas,
 
 test('filtros: "Mostrar arquivadas" senta-as no seu workspace (ou em "Sem workspace") com a ficha "Arquivada" em cinzento', () => {
   const { pessoas, ws } = salaFiltros();
-  const l = B.__montarEscritorio(pessoas, ws, { mostrarArquivadas: true });
+  // mostrarAbertos desligado para fixar o recorte clássico das mesas.
+  const l = B.__montarEscritorio(pessoas, ws, { mostrarArquivadas: true, mostrarAbertos: false });
   assert.deepEqual(l.modules.map((m) => [m.teamId, m.seats]), [
     ['ws:w1', ['a', 'b', 'arq', null]],
     ['ws:w2', [null, null, null, null]],
     ['sem-workspace', ['orfa', 'orfa-arq', null, null]],
   ]);
   assert.deepEqual([...l.arquivadas].sort(), ['arq', 'orfa-arq']);
-  assert.deepEqual(l.escondidas, { total: 1, arquivadas: 0, emBranco: 1, semWorkspace: 0, paradas: 0 });
+  assert.deepEqual(l.escondidas, { total: 1, arquivadas: 0, emBranco: 1, semWorkspace: 0, paradas: 0, fechados: 0, arquivoDesconhecido: 0 });
   const people = Object.fromEntries(pessoas.map((p) => [p.id, p]));
   const svg = B.__renderOffice({ people, layout: l });
   const ficha = (id) => svg.split('<g class="seat').find((t) => t.includes(`data-session-id="${id}">`) && t.includes('seat-card-status'));
@@ -1217,10 +1230,11 @@ test('filtros: "Mostrar arquivadas" senta-as no seu workspace (ou em "Sem worksp
 
 test('filtros: sem "Sem workspace" a mesa das órfãs sai e elas contam como escondidas', () => {
   const { pessoas, ws } = salaFiltros();
-  const l = B.__montarEscritorio(pessoas, ws, { mostrarSemWorkspace: false });
+  // mostrarAbertos desligado: o recorte clássico (vazia em branco escondida).
+  const l = B.__montarEscritorio(pessoas, ws, { mostrarSemWorkspace: false, mostrarAbertos: false });
   assert.deepEqual(sentadas(l), ['a', 'b']);
   assert.ok(!l.equipas.has('sem-workspace'), 'a mesa "Sem workspace" não se monta');
-  assert.deepEqual(l.escondidas, { total: 4, arquivadas: 2, emBranco: 1, semWorkspace: 1, paradas: 0 });
+  assert.deepEqual(l.escondidas, { total: 4, arquivadas: 2, emBranco: 1, semWorkspace: 1, paradas: 0, fechados: 0, arquivoDesconhecido: 0 });
   // Delegação de um líder sem workspace também sai (é da mesma mesa).
   const deleg = [
     pessoa('lider', { running: true, subagents: 1 }),
@@ -1232,10 +1246,12 @@ test('filtros: sem "Sem workspace" a mesa das órfãs sai e elas contam como esc
 
 test('filtros: "Só quem está a trabalhar" esconde quem está parado e as mesas sem ninguém a trabalhar', () => {
   const { pessoas, ws } = salaFiltros();
-  const l = B.__montarEscritorio(pessoas, ws, { soTrabalhando: true });
+  // mostrarAbertos desligado: o recorte clássico (w1 só com quem trabalha).
+  const l = B.__montarEscritorio(pessoas, ws, { soTrabalhando: true, mostrarAbertos: false });
   assert.deepEqual(l.modules.map((m) => [m.teamId, m.seats]), [['ws:w1', ['a', null, null, null]]],
     'nem o workspace vazio nem "Sem workspace": lugares "livres" de gente escondida convidariam a recrutar');
-  assert.deepEqual(l.escondidas, { total: 5, arquivadas: 2, emBranco: 1, semWorkspace: 0, paradas: 2 });
+  assert.deepEqual(l.escondidas, { total: 5, arquivadas: 2, emBranco: 1, semWorkspace: 0, paradas: 2, fechados: 1, arquivoDesconhecido: 0 },
+    'o workspace vazio (w2) sai da sala e conta como FECHADO');
   // Ferramenta ou turno a correr contam como trabalho; a delegação fica inteira.
   const deleg = [
     pessoa('lider', { running: true, status: 'working', subagents: 1 }),
@@ -1247,8 +1263,9 @@ test('filtros: "Só quem está a trabalhar" esconde quem está parado e as mesas
     ['main', [{ reservado: 'lider' }, 'ferr', null, null]],
     ['delegation', ['lider', 'filho', null, null]],
   ]);
-  // Ninguém a trabalhar: a cena diz que são os filtros, não "à espera de telemetria".
-  const vazia = B.__montarEscritorio([pessoa('p')], wsDsh([w('w1', 'site', ['p'])]), { soTrabalhando: true });
+  // Ninguém a trabalhar: a cena diz que são os filtros, não "à espera de telemetria"
+  // (com mostrarAbertos — o padrão — o workspace aberto mantinha-se na sala).
+  const vazia = B.__montarEscritorio([pessoa('p')], wsDsh([w('w1', 'site', ['p'])]), { soTrabalhando: true, mostrarAbertos: false });
   assert.equal(vazia.modules.length, 0);
   const svg = B.__renderOffice({ people: { p: pessoa('p') }, layout: vazia });
   assert.ok(svg.includes('Os filtros escondem todas as conversas') && !svg.includes('à espera de telemetria'));
@@ -1258,7 +1275,7 @@ test('filtros: "Mostrar conversas em branco" senta as conversas novas ainda sem 
   const { pessoas, ws } = salaFiltros();
   const l = B.__montarEscritorio(pessoas, ws, { mostrarEmBranco: true });
   assert.deepEqual(sentadas(l), ['a', 'b', 'vazia', 'orfa']);
-  assert.deepEqual(l.escondidas, { total: 2, arquivadas: 2, emBranco: 0, semWorkspace: 0, paradas: 0 });
+  assert.deepEqual(l.escondidas, { total: 2, arquivadas: 2, emBranco: 0, semWorkspace: 0, paradas: 0, fechados: 0, arquivoDesconhecido: 0 });
   // Combinações: tudo à vista.
   const tudo = B.__montarEscritorio(pessoas, ws, { mostrarEmBranco: true, mostrarArquivadas: true });
   assert.equal(tudo.escondidas.total, 0);
@@ -1267,11 +1284,12 @@ test('filtros: "Mostrar conversas em branco" senta as conversas novas ainda sem 
 
 test('filtros: normalizar e persistir em localStorage (dsh-work-game:filtros), tolerando falhas', () => {
   assert.deepEqual(B.__normalizarFiltros({ mostrarArquivadas: true, soTrabalhando: 'sim', lixo: 1 }), {
-    mostrarArquivadas: true, mostrarSemWorkspace: true, soTrabalhando: false, mostrarEmBranco: false,
+    mostrarArquivadas: true, mostrarSemWorkspace: true, soTrabalhando: false, mostrarEmBranco: false, mostrarAbertos: true,
   }, 'só booleanos conhecidos; o resto cai no padrão');
   assert.deepEqual(B.__normalizarFiltros(null), { ...B.__FILTROS_PADRAO });
   assert.deepEqual(B.__FILTROS_UI.map((f) => f.rotulo), [
-    'Mostrar arquivadas', 'Mostrar "Sem workspace"', 'Só quem está a trabalhar', 'Mostrar conversas em branco',
+    'Mostrar arquivadas (ocultas por omissão)', 'Mostrar "Sem workspace"', 'Só quem está a trabalhar',
+    'Mostrar conversas em branco', 'Manter workspaces abertos sem ação',
   ]);
   const antes = globalThis.window.localStorage;
   try {
@@ -1280,9 +1298,14 @@ test('filtros: normalizar e persistir em localStorage (dsh-work-game:filtros), t
     assert.deepEqual(B.__lerFiltros(), { ...B.__FILTROS_PADRAO }, 'nada guardado: padrão');
     assert.equal(B.__guardarFiltros({ mostrarArquivadas: true, soTrabalhando: true }), true);
     assert.deepEqual(JSON.parse(guardado.get('dsh-work-game:filtros')), {
-      mostrarArquivadas: true, mostrarSemWorkspace: true, soTrabalhando: true, mostrarEmBranco: false,
+      mostrarArquivadas: true, mostrarSemWorkspace: true, soTrabalhando: true, mostrarEmBranco: false, mostrarAbertos: true,
     });
     assert.equal(B.__lerFiltros().soTrabalhando, true, 'volta igual depois de recarregar');
+    // Payload antigo (sem mostrarAbertos): o campo em falta cai no padrão verdadeiro.
+    guardado.set('dsh-work-game:filtros', JSON.stringify({ mostrarArquivadas: true, soTrabalhando: true }));
+    assert.deepEqual(B.__lerFiltros(), {
+      mostrarArquivadas: true, mostrarSemWorkspace: true, soTrabalhando: true, mostrarEmBranco: false, mostrarAbertos: true,
+    }, 'localStorage antigo (sem mostrarAbertos) aceita-se e completa com o padrão');
     guardado.set('dsh-work-game:filtros', '{isto não é json');
     assert.deepEqual(B.__lerFiltros(), { ...B.__FILTROS_PADRAO }, 'JSON estragado: padrão, sem rebentar');
     globalThis.window.localStorage = { getItem: () => { throw new Error('bloqueado'); }, setItem: () => { throw new Error('bloqueado'); } };
@@ -1558,11 +1581,11 @@ test('câmara: a zona à vista segue a posição REAL do celular e da barra late
   assert.ok(!BUNDLE.includes('tel.offsetLeft - 24'), 'a suposição antiga saiu');
 });
 
-/* ---------- expressões DURANTE o trabalho (reator de variantes) + vigia ---------- */
+/* ---------- expressões DURANTE o trabalho (motor de expressões) + vigia ---------- */
 
-test('variantes durante o trabalho: cada evento sorteia a SUA expressão e os estados fortes mandam', () => {
-  // Os pools cobrem os 14 presets da biblioteca — qualquer variante pode
-  // acontecer durante o trabalho (variantes.js / assets/AVATARS-EXPRESSIONS.md).
+test('expressões durante o trabalho: cada evento sorteia a SUA variante e os estados fortes mandam', () => {
+  // O reator de variantes embutido cobre os 14 presets da biblioteca — qualquer
+  // variante pode acontecer durante o trabalho (variantes.js / assets/AVATARS-EXPRESSIONS.md).
   assert.deepEqual(Object.keys(B.__VARIANTES_EVENTOS).sort(), ['error', 'idle', 'success', 'tool', 'waiting', 'working']);
   const todos = new Set(Object.values(B.__VARIANTES_EVENTOS).flatMap((ev) => ev.pool));
   assert.deepEqual([...todos].sort(),
@@ -1571,35 +1594,38 @@ test('variantes durante o trabalho: cada evento sorteia a SUA expressão e os es
   let e = escritorio([{ type: 'session/added', sessionId: 'a' }, { type: 'status', sessionId: 'a', status: 'running' }]);
   const cara = () => B.__presetDe(e.people.get('a'));
   assert.equal(cara(), 'working', 'sem eventos de expressão ainda: a cara de trabalho base');
-  // Disparo determinístico para o teste (probabilidade 1, semente fixa): o
-  // sorteio real usa a semente da pessoa + o carimbo do evento (ver variantes.js).
-  e.people.get('a').reator = B.__criarReatorVariante({ semente: 7, probabilidade: 1 });
+  // Disparo determinístico para o teste (motor com probabilidade 1): o sorteio
+  // real usa a semente da pessoa + o carimbo do evento (expressoes.js embutido).
+  e.people.get('a').motor = B.__motorExpressoes({ semente: 7, probabilidade: 1 });
   const vistas = [];
   for (let i = 0; i < 8; i += 1) {
-    e = B.__applyEvent(e, { type: 'message', sessionId: 'a', side: i % 2 ? 'assistant' : 'user', at: 1000 + i });
+    // Mensagens com 1,2s de intervalo: a cadência (minMudancaMs = 1s) deixa
+    // ~1 mudança/s — em rajadas a cara não pisca.
+    e = B.__applyEvent(e, { type: 'message', sessionId: 'a', side: i % 2 ? 'assistant' : 'user', at: 1000 + i * 1200 });
     vistas.push(cara());
   }
   for (const v of vistas) {
-    assert.ok(['working', 'focused', 'thinking', 'searching', 'wink'].includes(v), `variante de trabalho (${v})`);
+    assert.ok(['working', 'focused', 'thinking', 'wink'].includes(v), `variante do cenário 'mensagem' (${v})`);
   }
   assert.ok(new Set(vistas).size > 1, 'as mensagens mudam de cara — o disparo é aleatório, nunca uma rotação fixa');
   // Os estados fortes mandam por cima das variantes…
-  e = B.__applyEvent(e, { type: 'question', sessionId: 'a', id: 'q1', text: 'ok?' });
+  e = B.__applyEvent(e, { type: 'question', sessionId: 'a', id: 'q1', text: 'ok?', at: 10000 });
   assert.equal(cara(), 'waiting', 'quem pergunta espera');
-  e = B.__applyEvent(e, { type: 'question/answered', sessionId: 'a', id: 'q1' });
-  assert.ok(['working', 'focused', 'thinking', 'searching', 'wink'].includes(cara()), 'de volta às variantes de trabalho');
-  // Executar uma ferramenta → variante do pool de ferramenta.
-  e = B.__applyEvent(e, { type: 'tool', sessionId: 'a', phase: 'call', name: 'bash', at: 2000 });
+  e = B.__applyEvent(e, { type: 'question/answered', sessionId: 'a', id: 'q1', at: 10500 });
+  assert.ok(['working', 'focused', 'thinking', 'wink'].includes(cara()), 'de volta às variantes de trabalho');
+  // Executar uma ferramenta → variante do cenário 'ferramenta'.
+  e = B.__applyEvent(e, { type: 'tool', sessionId: 'a', phase: 'call', name: 'bash', at: 11500 });
   assert.ok(['tool', 'searching', 'focused', 'thinking'].includes(cara()), `com ferramenta: pool de ferramenta (${cara()})`);
-  // Erro → variante do pool de erro.
-  e = B.__applyEvent(e, { type: 'tool', sessionId: 'a', phase: 'result', name: 'bash', ok: false, at: 2100 });
-  assert.ok(['error', 'surprised', 'disbelief'].includes(cara()), `erro: pool de erro (${cara()})`);
-  // Turno concluído → variante do pool de sucesso.
-  e = B.__applyEvent(e, { type: 'status', sessionId: 'a', status: 'running', at: 3000 });
-  e = B.__applyEvent(e, { type: 'turn/end', sessionId: 'a', kind: 'completed', at: 3100 });
+  // Falha da ferramenta → variante transitória 'ferramenta-erro', mas a cara
+  // persistente do erro é a do contrato.
+  e = B.__applyEvent(e, { type: 'tool', sessionId: 'a', phase: 'result', name: 'bash', ok: false, at: 13000 });
+  assert.equal(cara(), 'error', "a falha da ferramenta mantém a cara 'error' (o transitório é reação one-shot)");
+  // Turno concluído → variante do cenário 'sucesso'.
+  e = B.__applyEvent(e, { type: 'status', sessionId: 'a', status: 'running', at: 15000 });
+  e = B.__applyEvent(e, { type: 'turn/end', sessionId: 'a', kind: 'completed', at: 16000 });
   assert.ok(['success', 'celebrating', 'approval', 'wink'].includes(cara()), `concluído: pool de sucesso (${cara()})`);
   // Disponível dorme sempre.
-  e = B.__applyEvent(e, { type: 'status', sessionId: 'a', status: 'idle', at: 4000 });
+  e = B.__applyEvent(e, { type: 'status', sessionId: 'a', status: 'idle', at: 18000 });
   assert.equal(cara(), 'sleeping', '…e quem está Disponível dorme');
 });
 

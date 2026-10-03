@@ -4,7 +4,8 @@
  * Não vê o DSH: recebe apenas eventos normalizados {type, ...} (docs/contratos-plugin.md,
  * secção 1) e devolve SEMPRE um estado NOVO — nunca muta o estado de entrada e não usa
  * relógio, timers nem Math.random (determinístico e testável: os sorteios de
- * expressão são o PRNG puro de variantes.js, com o estado uint32 na própria pessoa).
+ * expressão são o motor PURO de expressoes.js, com o estado uint32 e os sacos
+ * de shuffle bag na própria pessoa).
  *
  * API exportada (contrato, secção 2, nada mais):
  *   createOfficeState()          -> estado inicial vazio
@@ -74,44 +75,109 @@ function deriveEmoji(person) {
   }
 }
 
-/* VARIANTES de expressão durante o trabalho (biblioteca Avataaars): eventos
- * reais (mensagem, ferramenta, erro, sucesso) disparam SORTEIOS de variantes
- * dentro de pools semânticos — cada variante tem o(s) seu(s) disparo(s) e cada
- * pessoa tem O SEU (probabilidade própria + anti-repetição). O sorteio é o
- * PRNG PURO de variantes.js: o estado (uint32) vive na pessoa, clona-se com o
- * resto e a sequência é determinística por pessoa — sem relógio nem
- * Math.random. Os estados fortes (espera, erro, ferramenta, sucesso) continuam
- * a mandar; as variantes mandam enquanto se trabalha. */
-import { varianteHash, varianteSorteio } from './variantes.js';
+/* EXPRESSÕES durante o trabalho (biblioteca Avataaars): os eventos reais
+ * (mensagem, ferramenta, erro, sucesso, retry, compactação, subagente, pressão
+ * de contexto…) mapeiam-se para CENÁRIOS do motor de expressões
+ * (dsh-plugin/src/expressoes.js) e cada cenário sorteia a SUA variante com
+ * shuffle bag por pessoa — determinístico e anti-repetição, sem relógio nem
+ * Math.random (o estado uint32 e os sacos vivem na pessoa e clonam-se com o
+ * resto). Os estados fortes (espera, erro, ferramenta, sucesso) continuam a
+ * mandar; as variantes mandam enquanto se trabalha. */
+import {
+  expressaoHash,
+  EXPRESSOES_TERMINAIS,
+  cenarioDeEvento,
+  prioridadeDeCenario,
+  nivelDePressao,
+  expressaoAplicavel,
+  sortearExpressao
+} from './expressoes.js';
 
-/* Sorteia a variante de UM evento para uma pessoa e guarda o novo estado do
- * PRNG. Devolve o preset sorteado ou null (o disparo não aconteceu). */
-function drawVariante(person, evento, sal) {
-  const r = varianteSorteio({
+/* Cenário do motor → campo da pessoa que guarda a variante sorteada (a cara
+ * persistente). 'pergunta'/'aprovacao'/'ocioso'/'dormir' guardam a sua
+ * variante mas NÃO mandam: quem pergunta/aprova fica em 'waiting' (vence as
+ * variantes) e o repouso persistente é 'idle' — 'wink' de 'ocioso' é
+ * micro-interação de apresentação, vive em cima do hold e não o substitui
+ * (dossiê Q3/S33). 'ferramenta-erro' guarda em varianteFerramentaErro: a cara
+ * persistente da falha de ferramenta é a do contrato ('error', ver
+ * tests/plugin/state.test.mjs) e a variante de baixa intensidade serve as
+ * superfícies de apresentação (reação one-shot). */
+const SLOT_DE_CENARIO = {
+  sucesso: 'varianteSucesso',
+  erro: 'varianteErro',
+  'ferramenta-erro': 'varianteFerramentaErro',
+  ferramenta: 'varianteFerramenta',
+  mensagem: 'varianteTrabalho',
+  'erro-transitorio': 'varianteTrabalho',
+  compactacao: 'varianteTrabalho',
+  subagente: 'varianteTrabalho',
+  contexto: 'varianteTrabalho',
+  sobrecarga: 'varianteTrabalho',
+  cancelado: 'varianteCancelado',
+  pergunta: 'varianteEspera',
+  aprovacao: 'varianteEspera',
+  ocioso: 'varianteOcioso',
+  dormir: 'varianteOcioso'
+};
+
+/* Sorteia a expressão de UM evento para uma pessoa e guarda o novo estado do
+ * motor (PRNG + sacos). Devolve o preset sorteado ou null (o disparo não
+ * aconteceu — ou o desenho foi suprimido pela arbitragem temporal). O
+ * desenho acontece SEMPRE antes das mudanças de estado do evento, para a
+ * anti-repetição comparar com a cara que estava visível. */
+function drawExpressao(person, event, grau) {
+  const cenario = cenarioDeEvento(event, person);
+  if (!cenario) return null;
+  const novoTurno = event.type === 'message' && event.side === 'user';
+  const aplicavel = expressaoAplicavel({
+    prioridadeAtual: person.expressaoCenario ? prioridadeDeCenario(person.expressaoCenario) : 0,
+    prioridadeNova: prioridadeDeCenario(cenario),
+    at: event.at,
+    ultimaAt: person.expressaoAt,
+    terminal: person.expressaoTerminal,
+    novoTurno
+  });
+  if (!aplicavel) return null;
+  const r = sortearExpressao({
     estado: person.varianteEstado,
-    evento,
+    sacos: person.expressaoSacos,
+    cenario,
     atual: deriveExpression(person),
     semente: person.varianteSemente,
-    sal: sal == null ? null : sal,
+    sal: event.at == null ? null : event.at,
     disponiveis: null,
-    probabilidade: null
+    probabilidade: null,
+    grau: grau == null ? null : grau,
+    pessoa: person
   });
   person.varianteEstado = r.estado;
+  person.expressaoSacos = r.sacos;
+  /* stickiness terminal: um cenário terminal marca; um desenho que se aplica
+   * (ou um novo turno do utilizador) liberta a cara [dossiê Q6/Q8]. */
+  if (EXPRESSOES_TERMINAIS.indexOf(cenario) !== -1) person.expressaoTerminal = cenario;
+  else if (novoTurno || r.preset) person.expressaoTerminal = null;
+  if (!r.preset) return null;
+  person.expressaoCenario = cenario;
+  if (typeof event.at === 'number' && isFinite(event.at)) person.expressaoAt = event.at;
+  const slot = SLOT_DE_CENARIO[cenario];
+  if (slot) person[slot] = r.preset;
   return r.preset;
 }
 
 /* Expressão Avataaars derivada — override vencedor quando definido (ex.:
- * 'approval'), estados fortes com a SUA variante sorteada (erro pode ser
- * 'surprised'/'disbelief', sucesso 'celebrating'/'approval'…) e, enquanto se
- * trabalha, a variante sorteada a cada mensagem. */
+ * 'approval'), espera (pergunta/aprovação) por cima de TUDO o resto, estados
+ * fortes com a SUA variante sorteada (erro pode ser 'surprised'/'disbelief',
+ * sucesso 'celebrating'/'approval'…) e, enquanto se trabalha, a variante
+ * sorteada a cada evento. Fallbacks: idle. */
 function deriveExpression(person) {
   if (person.expressionOverride) return person.expressionOverride;
   if (person.question) return 'waiting';
   if (person.approvals.length > 0) return 'waiting';
-  if (person.status === 'error') return person.varianteErro || 'error';
+  if (person.status === 'error' || person.status === 'blocked') return person.varianteErro || 'error';
   if (person.lastTool && person.lastTool.phase === 'call') return person.varianteFerramenta || 'tool';
   if (person.status === 'done') return person.varianteSucesso || 'success';
   if (person.status === 'working') return person.varianteTrabalho || 'working';
+  if (person.status === 'aborted') return person.varianteCancelado || 'idle';
   return 'idle';
 }
 
@@ -146,14 +212,27 @@ function createPerson(sessionId, event) {
     outputs: [],
     /* campos internos (não apresentar diretamente) */
     expressionOverride: null,
-    /* Reator de variantes: PRNG determinístico por pessoa (estado uint32
-     * clonável) + a personalidade/propensão DELE (semente do id). */
-    varianteSemente: varianteHash('pessoa|' + sessionId),
-    varianteEstado: varianteHash('estado|' + sessionId) || 1,
+    /* Motor de expressões: PRNG determinístico por pessoa (estado uint32
+     * clonável) + a personalidade/propensão DELE (semente do id) + os sacos
+     * de shuffle bag por cenário (tudo serializável e clonável). */
+    varianteSemente: expressaoHash('pessoa|' + sessionId),
+    varianteEstado: expressaoHash('estado|' + sessionId) || 1,
     varianteTrabalho: null,
     varianteFerramenta: null,
     varianteErro: null,
     varianteSucesso: null,
+    varianteCancelado: null,
+    varianteEspera: null,
+    varianteFerramentaErro: null,
+    varianteOcioso: null,
+    expressaoSacos: {},
+    expressaoCenario: null,
+    expressaoAt: null,
+    expressaoTerminal: null,
+    /* pressão de contexto com histerese ('nenhum'|'contexto'|'sobrecarga') */
+    ctxNivel: 'nenhum',
+    /* retentativas CONSECUTIVAS do turno atual (escala de 'erro-transitorio') */
+    retries: 0,
     retrying: false,
     compacting: false,
     lastTool: null,
@@ -220,52 +299,50 @@ export function applyEvent(state, event) {
 
   switch (event.type) {
     case 'status': {
+      /* 'ocioso' (ou 'dormir' no Modo jogo) desenha ANTES da mudança de
+       * estado — a anti-repetição compara com a cara visível. */
+      drawExpressao(person, event);
       person.status = event.status === 'running' ? 'working' : 'idle';
       person.retrying = false;
       person.compacting = false;
+      person.retries = 0;
       person.lastTool = null; /* turno novo: sinal de ferramenta anterior caducou */
       break;
     }
     case 'turn/end': {
-      /* O fim do turno dispara a variante de 'success' (completed) ou de
-       * 'error' (error/blocked) ANTES de mudar o estado — a anti-repetição
-       * compara com a cara que estava visível. */
-      const fim = TURN_END_STATUS[event.kind];
-      if (fim === 'done') {
-        const p = drawVariante(person, 'success', event.at);
-        if (p) person.varianteSucesso = p;
-      } else if (fim === 'error') {
-        const p = drawVariante(person, 'error', event.at);
-        if (p) person.varianteErro = p;
-      }
+      /* O fim do turno dispara o cenário 'sucesso' (completed), 'erro'
+       * (error|blocked|max-tokens) ou 'cancelado' (aborted|interrupted) ANTES
+       * de mudar o estado — a anti-repetição compara com a cara que estava
+       * visível. */
+      drawExpressao(person, event);
       if (Object.hasOwn(TURN_END_STATUS, event.kind)) person.status = TURN_END_STATUS[event.kind];
       person.retrying = false;
       person.compacting = false;
+      person.retries = 0;
       person.lastTool = null;
       break;
     }
     case 'message': {
-      /* A cada mensagem durante o trabalho PODE disparar uma variante nova do
-       * pool de trabalho (o disparo é aleatório e de cada pessoa; nunca repete
-       * a cara atual). Os estados fortes mandam na expressão — isto só manda
-       * enquanto se trabalha (deriveExpression). */
-      const p = drawVariante(person, 'working', event.at);
-      if (p) person.varianteTrabalho = p;
+      /* A cada mensagem (lado do utilizador = novo turno) PODE disparar uma
+       * variante nova do pool de trabalho (o disparo é aleatório e de cada
+       * pessoa; nunca repete a cara atual). Os estados fortes mandam na
+       * expressão — isto só manda enquanto se trabalha (deriveExpression). */
+      drawExpressao(person, event);
       break;
     }
     case 'tool': {
-      /* Executar uma ferramenta dispara a variante do pool de ferramenta;
-       * um resultado com erro dispara a do pool de erro. */
-      if (event.phase === 'call') {
-        const p = drawVariante(person, 'tool', event.at);
-        if (p) person.varianteFerramenta = p;
-      }
+      /* Executar uma ferramenta dispara o cenário 'ferramenta'; um resultado
+       * com ok dispara 'ferramenta' também; um resultado com erro dispara
+       * 'ferramenta-erro' (transitório de baixa intensidade, grau 1). */
+      if (event.phase === 'call') drawExpressao(person, event);
       person.lastTool = { name: event.name ?? 'desconhecida', phase: event.phase, ok: event.ok ?? true };
       if (event.phase === 'result') {
         if (event.ok === false) {
-          const p = drawVariante(person, 'error', event.at);
-          if (p) person.varianteErro = p;
+          drawExpressao(person, event, 1);
           person.status = 'error'; /* ⚠️ também por tool/result */
+        } else {
+          drawExpressao(person, event);
+          person.retries = 0; /* ferramenta respondeu: retentativas acabaram */
         }
         pushOutput(person, { kind: 'tool', text: person.lastTool.name, ok: event.ok !== false });
       }
@@ -273,6 +350,7 @@ export function applyEvent(state, event) {
     }
     case 'question': {
       /* Pergunta é persistente; uma nova substitui a ativa e a antiga fica no painel. */
+      drawExpressao(person, event);
       if (person.question) pushOutput(person, { kind: 'question', text: person.question.text });
       person.question = {
         id: event.id,
@@ -290,6 +368,7 @@ export function applyEvent(state, event) {
       break;
     }
     case 'approval': {
+      drawExpressao(person, event);
       const entrada = { id: event.id, toolName: event.toolName, callId: event.callId ?? null, reason: event.reason ?? null };
       const i = person.approvals.findIndex((a) => a.id === event.id);
       if (i >= 0) person.approvals[i] = entrada;
@@ -301,6 +380,7 @@ export function applyEvent(state, event) {
       break;
     }
     case 'subagent/start': {
+      drawExpressao(person, event);
       const entrada = { childId: event.childId, runId: event.runId, local: event.local ?? true };
       const i = person.subagents.findIndex((s) => s.runId === event.runId);
       if (i >= 0) person.subagents[i] = entrada;
@@ -331,7 +411,9 @@ export function applyEvent(state, event) {
         contextWindow: event.contextWindow !== undefined ? event.contextWindow : person.model?.contextWindow ?? null
       };
       /* CTX: used = projectedTokens ?? pressureTokens; window = contextWindow.
-       * Campos last-wins independentes; sem ambos → null (UI mostra "CTX —"). */
+       * Campos last-wins independentes; sem ambos → null (UI mostra "CTX —").
+       * A pressão também dispara os cenários 'contexto'/'sobrecarga' (Q12). */
+      drawExpressao(person, event);
       const used = event.projectedTokens ?? event.pressureTokens;
       const window = event.contextWindow !== undefined ? event.contextWindow : undefined;
       if (used !== undefined || window !== undefined) {
@@ -339,14 +421,32 @@ export function applyEvent(state, event) {
         const u = used !== undefined ? used : base.used;
         const w = window !== undefined ? window : base.window;
         person.ctx = { used: u, window: w, ratio: u != null && w != null ? u / w : null };
+        person.ctxNivel = nivelDePressao(person.ctx, person.ctxNivel);
       }
       break;
     }
+    case 'ctx': {
+      /* Projeção contextPressure (§1): used/window last-wins, com a mesma
+       * forma de `model`; dispara 'contexto'/'sobrecarga' com histerese. */
+      drawExpressao(person, event);
+      const base = person.ctx ?? { used: null, window: null };
+      const u = event.used !== undefined ? event.used : base.used;
+      const w = event.window !== undefined ? event.window : base.window;
+      person.ctx = { used: u, window: w, ratio: u != null && w != null ? u / w : null };
+      person.ctxNivel = nivelDePressao(person.ctx, person.ctxNivel);
+      break;
+    }
     case 'retry': {
+      /* 'erro-transitorio' ESCALA a cada retentativa consecutiva (Q11). */
+      person.retries = (person.retries ?? 0) + 1;
+      drawExpressao(person, event);
       person.retrying = true;
       break;
     }
     case 'compaction': {
+      /* Micro-reação breve de 'compactacao' seguida de regresso a 'contexto'
+       * nos desenhos seguintes (Q12). */
+      if (event.phase === 'start') drawExpressao(person, event);
       person.compacting = event.phase === 'start';
       break;
     }

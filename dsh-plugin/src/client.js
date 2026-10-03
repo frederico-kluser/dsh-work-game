@@ -110,7 +110,8 @@ window.__ModuleLoader__.load({
      *   session/added   {sessionId, title?, cwd?, parentId?, subagent, blank, model?}
      *   session/meta    {sessionId, title?, cwd?, parentId?, subagent, blank} — só em mudança
      *   session/removed {sessionId}
-     *   workspaces      {fonte: 'dsh'|'nenhuma', items: [{id, title, path, sessionIds}], archived}
+     *   workspaces      {fonte: 'dsh'|'nenhuma', items: [{id, title, path, sessionIds}],
+     *                    archived: string[]|null}   — null = arquivo DESCONHECIDO
      *   subagent/start|end {sessionId: pai, childId, runId: childId}
      *                   — só subagentes (origin 'subagent') A CORRER: o catálogo guarda
      *                     os terminados, que não são delegação em curso
@@ -252,7 +253,11 @@ window.__ModuleLoader__.load({
 
     /** Snapshot de IWorkspaces → evento `workspaces` (null enquanto a baseline não
      *  chegou ou quando o serviço falhou sem dados: a sala mantém o agrupamento por
-     *  pasta em vez de despejar tudo em "Sem workspace"). */
+     *  pasta em vez de despejar tudo em "Sem workspace").
+     *  Arquivo: no DSH vive no REGISTO de workspaces (`archivedSessionIds` do
+     *  WorkspaceBaseline), nunca no cabeçalho da sessão — daí `archived: string[]`
+     *  quando a lista é conhecida (fonte 'dsh') e `null` quando é desconhecida
+     *  (sem serviço/baseline): nunca "limpo" inventado. */
     function workspacesDoSnapshot(snap) {
       if (!snap || typeof snap !== 'object') return null;
       if (snap.phase === 'pending') return null;
@@ -269,7 +274,7 @@ window.__ModuleLoader__.load({
           path: typeof w.path === 'string' ? w.path : '',
           sessionIds: Array.isArray(w.sessionIds) ? w.sessionIds.map(String) : [],
         })),
-        archived: Array.isArray(snap.archivedSessionIds) ? snap.archivedSessionIds.map(String) : [],
+        archived: Array.isArray(snap.archivedSessionIds) ? snap.archivedSessionIds.map(String) : null,
       };
     }
 
@@ -341,7 +346,8 @@ window.__ModuleLoader__.load({
       }));
 
       /* ── workspaces: ligação opcional e tardia ─────────────────────────── */
-      const SEM_WORKSPACES = { type: 'workspaces', fonte: 'nenhuma', items: [], archived: [] };
+      /* 'nenhuma' = sem serviço: o arquivo é DESCONHECIDO (archived: null), não vazio. */
+      const SEM_WORKSPACES = { type: 'workspaces', fonte: 'nenhuma', items: [], archived: null };
       let wsList = null;        /* modelo ligado (ctx.get('workspaces').list — objeto estável) */
       let wsSoltar = null;      /* unsubscribe do modelo */
       let wsAssinatura = JSON.stringify(SEM_WORKSPACES);
@@ -880,6 +886,614 @@ function criarReatorVariante(opts) {
   /* === FIM variantes.js embutido === */
 
     /* ================================================================
+     * 1-ter. MOTOR DE EXPRESSÕES — cópia embutida de
+     *        dsh-plugin/src/expressoes.js (fonte única; `export` removido).
+     *        Regenerar: python3 scripts/embutir-expressoes-motor.py --embutir --alvo client
+     *        (a paridade fonte↔cópia é imposta por tests/plugin/expressoes.test.mjs)
+     * ================================================================ */
+    /* === INÍCIO expressoes.js embutido === */
+/*
+ * dsh-plugin/src/expressoes.js — MOTOR DE EXPRESSÕES (FONTE).
+ *
+ * Escolhe a expressão facial de uma pessoa a cada evento real do trabalho:
+ * (a) TAXONOMIA de cenários (EXPRESSOES_CENARIOS) mapeada do vocabulário
+ *     normalizado de eventos (docs/contratos-plugin.md §1);
+ * (b) SORTEIO de variantes dentro de cada cenário com shuffle bag PURO —
+ *     uma cópia por variante, sem reposição, com anti-repetição e correção de
+ *     fronteira entre ciclos;
+ * (c) ARBITRAGEM/tempo (expressaoAplicavel): min-dwell, cadência máxima,
+ *     prioridades explícitas e "stickiness" terminal — tudo com carimbos `at`
+ *     do evento, nunca com relógio.
+ *
+ * Base de evidência: pesquisas/2026-10-02-que-taxonomia-de-expressoes-faciais-
+ * regras-de-mapeamento-eve.md (Q3/Q8 = transições e anti-flicker; Q9 = shuffle
+ * bag; Q10 = tempos de categorização/duração; Q11 = dose-resposta por
+ * intensidade; Q12 = limiares de pressão de contexto).
+ *
+ * DUAS FORMAS, um só algoritmo:
+ *   sortearExpressao(…)     — PURO: estado uint32 + sacos entram, estado +
+ *                             sacos saem; sem relógio nem Math.random. Usado
+ *                             por state.js (o estado vive na pessoa e clona-se).
+ *   criarMotorExpressoes    — motor com estado interno (arranque determinístico
+ *                             por semente; a entropia real entra pelo `sal` de
+ *                             cada evento — ex.: o seu carimbo `at`), para as
+ *                             superfícies de apresentação (app.js demo e o
+ *                             Modo jogo do client.js).
+ *
+ * CÓPIAS EMBUTIDAS (paridade por teste — regenerar quando este ficheiro mudar;
+ * o texto embutido é este ficheiro tal-e-qual com os `export` removidos):
+ *   expressions.js            — script puro da demo (window.DSH_EXPRESSIONS.expressoes)
+ *   dsh-plugin/src/client.js  — bundle do browser (seguimento à parte)
+ * Regenerar: python3 scripts/embutir-expressoes-motor.py --embutir --alvo todos.
+ *
+ * NOTA de autocontenção: este módulo NÃO importa variantes.js — o bloco
+ * embutido tem de ser executável sozinho (expressions.js/client.js não podem
+ * importar irmãos). Por isso o hash/PRNG têm nomes próprios (expressaoHash,
+ * expressaoPasso) em vez de reutilizar varianteHash/variantePasso.
+ */
+
+/* ------------------------------------------------------------------ */
+/* Limiares e tempos (Q10/Q12)                                          */
+/* ------------------------------------------------------------------ */
+
+/*
+ * Q10 (ronda 2): a categorização CONSCIENTE de uma expressão demora ~0,6–1,0 s
+ * e a janela de macroexpressão vai de 0,5 a 4 s → minDwellMs = 1200 ms para
+ * desenhos de prioridade inferior; minMudancaMs = 1000 ms é a cadência máxima
+ * (~1 mudança/s [Q3/S29]; nunca <0,5 s ou lê-se microexpressão/piscar [Q3/S24]);
+ * duracaoMensagemMs = 2800 ms é a duração por mensagem (Q10: 2,5–3,0 s, banda
+ * 2,0–4,0) usada pelas superfícies de apresentação.
+ *
+ * Q12 (ronda 2): NÃO existem limiares de preenchimento de contexto validados —
+ * aviso 0.7 / sobrecarga 0.85 são EXTRAPOLAÇÃO declarada (convenção 50/75/90
+ * do Agent Zero), tal como o gatilho absoluto de 200 000 tokens do pedido do
+ * utilizador ("contexto > 200k"). A histerese segue o padrão de deadband
+ * ANSI/ISA-18.2 [S56]: um nível ativo só desativa 5 pontos abaixo do limiar
+ * de entrada (anti-flicker em rajadas de medições).
+ */
+const EXPRESSOES_LIMIARES = {
+  aviso: 0.7,
+  sobrecarga: 0.85,
+  histerese: 0.05,
+  minDwellMs: 1200,
+  minMudancaMs: 1000,
+  duracaoMensagemMs: 2800,
+  /* gatilho absoluto de pressão (tokens), independente da janela */
+  avisoAbsoluto: 200000
+};
+
+/* ------------------------------------------------------------------ */
+/* Taxonomia de cenários                                                */
+/* ------------------------------------------------------------------ */
+
+/*
+ * Cada cenário tem:
+ *   pool       variantes que podem ser sorteadas (os 14 presets da biblioteca
+ *              pertencem todos a pelo menos um pool; 'sleeping' é o 15.º, do
+ *              Modo jogo);
+ *   base       preset de reserva — fallback quando a identidade NENHUM preset
+ *              do pool tem (ex.: identidades aleatórias só têm
+ *              idle/working/success/error);
+ *   prob       probabilidade-base do disparo (0..1); cada pessoa ainda a modula
+ *              com o seu fator (0.85..1.15);
+ *   prioridade arbitragem em rajadas: erro/pergunta/aprovação (95-90) acima de
+ *              ação/ferramenta (50) acima de mensagem (40) acima de repouso
+ *              (10) [Q8/S59: tabela de prioridade explícita];
+ *   graus      (opcional, Q11) dose-resposta: a intensidade da expressão é
+ *              legível pela AMPLITUDE do traço diagnóstico, em passos ≥20% —
+ *              20–40% leem-se como neutro, ≥60% é confiável. Sem amplitude
+ *              variável nos SVGs, a dose entra pela ESCOLHA do preset: cada
+ *              grau ordena os presets do pool por amplitude percebida (da mais
+ *              contida para a mais intensa) e um desenho com `grau` usa o
+ *              escalão pedido (1-based, saturado; sem `grau` usa o pool todo).
+ */
+const EXPRESSOES_CENARIOS = {
+  pergunta: {
+    pool: ['waiting', 'thinking', 'surprised'], base: 'waiting', prob: 1, prioridade: 95
+  },
+  aprovacao: {
+    pool: ['approval', 'waiting', 'surprised'], base: 'waiting', prob: 1, prioridade: 95
+  },
+  erro: {
+    pool: ['error', 'surprised', 'disbelief'], base: 'error', prob: 1, prioridade: 90,
+    /* terminal: mantém o pool todo por omissão; o grau doseia por severidade */
+    graus: [
+      { grau: 1, intensidade: 0.3, presets: ['surprised'] },
+      { grau: 2, intensidade: 0.7, presets: ['disbelief'] },
+      { grau: 3, intensidade: 1.0, presets: ['error'] }
+    ]
+  },
+  sucesso: {
+    pool: ['success', 'celebrating', 'approval', 'wink'], base: 'success', prob: 0.9, prioridade: 85
+  },
+  'ferramenta-erro': {
+    pool: ['surprised', 'disbelief', 'error'], base: 'error', prob: 1, prioridade: 80,
+    /* transitório de BAIXA intensidade [Q6: surpresa-confusão breve] */
+    graus: [
+      { grau: 1, intensidade: 0.3, presets: ['surprised'] },
+      { grau: 2, intensidade: 0.7, presets: ['disbelief'] },
+      { grau: 3, intensidade: 1.0, presets: ['error'] }
+    ]
+  },
+  'erro-transitorio': {
+    pool: ['surprised', 'thinking', 'disbelief'], base: 'thinking', prob: 1, prioridade: 75,
+    /* ESCALA a cada retentativa consecutiva [Q6/Q11] — ver grauDeCenario */
+    graus: [
+      { grau: 1, intensidade: 0.3, presets: ['surprised'] },
+      { grau: 2, intensidade: 0.6, presets: ['thinking'] },
+      { grau: 3, intensidade: 1.0, presets: ['disbelief'] }
+    ]
+  },
+  cancelado: {
+    pool: ['disbelief', 'waiting', 'idle'], base: 'idle', prob: 1, prioridade: 70
+  },
+  compactacao: {
+    /* micro-reação breve seguida de regresso a 'contexto' [Q12] */
+    pool: ['surprised', 'disbelief', 'thinking'], base: 'thinking', prob: 1, prioridade: 65
+  },
+  sobrecarga: {
+    /* nível alto RARO e CURTO [Q12]: após este desenho, o próximo desenho de
+       prioridade inferior regressa a 'contexto'/'focused' (estado limitado no
+       tempo — ver docs/ALGORITMO-EXPRESSOES.md) */
+    pool: ['thinking', 'disbelief', 'surprised'], base: 'thinking', prob: 1, prioridade: 60
+  },
+  ferramenta: {
+    pool: ['tool', 'searching', 'focused', 'thinking'], base: 'working', prob: 0.85, prioridade: 50
+  },
+  contexto: {
+    pool: ['focused', 'thinking'], base: 'focused', prob: 1, prioridade: 45
+  },
+  mensagem: {
+    pool: ['working', 'focused', 'thinking', 'wink'], base: 'working', prob: 0.5, prioridade: 40
+  },
+  subagente: {
+    pool: ['thinking', 'tool', 'focused'], base: 'working', prob: 0.6, prioridade: 35
+  },
+  ocioso: {
+    /* 'wink' é micro-interação de repouso (vive EM CIMA do hold, não o
+       substitui [Q3/S33]) — nas superfícies é reação one-shot */
+    pool: ['idle', 'wink'], base: 'idle', prob: 0.7, prioridade: 10
+  },
+  dormir: {
+    /* Modo jogo: quem está Disponível dorme (assets/avatars/sleeping/) */
+    pool: ['sleeping'], base: 'sleeping', prob: 1, prioridade: 5
+  }
+};
+
+/* Cenários terminais: a cara fica até novo turno do utilizador ou evento de
+ * prioridade igual/superior [Q6: o erro persiste até reconhecimento; Q8]. */
+const EXPRESSOES_TERMINAIS = ['sucesso', 'erro', 'cancelado'];
+
+/* ------------------------------------------------------------------ */
+/* PRNG/hash próprios (bloco embutido autocontido)                      */
+/* ------------------------------------------------------------------ */
+
+/* FNV-1a → uint32. Personalidade estável por (pessoa, cenário) e sementes. */
+function expressaoHash(texto) {
+  var h = 2166136261 >>> 0;
+  var s = String(texto == null ? '' : texto);
+  for (var i = 0; i < s.length; i += 1) {
+    h ^= s.charCodeAt(i);
+    h = Math.imul(h, 16777619) >>> 0;
+  }
+  return h >>> 0;
+}
+
+/* xorshift32: um passo do PRNG (uint32, nunca 0). */
+function expressaoPasso(estado) {
+  var a = (estado >>> 0) || 0x9E3779B9;
+  a ^= a << 13; a >>>= 0;
+  a ^= a >>> 17;
+  a ^= a << 5; a >>>= 0;
+  return a || 1;
+}
+
+function expressaoFracao(estado) {
+  return (estado >>> 0) / 4294967296;
+}
+
+/* Fator de personalidade: cada pessoa tem A SUA probabilidade de disparo. */
+function expressaoFator(semente) {
+  return 0.85 + (expressaoHash('proba|' + semente) % 31) / 100; /* 0.85..1.15 */
+}
+
+/* ------------------------------------------------------------------ */
+/* Pools, base e prioridade                                             */
+/* ------------------------------------------------------------------ */
+
+function cenarioDe(cenario) {
+  return EXPRESSOES_CENARIOS[cenario] || EXPRESSOES_CENARIOS.mensagem;
+}
+
+/* Pool efetivo de um cenário: os presets do pool que a identidade tem;
+ * se nenhum, o `base` do cenário; se também não, [] (nada a sortear).
+ * Mesma semântica de poolDeVariante (variantes.js). */
+function poolDeCenario(cenario, disponiveis) {
+  var cen = cenarioDe(cenario);
+  if (!disponiveis || !disponiveis.length) return cen.pool.slice();
+  var ok = [];
+  for (var i = 0; i < cen.pool.length; i += 1) {
+    if (disponiveis.indexOf(cen.pool[i]) !== -1) ok.push(cen.pool[i]);
+  }
+  if (ok.length) return ok;
+  if (disponiveis.indexOf(cen.base) !== -1) return [cen.base];
+  return [];
+}
+
+/* Fallback determinístico de um cenário (sem sorteio): a `base` do cenário
+ * respeitando os presets da identidade; sem a base, a primeira opção do pool
+ * efetivo; sem nada, null. */
+function expressaoBase(cenario, disponiveis) {
+  var cen = cenarioDe(cenario);
+  if (!disponiveis || !disponiveis.length) return cen.base;
+  if (disponiveis.indexOf(cen.base) !== -1) return cen.base;
+  var pool = poolDeCenario(cenario, disponiveis);
+  return pool.length ? pool[0] : null;
+}
+
+/* Prioridade de arbitragem de um cenário (0 para cenário desconhecido). */
+function prioridadeDeCenario(cenario) {
+  var cen = EXPRESSOES_CENARIOS[cenario];
+  return cen && typeof cen.prioridade === 'number' ? cen.prioridade : 0;
+}
+
+/* ------------------------------------------------------------------ */
+/* Dose-resposta (Q11): grau de intensidade por subtipo                 */
+/* ------------------------------------------------------------------ */
+
+/*
+ * Q11: a intensidade da expressão escala com a GRAVIDADE/escalada do evento.
+ * Regra de escala de retentativas (só 'erro-transitorio'): sobe UM grau a cada
+ * `retry` CONSECUTIVO do mesmo turno (o chamador conta-os em `pessoa.retries`;
+ * sem esse campo, o chamador deriva a contagem dos eventos 'retry' seguidos e
+ * passa `grau` a sortearExpressao). state.js zera `retries` quando o turno
+ * termina, o status muda ou uma ferramenta responde com sucesso.
+ * Saturação no último escalão. Os restantes cenários com `graus` só doseiam
+ * com `grau` EXPLÍCITO (ex.: 'ferramenta-erro' fixa-se em grau 1, transitório
+ * de baixa intensidade; 'erro' terminal usa o pool todo por omissão).
+ * Sem grau pedido → pool inteiro (variedade).
+ */
+function grauDeCenario(cenario, pessoa, grau) {
+  var cen = EXPRESSOES_CENARIOS[cenario];
+  if (!cen || !cen.graus || !cen.graus.length) return null;
+  var limite = cen.graus.length;
+  if (typeof grau === 'number' && isFinite(grau) && grau >= 1) {
+    return Math.floor(Math.min(grau, limite));
+  }
+  if (cenario === 'erro-transitorio' && pessoa &&
+      typeof pessoa.retries === 'number' && isFinite(pessoa.retries) && pessoa.retries >= 1) {
+    return Math.floor(Math.min(pessoa.retries, limite));
+  }
+  return null;
+}
+
+/* ------------------------------------------------------------------ */
+/* Pressão de contexto (Q12): limiares com histerese                    */
+/* ------------------------------------------------------------------ */
+
+/*
+ * Dual-threshold com deadband (ANSI/ISA-18.2 [S56]):
+ *   - 'sobrecarga': entra com used/window ≥ 0.85; só desativa abaixo de 0.80;
+ *   - 'contexto':   entra com used/window ≥ 0.70 OU used ≥ 200 000 (pedido do
+ *                   utilizador — janelas grandes não disparam só pela razão);
+ *                   só desativa 5 pontos (ou 5%) abaixo do limiar de entrada.
+ * Devolve 'nenhum' | 'contexto' | 'sobrecarga' — puro, lê só {used, window}.
+ */
+function nivelDePressao(ctx, nivelAnterior) {
+  var usado = ctx && typeof ctx.used === 'number' && isFinite(ctx.used) ? ctx.used : null;
+  var janela = ctx && typeof ctx.window === 'number' && isFinite(ctx.window) ? ctx.window : null;
+  var razao = (usado != null && janela != null && janela > 0) ? usado / janela : null;
+  var L = EXPRESSOES_LIMIARES;
+  var nivel = (nivelAnterior === 'contexto' || nivelAnterior === 'sobrecarga') ? nivelAnterior : 'nenhum';
+
+  var entraSobrecarga = nivel === 'sobrecarga' ? L.sobrecarga - L.histerese : L.sobrecarga;
+  if (razao != null && razao >= entraSobrecarga) return 'sobrecarga';
+
+  var entraAviso = nivel === 'nenhum' ? L.aviso : L.aviso - L.histerese;
+  var entraAbsoluto = nivel === 'nenhum' ? L.avisoAbsoluto : L.avisoAbsoluto * (1 - L.histerese);
+  if (razao != null && razao >= entraAviso) return 'contexto';
+  if (usado != null && usado >= entraAbsoluto) return 'contexto';
+  return 'nenhum';
+}
+
+/* ------------------------------------------------------------------ */
+/* Mapeamento evento → cenário (vocabulário normalizado §1)              */
+/* ------------------------------------------------------------------ */
+
+/*
+ * Devolve o nome do cenário de EXPRESSOES_CENARIOS, ou null quando o evento
+ * não dispara expressão (resolução de pendências, fim de subagente/compactação,
+ * eventos de sessão, utilização...). `pessoa` (opcional) traz o nível de
+ * pressão anterior (pessoa.ctxNivel) para a histerese e o modo de jogo
+ * (pessoa.modoJogo → 'dormir' em vez de 'ocioso').
+ */
+function cenarioDeEvento(evento, pessoa) {
+  if (!evento || typeof evento.type !== 'string') return null;
+  switch (evento.type) {
+    case 'question': return 'pergunta';
+    case 'approval': return 'aprovacao';
+    case 'turn/end': {
+      if (evento.kind === 'completed') return 'sucesso';
+      if (evento.kind === 'error' || evento.kind === 'blocked' || evento.kind === 'max-tokens') return 'erro';
+      if (evento.kind === 'aborted' || evento.kind === 'interrupted') return 'cancelado';
+      return null; /* kind desconhecido: sem expressão nova */
+    }
+    case 'tool': {
+      if (evento.phase === 'result' && evento.ok === false) return 'ferramenta-erro';
+      return 'ferramenta'; /* phase 'call' ou result ok */
+    }
+    case 'message': return 'mensagem'; /* side 'user' | 'assistant' */
+    case 'retry': return 'erro-transitorio';
+    case 'compaction': return evento.phase === 'start' ? 'compactacao' : null;
+    case 'subagent/start': return 'subagente';
+    case 'ctx': case 'model': {
+      /* a pressão de contexto chega por `ctx` ou pela projeção `model` */
+      var usado = evento.used;
+      if (usado == null) usado = evento.projectedTokens != null ? evento.projectedTokens : evento.pressureTokens;
+      var nivel = nivelDePressao(
+        { used: usado, window: evento.window != null ? evento.window : evento.contextWindow },
+        pessoa ? pessoa.ctxNivel : null
+      );
+      if (nivel === 'sobrecarga') return 'sobrecarga';
+      if (nivel === 'contexto') return 'contexto';
+      return null;
+    }
+    case 'status': {
+      if (evento.status !== 'idle') return null; /* running não dispara cara nova */
+      return pessoa && pessoa.modoJogo ? 'dormir' : 'ocioso';
+    }
+    default: return null;
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* Arbitragem/tempo (Q3/Q8/Q10)                                         */
+/* ------------------------------------------------------------------ */
+
+/*
+ * Decide se um desenho candidato se aplica. entrada:
+ *   prioridadeAtual  prioridade da cara visível (0 = sem cara desenhada)
+ *   prioridadeNova   prioridade do cenário candidato
+ *   at               carimbo do evento novo (número | null)
+ *   ultimaAt         carimbo da última mudança de cara (número | null)
+ *   terminal         cenário terminal ativo ('sucesso'|'erro'|'cancelado') | null
+ *   novoTurno        true quando o evento é `message` com side 'user'
+ *
+ * Regras (citações do dossiê):
+ *   (a) min-dwell [Q10]: prioridade INFERIOR só desenha depois de
+ *       minDwellMs (1200 ms) da última mudança — as rajadas não piscam a cara;
+ *   (b) stickiness terminal [Q6/Q8]: depois de sucesso/erro/cancelado a cara
+ *       fica até um message do utilizador (novo turno) ou um evento de
+ *       prioridade igual/superior (erro/pergunta/aprovação nunca se escondem);
+ *   (c) cadência [Q3/Q10]: prioridade IGUAL só redesenha a partir de
+ *       minMudancaMs (1000 ms — no máximo ~1 mudança/s);
+ *   (d) prioridade superior aplica-se SEMPRE [Q8/S59: tabela explícita
+ *       erro/terminal > ação/tool > idle].
+ * Sem carimbos (`at`/`ultimaAt` ausentes) não há tempo que impor: as regras
+ * (a) e (c) não bloqueiam (o estado é puro e às vezes não traz datas).
+ */
+function expressaoAplicavel(entrada) {
+  entrada = entrada || {};
+  var pAtual = typeof entrada.prioridadeAtual === 'number' && isFinite(entrada.prioridadeAtual)
+    ? entrada.prioridadeAtual : 0;
+  var pNova = typeof entrada.prioridadeNova === 'number' && isFinite(entrada.prioridadeNova)
+    ? entrada.prioridadeNova : 0;
+  var at = typeof entrada.at === 'number' && isFinite(entrada.at) ? entrada.at : null;
+  var ultimaAt = typeof entrada.ultimaAt === 'number' && isFinite(entrada.ultimaAt) ? entrada.ultimaAt : null;
+  var delta = (at != null && ultimaAt != null) ? at - ultimaAt : null;
+  var terminal = typeof entrada.terminal === 'string' && EXPRESSOES_TERMINAIS.indexOf(entrada.terminal) !== -1
+    ? entrada.terminal : null;
+  var novoTurno = entrada.novoTurno === true;
+
+  /* (b) stickiness terminal [Q6/Q8] */
+  if (terminal) {
+    if (pNova >= prioridadeDeCenario(terminal)) return true; /* igual/superior desgruda */
+    if (novoTurno) return true; /* message do utilizador: novo turno */
+    return false; /* a cara terminal fica */
+  }
+
+  /* (d) prioridade superior aplica-se SEMPRE */
+  if (pNova > pAtual) return true;
+
+  /* (a) min-dwell para prioridade inferior */
+  if (pNova < pAtual && delta != null && delta < EXPRESSOES_LIMIARES.minDwellMs) return false;
+
+  /* (c) cadência máxima para prioridade igual */
+  if (pNova === pAtual && delta != null && delta < EXPRESSOES_LIMIARES.minMudancaMs) return false;
+
+  return true;
+}
+
+/* ------------------------------------------------------------------ */
+/* Sorteio de variantes — SHUFFLE BAG PURO                              */
+/* ------------------------------------------------------------------ */
+
+/*
+ * Shuffle bag puro com UMA cópia por variante + guarda de fronteira +
+ * anti-repetição = não-repetição garantida; pesos por multiplicidade foram
+ * rejeitados porque quebram a não-repetição (verificação adversarial da
+ * pesquisa): com m(v) ≥ 2 há repetições intra-ciclo por construção e
+ * sequências A,B,A,B têm probabilidade positiva. A variação de frequência
+ * entre pessoas vem APENAS do disparo (prob do cenário × fatorDePessoa em
+ * [0.85, 1.15]) — as proporções por ciclo ficam uniformes.
+ *
+ * Por (pessoa × cenário): Fisher-Yates sobre o pool efetivo, PRNG
+ * determinístico (xorshift32) com a mistura hash(semente|cenario|ciclo) —
+ * consumo sem reposição; quando o saco esvazia, novo ciclo (com a correção de
+ * fronteira: o 1.º do ciclo novo nunca repete o último desenhado [Q9/S60]) e a
+ * anti-repetição contra `atual` mantém-se (só repete se o saco todo for a cara
+ * atual). `sacos` é o estado serializável ({ordem, i, ciclo} por cenário).
+ */
+
+function copiaSacos(sacos) {
+  var novo = {};
+  for (var chave in sacos) {
+    if (Object.prototype.hasOwnProperty.call(sacos, chave)) novo[chave] = sacos[chave];
+  }
+  return novo;
+}
+
+function sacoValido(saco, candidatos) {
+  if (!saco || !saco.ordem || typeof saco.i !== 'number') return false;
+  if (saco.i >= saco.ordem.length) return false;
+  if (saco.ordem.length !== candidatos.length) return false;
+  for (var i = 0; i < candidatos.length; i += 1) {
+    if (saco.ordem.indexOf(candidatos[i]) === -1) return false;
+  }
+  return true;
+}
+
+/* Novo ciclo do saco: Fisher-Yates com uma cópia por variante + correção de
+ * fronteira. Devolve {ordem, i, ciclo} e o estado PRNG avançado. */
+function novoSaco(estado, semente, cenario, ciclo, candidatos, atual) {
+  var ordem = candidatos.slice();
+  estado = expressaoPasso(estado ^ expressaoHash(semente + '|' + cenario + '|' + ciclo));
+  for (var i = ordem.length - 1; i > 0; i -= 1) {
+    estado = expressaoPasso(estado);
+    var j = Math.floor(expressaoFracao(estado) * (i + 1));
+    var t = ordem[i]; ordem[i] = ordem[j]; ordem[j] = t;
+  }
+  /* CORREÇÃO DE FRONTEIRA [Q9/S60]: 1.º do ciclo ≠ último desenhado */
+  if (ordem.length > 1 && ordem[0] === atual) {
+    var troca = ordem[0]; ordem[0] = ordem[1]; ordem[1] = troca;
+  }
+  return { ordem: ordem, i: 0, ciclo: ciclo, estado: estado };
+}
+
+/*
+ * Sorteio PURO. entrada:
+ *   estado       uint32 — estado do PRNG (entra e sai; determinístico)
+ *   sacos        estado dos sacos por cenário ({ordem, i, ciclo}) | null
+ *   cenario      nome de EXPRESSOES_CENARIOS
+ *   atual        cara visível agora (anti-repetição; null = sem cara)
+ *   semente      uint32 — personalidade da pessoa
+ *   sal          número | null — entropia do evento (ex.: carimbo `at`)
+ *   disponiveis  presets da identidade | null (todos)
+ *   probabilidade 0..1 | null — sobrepõe a probabilidade efetiva (testes)
+ *   grau         número | null — escalão de intensidade (Q11)
+ *   pessoa       objeto | null — lê `retries` quando `grau` não vem (Q11)
+ * sai { estado, sacos, preset } — preset null = o disparo não aconteceu.
+ * NUNCA muta a entrada: `sacos` novo devolvido em cada chamada.
+ */
+function sortearExpressao(entrada) {
+  entrada = entrada || {};
+  var estado = (typeof entrada.estado === 'number' && isFinite(entrada.estado))
+    ? (entrada.estado >>> 0) : 1;
+  var semente = (typeof entrada.semente === 'number' && isFinite(entrada.semente))
+    ? (entrada.semente >>> 0) : 0;
+  var cenario = typeof entrada.cenario === 'string' && EXPRESSOES_CENARIOS[entrada.cenario]
+    ? entrada.cenario : 'mensagem';
+  var cen = EXPRESSOES_CENARIOS[cenario];
+  var sacos = (entrada.sacos && typeof entrada.sacos === 'object') ? entrada.sacos : {};
+  var sal = (typeof entrada.sal === 'number' && isFinite(entrada.sal)) ? (entrada.sal >>> 0) : 0;
+
+  var pool = poolDeCenario(cenario, entrada.disponiveis || null);
+  if (!pool.length) return { estado: estado, sacos: sacos, preset: null };
+
+  /* Q11: o grau escolhe o escalão de intensidade (sem grau → pool inteiro). */
+  var candidatos = pool;
+  var grau = grauDeCenario(cenario, entrada.pessoa || null, entrada.grau);
+  if (grau != null && cen.graus) {
+    for (var g = grau - 1; g >= 0; g -= 1) {
+      var faixa = [];
+      for (var f = 0; f < cen.graus[g].presets.length; f += 1) {
+        if (pool.indexOf(cen.graus[g].presets[f]) !== -1) faixa.push(cen.graus[g].presets[f]);
+      }
+      if (faixa.length) { candidatos = faixa; break; }
+    }
+  }
+
+  /* 1.º passo: o DISPARO é aleatório (probabilidade cenário × pessoa). */
+  var prob = (typeof entrada.probabilidade === 'number' && isFinite(entrada.probabilidade))
+    ? Math.max(0, Math.min(1, entrada.probabilidade))
+    : Math.max(0, Math.min(1, cen.prob * expressaoFator(semente)));
+  estado = expressaoPasso(estado ^ expressaoPasso(sal));
+  if (expressaoFracao(estado) >= prob) return { estado: estado, sacos: sacos, preset: null };
+
+  /* 2.º passo: o saco do cenário (uma cópia por variante, sem reposição).
+   * A entrada nunca se muta: o saco usado é SEMPRE uma cópia nova. */
+  var saco = sacos[cenario] || null;
+  if (!sacoValido(saco, candidatos)) {
+    var ciclo = saco && typeof saco.ciclo === 'number' ? saco.ciclo + 1 : 1;
+    var novo = novoSaco(estado, semente, cenario, ciclo, candidatos, entrada.atual == null ? null : entrada.atual);
+    estado = novo.estado;
+    saco = { ordem: novo.ordem, i: novo.i, ciclo: novo.ciclo };
+  } else {
+    saco = { ordem: saco.ordem.slice(), i: saco.i, ciclo: saco.ciclo };
+  }
+
+  /* Anti-repetição: o próximo do saco nunca é a cara atual (só repete se o
+   * saco restante for todo a cara atual — pool de uma variante). */
+  var ordem = saco.ordem;
+  if (ordem[saco.i] === entrada.atual && entrada.atual != null) {
+    for (var j = saco.i + 1; j < ordem.length; j += 1) {
+      if (ordem[j] !== entrada.atual) {
+        var t = ordem[saco.i]; ordem[saco.i] = ordem[j]; ordem[j] = t;
+        break;
+      }
+    }
+  }
+
+  var preset = ordem[saco.i];
+  var sacoNovo = { ordem: ordem, i: saco.i + 1, ciclo: saco.ciclo };
+  var novosSacos = copiaSacos(sacos);
+  novosSacos[cenario] = sacoNovo;
+  return { estado: estado, sacos: novosSacos, preset: preset };
+}
+
+/* ------------------------------------------------------------------ */
+/* Motor com estado próprio (superfícies de apresentação)               */
+/* ------------------------------------------------------------------ */
+
+/*
+ * opts:
+ *   identidade    id da identidade (personalidade por omissão)
+ *   semente       uint32 — a personalidade/probabilidade DE UMA pessoa
+ *   estado        uint32 — arranque do PRNG (por omissão derivado da semente:
+ *                 determinístico de propósito — a entropia real entra pelo
+ *                 `sal` de cada evento, ex.: o seu carimbo de tempo)
+ *   disponiveis   presets da identidade | null
+ *   probabilidade 0..1 — sobrepõe a efetiva (testes)
+ * devolve { fator, probabilidade, aoEvento(cenario, atual, sal) -> preset|null,
+ *           estado(), sacos } — `sacos` é o estado serializável dos sacos.
+ */
+function criarMotorExpressoes(opts) {
+  opts = opts || {};
+  var semente = (typeof opts.semente === 'number' && isFinite(opts.semente))
+    ? (opts.semente >>> 0)
+    : expressaoHash(opts.identidade || '');
+  var estado = (typeof opts.estado === 'number' && isFinite(opts.estado))
+    ? (opts.estado >>> 0)
+    : (expressaoHash('motor|' + semente) || 1);
+  var disponiveis = opts.disponiveis || null;
+  var prob = (typeof opts.probabilidade === 'number' && isFinite(opts.probabilidade))
+    ? Math.max(0, Math.min(1, opts.probabilidade)) : null;
+  var sacos = {};
+  return {
+    /* probabilidade sobrepõe TODOS os cenários (testes); sem ela, cada cenário
+       tem a sua prob multiplicada pelo `fator` da pessoa (o disparo DELE). */
+    probabilidade: prob,
+    fator: expressaoFator(semente),
+    estado: function () { return estado; },
+    get sacos() { return sacos; },
+    aoEvento: function (cenario, atual, sal) {
+      var r = sortearExpressao({
+        estado: estado, sacos: sacos, cenario: cenario,
+        atual: atual == null ? null : atual,
+        semente: semente, sal: sal == null ? null : sal,
+        disponiveis: disponiveis, probabilidade: prob,
+        grau: null, pessoa: null
+      });
+      estado = r.estado;
+      sacos = r.sacos;
+      return r.preset;
+    }
+  };
+}
+
+  /* === FIM expressoes.js embutido === */
+
+    /* ================================================================
      * 2. Estado do escritório — contrato §2 (projeção browser)
      * ================================================================ */
 
@@ -912,14 +1526,39 @@ function criarReatorVariante(opts) {
         status: 'idle',
         emoji: '💤',
         expression: 'idle',
-        // Reator de variantes (variantes.js embutido): eventos do trabalho
-        // (mensagem/ferramenta/erro/sucesso) disparam SORTEIOS de expressões —
-        // cada pessoa tem O SEU disparo aleatório (semente do id + personalidade).
-        reator: criarReatorVariante({ semente: varianteHash(String(id)) }),
+        // Motor de expressões (expressoes.js embutido, espelho de state.js):
+        // os eventos do trabalho (mensagem/ferramenta/erro/sucesso/retry/
+        // compactação/subagente/pressão de contexto…) mapeiam-se em CENÁRIOS
+        // da taxonomia e sorteiam a SUA variante — shuffle bag por pessoa,
+        // determinístico, com anti-repetição e dose-resposta (Q11). O `motor`
+        // traz a personalidade (semente do id), os presets da identidade e a
+        // probabilidade de disparo (sobreposta em testes); o ESTADO dos
+        // desenhos vive em campos CLONÁVEIS da pessoa (sacos, cenário,
+        // carimbos e nível de pressão), como em state.js.
+        motor: criarMotorExpressoes({
+          semente: expressaoHash(String(id)),
+          identidade: asoc ? asoc.avatar : null,
+          disponiveis: presetsDe(asoc ? asoc.avatar : null),
+          probabilidade: null,
+        }),
+        varianteSemente: expressaoHash(String(id)),
+        varianteEstado: expressaoHash('estado|' + String(id)) || 1,
         varianteTrabalho: null,
         varianteFerramenta: null,
         varianteErro: null,
         varianteSucesso: null,
+        varianteCancelado: null,
+        varianteEspera: null,
+        varianteFerramentaErro: null,
+        varianteOcioso: null,
+        expressaoSacos: {},
+        expressaoCenario: null,
+        expressaoAt: null,
+        expressaoTerminal: null,
+        expressaoDisponiveis: presetsDe(asoc ? asoc.avatar : null),
+        ctxNivel: 'nenhum', // pressão de contexto com histerese (Q12)
+        retries: 0, // retentativas CONSECUTIVAS do turno (escala Q11)
+        modoJogo: true, // o painel É o Modo jogo: status idle → cenário 'dormir'
         ctx: null, // { used, window } | null -> UI mostra "CTX —"
         model: modelo ?? null,
         cost: null, // null -> "custo indisponível", nunca zero inventado
@@ -990,7 +1629,7 @@ function criarReatorVariante(opts) {
       return {
         people: new Map(), // sessionId -> pessoa
         teams: {},
-        workspaces: null, // { fonte, items, archived } | null (sem dados: agrupa por pasta)
+        workspaces: null, // { fonte, items, arquivoConhecido, archived: string[]|null } | null (sem dados: agrupa por pasta)
         modules: [],
         alerts: [],
         precos: new Map(Object.entries(precos)),
@@ -1043,15 +1682,23 @@ function criarReatorVariante(opts) {
           break;
         case 'workspaces':
           // Lista de workspaces do DSH (ou 'nenhuma': sem serviço -> por pasta).
+          // Arquivo: no DSH vive no REGISTO de workspaces (archivedSessionIds do
+          // WorkspaceBaseline), nunca no cabeçalho da sessão — guardamos o
+          // CONJUNTO e se ele é conhecido (arquivoConhecido); `archived: null`
+          // = desconhecido (nunca "limpo" inventado).
           extra.workspaces = {
             fonte: evento.fonte === 'dsh' ? 'dsh' : 'nenhuma',
             items: Array.isArray(evento.items) ? evento.items : [],
-            archived: Array.isArray(evento.archived) ? evento.archived : [],
+            arquivoConhecido: evento.fonte === 'dsh' && Array.isArray(evento.archived),
+            archived: Array.isArray(evento.archived) ? evento.archived : null,
           };
           break;
         case 'status': {
           const pessoa = p(evento.sessionId);
           if (!pessoa) break;
+          // Em repouso, o Modo jogo desenha 'dormir' ANTES da mudança de
+          // estado (espelho de state.js) — quem fica Disponível dorme.
+          sortearDeEvento(pessoa, evento);
           const emExecucao = evento.status === 'running';
           // Só transições entram na linha do tempo; o 1.º `status` é o que já
           // se passava quando o painel abriu (parado não conta).
@@ -1070,6 +1717,7 @@ function criarReatorVariante(opts) {
           pessoa.flags.concluido = false;
           pessoa.flags.ferramenta = false;
           pessoa.flags.retry = false;
+          pessoa.retries = 0; // mudança de estado: retentativas zeram
           if (emExecucao) pessoa.flags.erro = false;
           break;
         }
@@ -1077,26 +1725,28 @@ function criarReatorVariante(opts) {
           const pessoa = p(evento.sessionId);
           if (!pessoa) break;
           const kind = evento.kind;
+          // O fim do turno dispara 'sucesso' (completed), 'erro' (error|
+          // blocked|max-tokens) ou 'cancelado' (aborted|interrupted) ANTES da
+          // mudança de estado — a anti-repetição compara com a cara visível.
+          sortearDeEvento(pessoa, evento);
           pessoa.flags.ocioso = true;
           pessoa.flags.ferramenta = false;
           pessoa.flags.retry = false;
           pessoa.flags.compactacao = false;
+          pessoa.retries = 0; // turno acabou: retentativas zeram
           const [tipoFim, textoFim] = TEXTO_FIM_DE_TURNO[kind] ?? ['turno-interrompido', 'Turno interrompido'];
           registar(pessoa, evento, tipoFim, textoFim);
           if (kind === 'completed') {
-            // Turno concluído dispara uma expressão do pool de sucesso.
-            sortearCara(pessoa, 'success', evento.at);
             pessoa.flags.erro = false;
             pessoa.flags.concluido = true;
             adicionarOutput(pessoa, 'result', 'turno concluído');
           } else if (kind === 'error' || kind === 'blocked' || kind === 'max-tokens') {
-            // Erro/bloqueio no turno dispara uma expressão do pool de erro.
-            sortearCara(pessoa, 'error', evento.at);
             pessoa.flags.erro = true;
             pessoa.flags.concluido = false;
             adicionarOutput(pessoa, 'message', kind === 'error' ? 'erro no turno' : kind === 'blocked' ? 'bloqueado' : 'máx. de tokens');
           } else {
-            // aborted | interrupted — interrupção não é erro.
+            // aborted | interrupted — interrupção não é erro: desenha-se
+            // 'cancelado' (pool disbelief·waiting·idle) e a cara fica guardada.
             pessoa.flags.erro = false;
             pessoa.flags.concluido = false;
             adicionarOutput(pessoa, 'message', 'interrompido');
@@ -1104,13 +1754,14 @@ function criarReatorVariante(opts) {
           break;
         }
         case 'message': {
-          // A cada mensagem da conversa PODE disparar uma expressão nova do
-          // pool de trabalho: o sorteio é aleatório e de cada pessoa (com
-          // anti-repetição). Onde a pessoa está e o que faz continuam a mandar
+          // A cada mensagem da conversa PODE disparar uma variante nova do
+          // cenário 'mensagem': o sorteio é aleatório e de cada pessoa (com
+          // anti-repetição); a mensagem do utilizador é novo turno e liberta a
+          // cara terminal. Onde a pessoa está e o que faz continuam a mandar
           // nos estados fortes (ver presetDe).
           const pessoa = p(evento.sessionId);
           if (!pessoa) break;
-          sortearCara(pessoa, 'working', evento.at);
+          sortearDeEvento(pessoa, evento);
           break;
         }
         case 'tool': {
@@ -1122,18 +1773,27 @@ function criarReatorVariante(opts) {
           pessoa.flags.compactacao = false;
           const ferramenta = typeof evento.name === 'string' && evento.name ? evento.name : 'ferramenta';
           if (evento.phase === 'call') {
-            // Executar uma ferramenta dispara uma expressão do pool de ferramenta.
-            sortearCara(pessoa, 'tool', evento.at);
+            // Executar uma ferramenta dispara o cenário 'ferramenta' ANTES das
+            // marcas de estado.
+            sortearDeEvento(pessoa, evento);
             pessoa.flags.ferramenta = true;
             pessoa.flags.erro = false;
             registar(pessoa, evento, 'ferramenta', `Usou a ferramenta ${ferramenta}`);
           } else {
             pessoa.flags.ferramenta = false;
             if (evento.ok === false) {
-              // Erro na ferramenta dispara uma expressão do pool de erro.
-              sortearCara(pessoa, 'error', evento.at);
+              // Falha dispara 'ferramenta-erro' (grau 1: transitório de baixa
+              // intensidade) — a variante fica guardada em
+              // varianteFerramentaErro, mas a cara PERSISTENTE do erro continua
+              // a ser 'error' (pin de tests/plugin/state.test.mjs).
+              sortearDeEvento(pessoa, evento, 1);
               pessoa.flags.erro = true;
               registar(pessoa, evento, 'ferramenta-erro', `A ferramenta ${ferramenta} falhou`);
+            } else {
+              // Resultado com sucesso dispara 'ferramenta' e acaba com as
+              // retentativas (espelho de state.js).
+              sortearDeEvento(pessoa, evento);
+              pessoa.retries = 0;
             }
           }
           break;
@@ -1141,6 +1801,9 @@ function criarReatorVariante(opts) {
         case 'question': {
           const pessoa = p(evento.sessionId);
           if (!pessoa) break;
+          // 'pergunta' desenha a SUA variante (reação one-shot das superfícies)
+          // mas a cara visível é 'waiting' — que vence as variantes (presetDe).
+          sortearDeEvento(pessoa, evento);
           pessoa.question = evento.text ?? 'Pergunta';
           pessoa.flags.concluido = false;
           pessoa.flags.retry = false;
@@ -1158,6 +1821,8 @@ function criarReatorVariante(opts) {
         case 'approval': {
           const pessoa = p(evento.sessionId);
           if (!pessoa) break;
+          // 'aprovacao' como na pergunta: variante guardada, 'waiting' à vista.
+          sortearDeEvento(pessoa, evento);
           pessoa.approvals = [...pessoa.approvals, { id: evento.id, toolName: evento.toolName ?? 'ferramenta' }];
           pessoa.flags.concluido = false;
           pessoa.flags.retry = false;
@@ -1185,6 +1850,10 @@ function criarReatorVariante(opts) {
           // entra uma vez; o 'end' de qualquer fonte tira-o.
           const chaveFilho = String(evento.childId);
           if (!pessoa.subagentAtivos.has(chaveFilho)) {
+            // Delegação que AVANÇA dispara 'subagente' (pool thinking·tool·
+            // focused) — o start repetido do mesmo filho (ponte + adaptador)
+            // não é evento novo e não mexe na cara.
+            sortearDeEvento(pessoa, evento);
             pessoa.subagentAtivos.add(chaveFilho);
             pessoa.subagents = pessoa.subagentAtivos.size;
             pessoa.flags.ocioso = false;
@@ -1234,6 +1903,9 @@ function criarReatorVariante(opts) {
         case 'model': {
           const pessoa = p(evento.sessionId);
           if (!pessoa) break;
+          // A projeção de contexto do modelo também dispara 'contexto'/
+          // 'sobrecarga' (Q12) ANTES da atualização.
+          sortearDeEvento(pessoa, evento);
           const novo = evento.model ?? pessoa.model;
           if (pessoa.model && novo && novo !== pessoa.model) {
             registar(pessoa, evento, 'modelo', `Trocou de modelo: ${pessoa.model} → ${novo}`);
@@ -1241,22 +1913,32 @@ function criarReatorVariante(opts) {
           pessoa.model = novo;
           if (evento.contextWindow != null) {
             pessoa.ctx = { used: pessoa.ctx ? pessoa.ctx.used : null, window: evento.contextWindow };
+            pessoa.ctxNivel = nivelDePressao(pessoa.ctx, pessoa.ctxNivel);
           }
           break;
         }
         case 'ctx': {
           const pessoa = p(evento.sessionId);
           if (!pessoa) break;
+          // A pressão de contexto dispara 'contexto' (≥0.70 ou ≥200k) ou
+          // 'sobrecarga' (≥0.85) ANTES da atualização — a taxonomia aplica os
+          // limiares com histerese sobre o nível anterior (Q12).
+          sortearDeEvento(pessoa, evento);
           const antes = pessoa.ctx && pessoa.ctx.used != null ? num(pessoa.ctx.used) : null;
           if (antes !== null && antes < LIMIAR_CTX && num(evento.used) >= LIMIAR_CTX) {
             registar(pessoa, evento, 'contexto-alto', `O contexto passou de ${LIMIAR_CTX / 1000}k tokens`);
           }
           pessoa.ctx = { used: evento.used, window: evento.window ?? (pessoa.ctx ? pessoa.ctx.window : null) };
+          pessoa.ctxNivel = nivelDePressao(pessoa.ctx, pessoa.ctxNivel);
           break;
         }
         case 'retry': {
           const pessoa = p(evento.sessionId);
           if (!pessoa) break;
+          // 'erro-transitorio' ESCALA a cada retentativa consecutiva (Q11):
+          // a conta ANTECEDE o desenho, que doseia por pessoa.retries.
+          pessoa.retries = (pessoa.retries ?? 0) + 1;
+          sortearDeEvento(pessoa, evento);
           pessoa.flags.retry = true;
           pessoa.flags.ocioso = false;
           pessoa.flags.concluido = false;
@@ -1266,6 +1948,9 @@ function criarReatorVariante(opts) {
         case 'compaction': {
           const pessoa = p(evento.sessionId);
           if (!pessoa) break;
+          // Só o início dispara 'compactacao' (micro-reação breve); a
+          // taxonomia ignora o end (cenarioDeEvento).
+          sortearDeEvento(pessoa, evento);
           pessoa.flags.compactacao = evento.phase === 'start';
           if (evento.phase === 'start') {
             pessoa.flags.ocioso = false;
@@ -2165,20 +2850,26 @@ function criarReatorVariante(opts) {
 
     /* ── Filtros da sala (persistidos por navegador) ──────────────────────
        Por omissão a sala segue a barra lateral do DSH: arquivadas e conversas
-       em branco (paradas) não se sentam; "Sem workspace" aparece. Subagentes
-       nunca têm lugar próprio (só na mesa de delegação) — isso não é filtro. */
+       em branco (paradas) não se sentam; "Sem workspace" aparece. O filtro
+       "Manter workspaces abertos sem ação" (padrão) mantém sentadas as pessoas
+       de um workspace ABERTO (com conversas presentes, não arquivadas) mesmo
+       sem ação — sem o "em branco" nem o "Só quem está a trabalhar" as
+       esconderem. Subagentes nunca têm lugar próprio (só na mesa de delegação)
+       — isso não é filtro. */
     const CHAVE_FILTROS = 'dsh-work-game:filtros';
     const FILTROS_PADRAO = Object.freeze({
       mostrarArquivadas: false,
       mostrarSemWorkspace: true,
       soTrabalhando: false,
       mostrarEmBranco: false,
+      mostrarAbertos: true,
     });
     const FILTROS_UI = [
-      { chave: 'mostrarArquivadas', rotulo: 'Mostrar arquivadas', ajuda: 'Na mesa do seu workspace (ou em "Sem workspace"), com a ficha "Arquivada" em cinzento.' },
+      { chave: 'mostrarArquivadas', rotulo: 'Mostrar arquivadas (ocultas por omissão)', ajuda: 'Na mesa do seu workspace (ou em "Sem workspace"), com a ficha "Arquivada" em cinzento. Só quando o arquivo do DSH é conhecido.' },
       { chave: 'mostrarSemWorkspace', rotulo: 'Mostrar "Sem workspace"', ajuda: 'Conversas que nenhum workspace reclama (o Ungrouped do DSH).' },
       { chave: 'soTrabalhando', rotulo: 'Só quem está a trabalhar', ajuda: 'Esconde quem está parado e as mesas sem ninguém a trabalhar.' },
       { chave: 'mostrarEmBranco', rotulo: 'Mostrar conversas em branco', ajuda: 'Conversas novas, ainda sem nenhuma mensagem.' },
+      { chave: 'mostrarAbertos', rotulo: 'Manter workspaces abertos sem ação', ajuda: 'Um workspace aberto (com conversas presentes, não arquivadas) mantém todas as pessoas sentadas mesmo sem ação — nem o "em branco" nem o "Só quem está a trabalhar" o escondem.' },
     ];
     function normalizarFiltros(bruto) {
       const f = { ...FILTROS_PADRAO };
@@ -2213,17 +2904,26 @@ function criarReatorVariante(opts) {
     /**
      * Mesas e lugares a partir das pessoas, dos workspaces do DSH e dos filtros.
      * @param {Array} pessoas vistas (officeView.people), na ordem do catálogo do host
-     * @param {{fonte, items, archived}|null} workspaces
+     * @param {{fonte, items, arquivoConhecido, archived}|null} workspaces
      * @param {object} [filtros] ver FILTROS_PADRAO (campos em falta = padrão)
      * @returns {{ equipas: Map, modules: Array, visiveis: number, chaves: string[],
-     *   arquivadas: Set, escondidas: {total, arquivadas, emBranco, semWorkspace, paradas},
-     *   filtros: object }}
+     *   arquivadas: Set, escondidas: {total, arquivadas, emBranco, semWorkspace, paradas,
+     *   fechados, arquivoDesconhecido}, filtros: object }}
      */
     function montarEscritorio(pessoas, workspaces, filtros) {
       const f = normalizarFiltros(filtros);
       const porId = new Map(pessoas.map((p) => [p.id, p]));
       const doDsh = !!(workspaces && workspaces.fonte === 'dsh');
-      const arquivadas = new Set(doDsh ? workspaces.archived : []);
+      // Arquivo: no DSH vive no REGISTO de workspaces (archivedSessionIds do
+      // WorkspaceBaseline), não no cabeçalho da sessão. `archived: null` (ou sem
+      // serviço de workspaces) = DESCONHECIDO: ninguém é escondido por
+      // arquivamento e as conversas sentadas contam à parte (nunca "limpo").
+      const arquivoConhecido = workspaces
+        ? (typeof workspaces.arquivoConhecido === 'boolean'
+          ? workspaces.arquivoConhecido
+          : (doDsh && Array.isArray(workspaces.archived)))
+        : false;
+      const arquivadas = new Set(arquivoConhecido && Array.isArray(workspaces.archived) ? workspaces.archived : []);
       const nomeDe = (id) => (porId.get(id) ? porId.get(id).name : 'equipe');
 
       // Delegação em curso: subagentes A CORRER, agrupados pelo pai.
@@ -2263,15 +2963,31 @@ function criarReatorVariante(opts) {
         return EQUIPA_SEM_WORKSPACE;
       };
 
+      // Workspace ABERTO: tem pelo menos uma conversa-membro PRESENTE na sala
+      // e NÃO arquivada (a pertença é a do `dono` — sessionIds do DSH — ou, sem
+      // serviço, a do agrupamento por pasta). "Sem workspace" não é workspace:
+      // nunca é aberto, e quem o oculta ("mostrarSemWorkspace") manda sempre.
+      const abertas = new Set();
+      for (const p of pessoas) {
+        const id = equipaDe(p);
+        if (id === EQUIPA_SEM_WORKSPACE) continue;
+        if (arquivadas.has(p.id)) continue;
+        abertas.add(id);
+      }
+
       // Porque é que uma conversa (não subagente) fica fora da sala — null se
       // se senta. Por omissão = a barra lateral do DSH (ui-workspace/tree.ts):
-      // arquivadas e conversas em branco paradas não têm lugar próprio.
-      const escondidas = { total: 0, arquivadas: 0, emBranco: 0, semWorkspace: 0, paradas: 0 };
+      // arquivadas e conversas em branco paradas não têm lugar próprio. Com
+      // "Manter workspaces abertos sem ação" (mostrarAbertos), as pessoas de um
+      // workspace aberto sentam-se SEMPRE mesmo sem ação (nem o "em branco" nem
+      // o "Só quem está a trabalhar" as escondem).
+      const escondidas = { total: 0, arquivadas: 0, emBranco: 0, semWorkspace: 0, paradas: 0, fechados: 0, arquivoDesconhecido: 0 };
       const motivoOculta = (p) => {
         if (arquivadas.has(p.id) && !f.mostrarArquivadas) return 'arquivadas';
-        if (p.blank && !p.running && !f.mostrarEmBranco) return 'emBranco';
+        const mantido = f.mostrarAbertos && abertas.has(equipaDe(p));
+        if (p.blank && !p.running && !f.mostrarEmBranco && !mantido) return 'emBranco';
         if (!f.mostrarSemWorkspace && equipaDe(p) === EQUIPA_SEM_WORKSPACE) return 'semWorkspace';
-        if (f.soTrabalhando && !aTrabalhar(p)) return 'paradas';
+        if (f.soTrabalhando && !aTrabalhar(p) && !mantido) return 'paradas';
         return null;
       };
       const raiz = (p) => {
@@ -2333,8 +3049,13 @@ function criarReatorVariante(opts) {
       for (const [equipaId] of [...equipas]) {
         const lista = casa.get(equipaId) || [];
         // "Só quem está a trabalhar": mesas sem ninguém a trabalhar saem da
-        // sala (lugares "livres" de gente escondida convidariam a recrutar).
-        if (f.soTrabalhando && lista.length === 0) continue;
+        // sala (lugares "livres" de gente escondida convidariam a recrutar) —
+        // menos as de um workspace aberto, que "Manter workspaces abertos sem
+        // ação" mantém na sala; o resto conta como workspace FECHADO.
+        if (f.soTrabalhando && lista.length === 0 && !(f.mostrarAbertos && abertas.has(equipaId))) {
+          escondidas.fechados += 1;
+          continue;
+        }
         lista.forEach((p) => colocados.add(p.id));
         const lugares = lista.map((p) => (emDelegacao(p.id) ? { reservado: p.id } : p.id));
         const total = Math.max(4, Math.ceil(lugares.length / 4) * 4); // workspace vazio = 4 lugares livres
@@ -2362,7 +3083,9 @@ function criarReatorVariante(opts) {
       }
 
       // Corpos a desenhar (para o sprite), contagem de pessoas na sala e as
-      // arquivadas sentadas (ficha "Arquivada" em cinzento).
+      // arquivadas sentadas (ficha "Arquivada" em cinzento). Com o arquivo
+      // DESCONHECIDO, as conversas sentadas contam à parte (podem estar
+      // arquivadas e não sabemos) — a sala nunca finge que está limpa.
       const chaves = [];
       const arquivadasNaSala = new Set();
       let visiveis = 0;
@@ -2373,10 +3096,23 @@ function criarReatorVariante(opts) {
           if (!p) continue;
           visiveis += 1;
           if (arquivadas.has(p.id)) arquivadasNaSala.add(p.id);
+          if (!arquivoConhecido && !p.subagent) escondidas.arquivoDesconhecido += 1;
           chaves.push(chaveCorpo(p.avatar, presetDe(p)));
         }
       }
       return { equipas, modules, visiveis, chaves, arquivadas: arquivadasNaSala, escondidas, filtros: f };
+    }
+
+    /* As conversas arquivadas não entram nos GRUPOS do celular: o filtro da
+     * sala vale também ali (os controladores retidos pelo núcleo podem ficar
+     * defasados quando o filtro muda com o grupo aberto). Só o arquivo
+     * CONHECIDO filtra — desconhecido, nada é presumido. */
+    function semArquivadas(ids, workspaces, filtros) {
+      const lista = Array.isArray(ids) ? ids : [];
+      if (normalizarFiltros(filtros).mostrarArquivadas) return [...lista];
+      const arquivadas = workspaces && Array.isArray(workspaces.archived) ? new Set(workspaces.archived) : null;
+      if (!arquivadas) return [...lista];
+      return lista.filter((id) => !arquivadas.has(id));
     }
 
     // Estados com o vocabulário VISUAL da demo (rótulo, cor, ícone, expressão).
@@ -2394,34 +3130,119 @@ function criarReatorVariante(opts) {
       { idle: 'available', working: 'working', tool: 'tool', waiting: 'waiting', error: 'error', done: 'done' }[p.status] ?? 'available'
     ];
 
-    // VARIANTES durante o trabalho (biblioteca Avataaars — variantes.js e
-    // assets/AVATARS-EXPRESSIONS.md): cada estado forte tem O SEU pool de
-    // expressões e os eventos reais do trabalho (mensagem, ferramenta, erro,
-    // sucesso) disparam SORTEIOS dentro desses pools — disparo aleatório,
-    // próprio de cada pessoa (ver criarPessoa), com anti-repetição. Os estados
-    // fortes continuam a mandar na cara enquanto durarem; a variante sorteada
-    // é a cara do estado (com o preset base em reserva).
-    //
-    // Sorteia a variante de UM evento e guarda-a no campo do estado em causa.
-    function sortearCara(pessoa, evento, sal) {
-      const sorteado = pessoa.reator.aoEvento(evento, presetDe(pessoa), sal == null ? null : sal);
-      if (!sorteado) return null;
-      if (evento === 'tool') pessoa.varianteFerramenta = sorteado;
-      else if (evento === 'error') pessoa.varianteErro = sorteado;
-      else if (evento === 'success') pessoa.varianteSucesso = sorteado;
-      else pessoa.varianteTrabalho = sorteado;
-      return sorteado;
+    // EXPRESSÕES durante o trabalho (MOTOR DE EXPRESSÕES — expressoes.js
+    // embutido, espelho de state.js): cada evento real mapeia-se num CENÁRIO
+    // da taxonomia (ferramenta, erro, sucesso, mensagem, pergunta, retry,
+    // compactação, subagente, pressão de contexto…) e cada cenário sorteia a
+    // SUA variante com shuffle bag por pessoa — determinístico, com
+    // anti-repetição e dose-resposta (Q11: 'erro-transitorio' escala com
+    // pessoa.retries; 'ferramenta-erro' fixa grau 1). A arbitragem temporal
+    // (expressaoAplicavel: min-dwell 1200ms, cadência 1000ms e stickiness
+    // terminal) decide se o desenho se aplica. Os estados fortes continuam a
+    // mandar na cara enquanto durarem (ver presetDe); a variante sorteada fica
+    // no campo DO SEU CENÁRIO (SLOT_DE_CENARIO) — a cara do estado e, para
+    // pergunta/aprovação, a reação one-shot das superfícies.
+
+    // Cenário do motor → campo da pessoa que guarda a variante sorteada
+    // (cópia de SLOT_DE_CENARIO de state.js).
+    const SLOT_DE_CENARIO = {
+      sucesso: 'varianteSucesso',
+      erro: 'varianteErro',
+      'ferramenta-erro': 'varianteFerramentaErro',
+      ferramenta: 'varianteFerramenta',
+      mensagem: 'varianteTrabalho',
+      'erro-transitorio': 'varianteTrabalho',
+      compactacao: 'varianteTrabalho',
+      subagente: 'varianteTrabalho',
+      contexto: 'varianteTrabalho',
+      sobrecarga: 'varianteTrabalho',
+      cancelado: 'varianteCancelado',
+      pergunta: 'varianteEspera',
+      aprovacao: 'varianteEspera',
+      ocioso: 'varianteOcioso',
+      dormir: 'varianteOcioso',
+    };
+
+    // Presets da identidade de uma pessoa (os `disponiveis` do motor). Sem
+    // identidade conhecida, todos (null); identidades com presets reduzidos
+    // (ex.: aleatórias r01..r12, só idle/working/success/error) caem na BASE
+    // do cenário (poolDeCenario/expressaoBase de expressoes.js).
+    function presetsDe(avatar) {
+      const conjunto = avatar && EXPR_AVATARS[avatar];
+      return conjunto ? Object.keys(conjunto) : null;
     }
+
+    // Sorteia a variante de UM CENÁRIO e guarda-a no campo do cenário em causa
+    // (espelho do drawExpressao de state.js). `sal` é o carimbo `at` do evento
+    // (entropia do sorteio + relógio da arbitragem); `opcoes` traz o `grau` de
+    // intensidade (Q11) e se o evento é um novo turno do utilizador (message
+    // side 'user' — liberta a cara terminal). Devolve o preset sorteado ou
+    // null (sem disparo, ou desenho suprimido pela arbitragem).
+    function sortearCara(pessoa, cenario, sal, opcoes = {}) {
+      const at = typeof sal === 'number' && isFinite(sal) ? sal : null;
+      const grau = typeof opcoes.grau === 'number' && isFinite(opcoes.grau) ? opcoes.grau : null;
+      const novoTurno = opcoes.novoTurno === true;
+      const aplicavel = expressaoAplicavel({
+        prioridadeAtual: pessoa.expressaoCenario ? prioridadeDeCenario(pessoa.expressaoCenario) : 0,
+        prioridadeNova: prioridadeDeCenario(cenario),
+        at,
+        ultimaAt: pessoa.expressaoAt,
+        terminal: pessoa.expressaoTerminal,
+        novoTurno,
+      });
+      if (!aplicavel) return null;
+      const r = sortearExpressao({
+        estado: pessoa.varianteEstado,
+        sacos: pessoa.expressaoSacos,
+        cenario,
+        atual: presetDe(pessoa),
+        semente: pessoa.varianteSemente,
+        sal: at,
+        disponiveis: pessoa.expressaoDisponiveis ?? null,
+        probabilidade: pessoa.motor ? pessoa.motor.probabilidade : null,
+        grau,
+        pessoa,
+      });
+      pessoa.varianteEstado = r.estado;
+      pessoa.expressaoSacos = r.sacos;
+      // Stickiness terminal: um cenário terminal marca; um desenho que se
+      // aplica (ou um novo turno do utilizador) liberta a cara [Q6/Q8].
+      if (EXPRESSOES_TERMINAIS.indexOf(cenario) !== -1) pessoa.expressaoTerminal = cenario;
+      else if (novoTurno || r.preset) pessoa.expressaoTerminal = null;
+      if (!r.preset) return null;
+      pessoa.expressaoCenario = cenario;
+      if (at != null) pessoa.expressaoAt = at;
+      const slot = SLOT_DE_CENARIO[cenario];
+      if (slot) pessoa[slot] = r.preset;
+      return r.preset;
+    }
+
+    // Desenha a expressão de UM EVENTO: o cenário vem da taxonomia
+    // (cenarioDeEvento) e o desenho acontece ANTES das mudanças de estado do
+    // evento, para a anti-repetição comparar com a cara visível (espelho do
+    // drawExpressao de state.js). `grau` só quando o chamador doseia (Q11).
+    function sortearDeEvento(pessoa, evento, grau) {
+      const cenario = cenarioDeEvento(evento, pessoa);
+      if (!cenario) return null;
+      return sortearCara(pessoa, cenario, evento.at, {
+        grau: grau == null ? null : grau,
+        novoTurno: evento.type === 'message' && evento.side === 'user',
+      });
+    }
+
     // A cara a desenhar: o estado forte manda e mostra a SUA variante sorteada
-    // (preset base em reserva); quem está Disponível dorme sempre.
+    // (preset base em reserva); quem espera mostra 'waiting' (VENCE as
+    // variantes — que ficam guardadas para as reações one-shot das superfícies)
+    // e quem está Disponível dorme sempre (Modo jogo). Espelho da
+    // deriveExpression de state.js, com o vocabulário ESTADOS_DEMO.
     function presetDe(p) {
       const info = estadoDemo(p);
       if (info === ESTADOS_DEMO.available) return info.preset;
+      if (info === ESTADOS_DEMO.waiting) return info.preset; // 'waiting' vence as variantes
       if (info === ESTADOS_DEMO.tool) return p.varianteFerramenta || info.preset;
       if (info === ESTADOS_DEMO.error) return p.varianteErro || info.preset;
       if (info === ESTADOS_DEMO.done) return p.varianteSucesso || info.preset;
-      if (info === ESTADOS_DEMO.working) return p.varianteTrabalho || info.preset;
-      return info.preset;
+      return p.varianteTrabalho || info.preset; // working → mensagem/trabalho
     }
 
     const useMob = (id, x, y, w, alt) => `<use href="#wg-${id}" x="${x}" y="${y}" width="${w}" height="${alt}"/>`;
@@ -4700,7 +5521,17 @@ function criarReatorVariante(opts) {
       if (e.emBranco) partes.push(`${e.emBranco} em branco`);
       if (e.semWorkspace) partes.push(`${e.semWorkspace} sem workspace`);
       if (e.paradas) partes.push(`${e.paradas} parada${e.paradas === 1 ? '' : 's'}`);
+      if (e.fechados) partes.push(`${e.fechados} workspace${e.fechados === 1 ? '' : 's'} fechado${e.fechados === 1 ? '' : 's'}`);
+      if (e.arquivoDesconhecido) partes.push(`${e.arquivoDesconhecido} com arquivo desconhecido`);
       return partes.join(' · ');
+    }
+    // Resumo (rodapé do menu de filtros): nunca fingir que está limpo — com o
+    // arquivo desconhecido ou workspaces fechados, o detalhe aparece à mesma.
+    function resumoFiltros(e) {
+      const detalhe = detalheEscondidas(e);
+      if (e && e.total) return `${textoEscondidas(e)}${detalhe ? ` (${detalhe})` : ''}`;
+      if (detalhe) return `Ninguém escondido · ${detalhe}`;
+      return 'Ninguém escondido pelos filtros';
     }
 
     /* ── Barra lateral da pessoa (o inspetor da demo) ─────────────────── */
@@ -4916,8 +5747,7 @@ function criarReatorVariante(opts) {
             onClick: (e) => { e.stopPropagation(); mudar(fu.chave, !filtros[fu.chave]); },
           }))),
         h('div', { className: 'wg-filtros-rodape' },
-          h('span', { title: detalheEscondidas(escondidas) || undefined },
-            escondidas && escondidas.total ? `${textoEscondidas(escondidas)}${detalheEscondidas(escondidas) ? ` (${detalheEscondidas(escondidas)})` : ''}` : 'Ninguém escondido pelos filtros'),
+          h('span', { title: detalheEscondidas(escondidas) || undefined }, resumoFiltros(escondidas)),
           h('button', { type: 'button', className: 'wg-filtros-repor', disabled: alterados === 0, onClick: repor }, 'Repor padrão')),
       );
     }
@@ -6050,7 +6880,8 @@ function criarReatorVariante(opts) {
         : null;
       const sprite = spriteDoPainel([...layout.chaves, modelo ? modelo.avatarChave : null]);
       // GRUPOS = os workspaces da sala (o mesmo recorte das mesas): cada grupo
-      // mostra as pessoas daquele workspace; o feed conjunto é do Grupo.
+      // mostra as pessoas daquele workspace; o feed conjunto é do Grupo. As
+      // arquivadas não entram quando o filtro as oculta (semArquivadas).
       const grupos = (react.useMemo || ((f) => f()))(() => {
         const lista = [];
         for (const eq of layout.equipas.values()) {
@@ -6061,7 +6892,7 @@ function criarReatorVariante(opts) {
               if (typeof lugar === 'string' && view.people[lugar]) membros.push(lugar);
             }
           }
-          const ids = [...new Set(membros)];
+          const ids = semArquivadas([...new Set(membros)], view.workspaces, filtros);
           const pessoas = ids.map((id) => view.people[id]);
           const aEscrever = pessoas.find((p) => p && p.running);
           const nomes = pessoas.slice(0, 3).map((p) => p.name);
@@ -6081,7 +6912,10 @@ function criarReatorVariante(opts) {
       const grupoAtual = telefone.vista === 'grupo' && telefone.grupoId
         ? (() => {
           const g = grupos.find((x) => x.id === telefone.grupoId);
-          const membros = getGrupo().membros.map(({ id, conv }) => {
+          // Controladores retidos pelo núcleo: podem ficar defasados quando o
+          // filtro de arquivadas muda com o grupo aberto — filtra-se aqui.
+          const permitidos = new Set(semArquivadas(getGrupo().membros.map((m) => m.id), view.workspaces, filtros));
+          const membros = getGrupo().membros.filter((m) => permitidos.has(m.id)).map(({ id, conv }) => {
             const p = view.people[id];
             return { id, nome: p ? p.name : id, avatarChave: p ? chaveCorpo(p.avatar, presetDe(p)) : null, conv };
           });
@@ -7086,6 +7920,8 @@ function criarReatorVariante(opts) {
     exports.__guardarFiltros = guardarFiltros;
     exports.__textoEscondidas = textoEscondidas;
     exports.__detalheEscondidas = detalheEscondidas;
+    exports.__resumoFiltros = resumoFiltros;
+    exports.__semArquivadas = semArquivadas;
     exports.__criarNucleo = criarNucleo;
     exports.__MAX_ATIVIDADE = MAX_ATIVIDADE;
     exports.__itensDoChat = itensDoChat;
@@ -7111,6 +7947,18 @@ function criarReatorVariante(opts) {
     exports.__criarReatorVariante = criarReatorVariante;
     exports.__varianteSorteio = varianteSorteio;
     exports.__varianteHash = varianteHash;
+    // Motor de expressões embutido (expressoes.js) — seams do wiring do Modo jogo.
+    exports.__EXPRESSOES_CENARIOS = EXPRESSOES_CENARIOS;
+    exports.__EXPRESSOES_LIMIARES = EXPRESSOES_LIMIARES;
+    exports.__EXPRESSOES_TERMINAIS = EXPRESSOES_TERMINAIS;
+    exports.__motorExpressoes = criarMotorExpressoes;
+    exports.__cenarioDeEvento = cenarioDeEvento;
+    exports.__sortearExpressao = sortearExpressao;
+    exports.__expressaoAplicavel = expressaoAplicavel;
+    exports.__nivelDePressao = nivelDePressao;
+    exports.__poolDeCenario = poolDeCenario;
+    exports.__expressaoBase = expressaoBase;
+    exports.__sortearDeEvento = sortearDeEvento;
     exports.__sortearCara = sortearCara;
     exports.__presetDe = presetDe;
     exports.__ritmoDe = ritmoDe;

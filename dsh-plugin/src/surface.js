@@ -37,7 +37,8 @@
  *   session/added   {sessionId, title?, cwd?, parentId?, subagent, blank, model?}
  *   session/meta    {sessionId, title?, cwd?, parentId?, subagent, blank} — só em mudança
  *   session/removed {sessionId}
- *   workspaces      {fonte: 'dsh'|'nenhuma', items: [{id, title, path, sessionIds}], archived}
+ *   workspaces      {fonte: 'dsh'|'nenhuma', items: [{id, title, path, sessionIds}],
+ *                    archived: string[]|null}   — null = arquivo DESCONHECIDO
  *   subagent/start|end {sessionId: pai, childId, runId: childId}
  *                   — só subagentes (origin 'subagent') A CORRER: o catálogo guarda
  *                     os terminados, que não são delegação em curso
@@ -179,7 +180,11 @@ function nomeDaPasta(caminho) {
 
 /** Snapshot de IWorkspaces → evento `workspaces` (null enquanto a baseline não
  *  chegou ou quando o serviço falhou sem dados: a sala mantém o agrupamento por
- *  pasta em vez de despejar tudo em "Sem workspace"). */
+ *  pasta em vez de despejar tudo em "Sem workspace").
+ *  Arquivo: no DSH vive no REGISTO de workspaces (`archivedSessionIds` do
+ *  WorkspaceBaseline), nunca no cabeçalho da sessão — daí `archived: string[]`
+ *  quando a lista é conhecida (fonte 'dsh') e `null` quando é desconhecida
+ *  (sem serviço/baseline): nunca "limpo" inventado. */
 export function workspacesDoSnapshot(snap) {
   if (!snap || typeof snap !== 'object') return null;
   if (snap.phase === 'pending') return null;
@@ -196,7 +201,7 @@ export function workspacesDoSnapshot(snap) {
       path: typeof w.path === 'string' ? w.path : '',
       sessionIds: Array.isArray(w.sessionIds) ? w.sessionIds.map(String) : [],
     })),
-    archived: Array.isArray(snap.archivedSessionIds) ? snap.archivedSessionIds.map(String) : [],
+    archived: Array.isArray(snap.archivedSessionIds) ? snap.archivedSessionIds.map(String) : null,
   };
 }
 
@@ -268,7 +273,8 @@ export function extrairSuperficie(ctx, opts = {}) {
   }));
 
   /* ── workspaces: ligação opcional e tardia ─────────────────────────── */
-  const SEM_WORKSPACES = { type: 'workspaces', fonte: 'nenhuma', items: [], archived: [] };
+  /* 'nenhuma' = sem serviço: o arquivo é DESCONHECIDO (archived: null), não vazio. */
+  const SEM_WORKSPACES = { type: 'workspaces', fonte: 'nenhuma', items: [], archived: null };
   let wsList = null;        /* modelo ligado (ctx.get('workspaces').list — objeto estável) */
   let wsSoltar = null;      /* unsubscribe do modelo */
   let wsAssinatura = JSON.stringify(SEM_WORKSPACES);
