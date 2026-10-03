@@ -773,7 +773,7 @@ test('sprite: memorizado (mesmo conjunto = mesma string) e com o mobiliário da 
   for (const peca of ['desk', 'chair', 'laptop', 'connector', 'plant', 'window']) assert.ok(s1.includes(`<symbol id="wg-${peca}"`), peca);
 });
 
-test('recrutar: com uiWorkspace, lugar livre e "Nova sessão" abrem conversa no workspace certo', () => {
+test('recrutar: a cadeira vazia abre o "Adicionar contacto" no workspace certo (e "Nova sessão" segue a demo)', () => {
   const pessoas = [
     pessoa('a', { name: 'Lia', running: true }),
     pessoa('s1', { subagent: true, parentId: 'a', running: true }),
@@ -784,12 +784,17 @@ test('recrutar: com uiWorkspace, lugar livre e "Nova sessão" abrem conversa no 
   const com = B.__renderOffice({ people, layout, recrutar: true });
   const sem = B.__renderOffice({ people, layout });
 
-  const livres = [...com.matchAll(/<g class="seat slot-free recrutavel" role="button" tabindex="0" aria-label="Abrir nova sessão no lugar (\d) desta mesa" data-action="nova-sessao" data-workspace-id="([^"]+)">/g)];
-  assert.deepEqual(livres.map((m) => [m[1], m[2]]), [['2', 'w1'], ['3', 'w1'], ['4', 'w1']], 'só os lugares livres da mesa do workspace real');
+  const livres = [...com.matchAll(/<g class="seat slot-free recrutavel" role="button" tabindex="0" aria-label="Adicionar contacto no lugar (\d) desta mesa" data-action="adicionar-contacto" data-workspace-id="([^"]+)" data-lugar="(\d)" data-referencia="([^"]*)">/g)];
+  assert.deepEqual(
+    livres.map((m) => [m[1], m[2], m[3], m[4]]),
+    [['2', 'w1', '1', 'a'], ['3', 'w1', '2', 'a'], ['4', 'w1', '3', 'a']],
+    'a cadeira vazia recruta um contacto: lugar, workspace e a sessão de referência (catálogo de skills)',
+  );
   assert.ok(com.includes('Clique para recrutar'), 'texto da demo no lugar livre');
   const botoes = [...com.matchAll(/class="scene-action"[^>]*aria-label="Nova sessão" data-action="nova-sessao" data-workspace-id="([^"]+)"/g)];
   assert.deepEqual(botoes.map((m) => m[1]), ['w1'], '"Nova sessão" só na mesa do workspace (nem delegação nem Sem workspace)');
 
+  assert.ok(!sem.includes('data-action="adicionar-contacto"'), 'sem uiWorkspace, nada de ações que não funcionam');
   assert.ok(!sem.includes('data-action="nova-sessao"'), 'sem uiWorkspace, nada de ações que não funcionam');
   assert.ok(!sem.includes('Clique para recrutar'));
 });

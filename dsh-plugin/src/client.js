@@ -656,6 +656,43 @@ window.__ModuleLoader__.load({
       };
     }
 
+    // Identidade de um contacto NOVO, com o nome ESCOLHIDO pela pessoa (tela
+    // "Adicionar contacto"): o nome é livre e o boneco nasce do MESMO gênero
+    // (a regra de 2026-09-29 continua de pé: um "Rui" nunca ganha boneco de
+    // mulher), com `salto` a rodar dentro do pool do gênero — é o botão
+    // "Trocar" do preview. Determinístico: o mesmo nome com o mesmo salto dá
+    // o mesmo boneco em qualquer browser. Nome com gênero desconhecido usa o
+    // pool inteiro, decidido por hash do nome.
+    function identidadeDeNome(nome, salto = 0) {
+      const limpo = String(nome ?? '').trim();
+      const primeiro = (limpo.split(/\s+/)[0] ?? '').toLocaleLowerCase();
+      const chaveNome = primeiro ? primeiro[0].toLocaleUpperCase() + primeiro.slice(1) : '';
+      const genero = GENERO_NOME[chaveNome] || 'any';
+      const pool = identidades().filter((a) => genero === 'any' || GENERO_AVATAR[a] === genero);
+      const lista = pool.length ? pool : identidades();
+      const base = hashEstavel(`contacto|${limpo}|avatar`);
+      return {
+        name: limpo,
+        avatar: lista[(base + Math.max(0, salto)) % lista.length],
+        style: ESTILOS[hashEstavel(`contacto|${limpo}|estilo`) % ESTILOS.length],
+      };
+    }
+
+    // Prompt FINAL do contacto: o texto da pessoa + as skills escolhidas,
+    // como tokens `/nome` (gramática pública do DSH: token delimitado por
+    // espaço, kebab-case). O pre-step `dsh-tool-skill` lê-os em QUALQUER
+    // ponto da mensagem (matchAll, deduplicados) e injeta o corpo de cada
+    // skill invocável — é assim que "as skills entram no prompt".
+    function comporPromptContacto(texto, skills) {
+      const base = String(texto ?? '').trim();
+      const nomes = (Array.isArray(skills) ? skills : [])
+        .map((s) => (typeof s === 'string' ? s.trim() : String((s && s.name) ?? '').trim()))
+        .filter((n) => /^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(n));
+      if (!nomes.length) return base;
+      const linha = `Skills: ${nomes.map((n) => `/${n}`).join(' ')}`;
+      return base ? `${base}\n\n${linha}` : linha;
+    }
+
     // Associador: cache em memória + localStorage da identidade DERIVADA
     // (identidadeDe) — marcada `v: 3`. Entradas antigas (sorteadas com
     // Math.random, nomes que eram o título da conversa, ou `v: 2` com nome e
@@ -690,12 +727,37 @@ window.__ModuleLoader__.load({
         para(id, ocupado) {
           if (cache === null) ler();
           const a = cache[id];
-          if (a && typeof a === 'object' && a.v === VERSAO_ASSOC && NOMES_VALIDOS.has(a.name)
-            && typeof a.avatar === 'string' && EXPR_AVATARS[a.avatar] && a.style) return a;
+          // Identidade ESCOLHIDA pela pessoa (`escolhido`): nome livre, aceite
+          // como está. A derivada continua a exigir nome da lista (migração
+          // das entradas antigas).
+          const escolhida = a && typeof a === 'object' && a.v === VERSAO_ASSOC && a.escolhido === true
+            && typeof a.name === 'string' && a.name.trim().length > 0
+            && typeof a.avatar === 'string' && EXPR_AVATARS[a.avatar] && a.style;
+          const derivada = a && typeof a === 'object' && a.v === VERSAO_ASSOC && NOMES_VALIDOS.has(a.name)
+            && typeof a.avatar === 'string' && EXPR_AVATARS[a.avatar] && a.style;
+          if (escolhida || derivada) return a;
           const nova = { ...identidadeDe(id, typeof ocupado === 'function' ? ocupado : undefined), v: VERSAO_ASSOC };
           cache[id] = nova;
           guardar();
           return nova;
+        },
+        // Identidade ESCOLHIDA no "Adicionar contacto": nome + boneco do
+        // preview gravam-se ANTES de a sessão aparecer na sala, para a ficha
+        // nascer já com a identidade certa.
+        definir(id, identidade) {
+          if (id == null || !identidade) return null;
+          if (cache === null) ler();
+          const nome = String(identidade.name ?? '').trim();
+          if (!nome || typeof identidade.avatar !== 'string' || !EXPR_AVATARS[identidade.avatar]) return null;
+          cache[id] = {
+            name: nome,
+            avatar: identidade.avatar,
+            style: identidade.style || ESTILOS[0],
+            v: VERSAO_ASSOC,
+            escolhido: true,
+          };
+          guardar();
+          return cache[id];
         },
       };
     }
@@ -4293,10 +4355,18 @@ function mascararChave(chave) {
       }
       const person = typeof lugar === 'string' ? pessoas[lugar] : null;
       if (!person) {
-        // Como na demo: o lugar livre de um workspace recruta — abre uma
-        // conversa nova do DSH nesse workspace (uiWorkspace.startSession).
+        // Como na demo: o lugar livre de um workspace recruta. Aqui o clique
+        // abre o celular no layout "Adicionar contacto" (nome, boneco, prompt,
+        // skills e modelo) — é a recruta completa, não só uma sessão em branco.
+        // `data-referencia` = uma sessão já existente deste workspace: é o
+        // ponto de vista do catálogo de skills (cwd + preset do projeto).
         if (recrutar && mod && mod.workspaceId) {
-          return `<g class="seat slot-free recrutavel" role="button" tabindex="0" aria-label="Abrir nova sessão no lugar ${index + 1} desta mesa" data-action="nova-sessao" data-workspace-id="${esc(mod.workspaceId)}">
+          // Sessão de referência do catálogo de skills: um ocupado real desta
+          // mesa (lugar com id, ou o lugar de casa reservado durante delegação).
+          const referencia = mod.seats
+            .map((s) => (typeof s === 'string' ? s : (s && typeof s === 'object' ? s.reservado : null)))
+            .find((id) => typeof id === 'string' && id) || '';
+          return `<g class="seat slot-free recrutavel" role="button" tabindex="0" aria-label="Adicionar contacto no lugar ${index + 1} desta mesa" data-action="adicionar-contacto" data-workspace-id="${esc(mod.workspaceId)}" data-lugar="${index}" data-referencia="${esc(referencia)}">
           ${hit}<circle class="empty-seat-plus" cx="${cx}" cy="307" r="24"/><text class="empty-seat-plus-sign" x="${cx}" y="318" text-anchor="middle">+</text>
           <rect class="seat-card" x="${cx - 99}" y="426" width="198" height="77" rx="9"/><text class="seat-card-name" x="${cx}" y="451" text-anchor="middle" style="font-size:18px;fill:#8b958e">Lugar livre</text><text class="seat-card-role" x="${cx}" y="473" text-anchor="middle">Clique para recrutar</text></g>`;
         }
@@ -6118,6 +6188,30 @@ function mascararChave(chave) {
       '.wg-tel-config-aviso{flex:none;margin:14px 0 0;font-size:11px;line-height:1.55;color:#8e8e93}',
       '.wg-tel-config-icone{flex:none;display:grid;place-items:center;width:34px;height:34px;border-radius:50%;background:#e9e9eb;color:#8e8e93}',
       '.wg-tel-config-icone svg{width:17px;height:17px}',
+      // "Adicionar contacto" (a cadeira vazia que se clicou): preview do boneco
+      // com "Trocar", nome, prompt, skills por checkbox (entram no prompt) e o
+      // modelo que vai correr tudo — o mesmo visual das Definições.
+      '.wg-tel-contacto{padding:150px 18px 12px}',
+      '.wg-tel-contacto-topo{flex:none;display:flex;align-items:center;gap:14px}',
+      '.wg-tel-contacto-boneco{flex:none;display:grid;place-items:center;width:92px;height:98px;border-radius:18px;overflow:hidden;background:linear-gradient(180deg,#eef0f4,#cdd2da)}',
+      '.wg-tel-contacto-boneco svg{display:block;width:108px;height:115px;transform:translate(-8px,4px)}',
+      '.wg-tel-contacto-lado{flex:1;min-width:0;display:flex;flex-direction:column}',
+      '.wg-tel-contacto-nome{flex:none;width:100%;height:34px;padding:6px 11px;border:1px solid #d1d1d6;border-radius:11px;background:#fff;color:#000;font:inherit;font-size:14px}',
+      '.wg-tel-contacto-nome:focus{outline:2px solid #0b84fe;outline-offset:1px}',
+      '.wg-tel-contacto-trocar{flex:none;margin:8px 0 0;padding:5px 11px;border:0;border-radius:12px;background:#e9e9eb;color:#007aff;font:600 11px/1.45 -apple-system,system-ui,sans-serif;cursor:pointer}',
+      '.wg-tel-contacto-trocar:hover{background:#dcdce1}',
+      '.wg-tel-contacto-prompt{flex:none;width:100%;min-height:74px;padding:8px 11px;border:1px solid #d1d1d6;border-radius:11px;background:#fff;color:#000;font:inherit;font-size:14px;line-height:19px;resize:none}',
+      '.wg-tel-contacto-prompt:focus{outline:2px solid #0b84fe;outline-offset:1px}',
+      '.wg-tel-contacto-skills{flex:none;max-height:168px;margin:0;padding:4px 0;overflow-y:auto;overscroll-behavior:contain;list-style:none;border:1px solid #e5e5ea;border-radius:11px;background:#fff}',
+      '.wg-tel-contacto-skill{display:flex;align-items:flex-start;gap:8px;padding:7px 11px;cursor:pointer}',
+      '.wg-tel-contacto-skill:hover{background:#f2f2f7}',
+      '.wg-tel-contacto-skill input{flex:none;width:16px;height:16px;margin:2px 0 0;accent-color:#0b84fe}',
+      '.wg-tel-contacto-skill-nome{flex:none;font:600 12px/1.45 -apple-system,system-ui,sans-serif;color:#000}',
+      '.wg-tel-contacto-skill-desc{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font:400 11px/1.45 -apple-system,system-ui,sans-serif;color:#8e8e93}',
+      '.wg-tel-contacto-vazio{flex:none;margin:6px 0 0;font-size:11px;color:#8e8e93}',
+      '.wg-tel-contacto-modelo{flex:none;width:100%;height:34px;padding:6px 11px;border:1px solid #d1d1d6;border-radius:11px;background:#fff;color:#000;font:inherit;font-size:14px}',
+      '.wg-tel-contacto-final{flex:none;max-height:120px;margin:0;padding:9px 11px;overflow-y:auto;border:1px solid #e5e5ea;border-radius:11px;background:#f7f7fa;color:#3c3c43;font:400 11.5px/1.5 -apple-system,system-ui,sans-serif;white-space:pre-wrap;overflow-wrap:anywhere}',
+      '.wg-tel-contacto-nota{flex:none;margin:8px 0 0;font-size:10.5px;line-height:1.5;color:#8e8e93}',
       // Modo telemóvel (um telemóvel a rodar o site): o celular É o ecrã
       // INTEIRO — por cima de tudo o que é do DSH (a barra não se vê), sem
       // moldura, sem ilha/barra de casa, sem escritório por baixo e sem
@@ -6136,7 +6230,7 @@ function mascararChave(chave) {
       // O DSH dá `corner-shape: superellipse(1.5)` a tudo (cantos contínuos, como
       // o iOS — ótimo para a moldura e as bolhas); círculos, pílulas e as peças
       // da cauda precisam de `round` para serem círculos de verdade.
-      '.wg-tel-escrevendo span,.wg-tel-escrevendo::before,.wg-tel-escrevendo::after,.wg-tel-avatar,.wg-tel-enviar,.wg-tel-voz,.wg-tel-alerta,.wg-tel-fila-enviar,.wg-tel-fila-remover,.wg-tel-ilha,.wg-tel-home,.wg-tel-cauda .wg-tel-bolha::before,.wg-tel-cauda .wg-tel-bolha::after,.wg-tel-voz-barras span,.wg-tel-voz-estatico,.wg-tel-voz-estatico i,.wg-tel-voz-repetir,.wg-tel-config-chave,.wg-tel-config-idioma,.wg-tel-config-guardar,.wg-tel-config-limpar,.wg-tel-config-icone{corner-shape:round}',
+      '.wg-tel-escrevendo span,.wg-tel-escrevendo::before,.wg-tel-escrevendo::after,.wg-tel-avatar,.wg-tel-enviar,.wg-tel-voz,.wg-tel-alerta,.wg-tel-fila-enviar,.wg-tel-fila-remover,.wg-tel-ilha,.wg-tel-home,.wg-tel-cauda .wg-tel-bolha::before,.wg-tel-cauda .wg-tel-bolha::after,.wg-tel-voz-barras span,.wg-tel-voz-estatico,.wg-tel-voz-estatico i,.wg-tel-voz-repetir,.wg-tel-config-chave,.wg-tel-config-idioma,.wg-tel-config-guardar,.wg-tel-config-limpar,.wg-tel-config-icone,.wg-tel-contacto-boneco,.wg-tel-contacto-trocar,.wg-tel-contacto-nome,.wg-tel-contacto-prompt,.wg-tel-contacto-skills,.wg-tel-contacto-modelo,.wg-tel-contacto-final{corner-shape:round}',
       '@keyframes wg-tel-entrar{from{opacity:0;transform:translateY(22px) scale(.96)}to{opacity:1;transform:none}}',
       '@keyframes wg-tel-ponto{0%,60%,100%{opacity:.35;transform:translateY(0)}30%{opacity:.9;transform:translateY(-2px)}}',
       // Painel estreito (a sala ficaria com < ~600 px ao lado da barra): o
@@ -7291,6 +7385,17 @@ function mascararChave(chave) {
       })
       : avatarIniciais(letra));
 
+    // Bust GRANDE do preview ("Adicionar contacto"): o mesmo `<use>` do avatar
+    // das outras telas — id gerado pelo plugin (`wgav-…`), nunca texto de fora.
+    const bonecoGrande = (chave) => (chave
+      ? h('div', {
+        className: 'wg-tel-contacto-boneco', 'aria-hidden': 'true',
+        dangerouslySetInnerHTML: {
+          __html: `<svg viewBox="0 0 264 280" focusable="false" aria-hidden="true"><use href="#${idSimbolo(...chave.split('|'))}" width="264" height="280"/></svg>`,
+        },
+      })
+      : h('div', { className: 'wg-tel-contacto-boneco wg-tel-iniciais', 'aria-hidden': 'true' }, '+'));
+
     // Tela "Grupos": a lista de workspaces (o "Messages" do nosso iMessage).
     function TelefoneGrupos(props) {
       const { grupos, abrirGrupo, fechar, podeFechar, abrirConfig } = props;
@@ -7568,6 +7673,174 @@ function mascararChave(chave) {
     const TelefoneConfigMemo = typeof react.memo === 'function' ? react.memo(TelefoneConfig) : TelefoneConfig;
 
     const TelefoneMemo = typeof react.memo === 'function' ? react.memo(TelefoneConversa) : TelefoneConversa;
+
+    // Tela "Adicionar contacto" (vista 'adicionar-contacto' da pilha do
+    // celular): a cadeira vazia recruta-se aqui. Nome livre, preview do boneco
+    // (o botão "Trocar" roda o pool do gênero do nome), a área do prompt (o
+    // que ele faz), as skills por checkbox — que entram no prompt como tokens
+    // `/nome`, o gesto de invocação do DSH — e o modelo que vai correr tudo.
+    // Tudo nós de texto React; o único HTML é o `<use>` do boneco, igual ao
+    // avatar das outras telas (id gerado pelo plugin, nada de entrada externa).
+    function TelefoneAdicionarContacto(props) {
+      const recruta = props.recruta || {};
+      const [nome, setNome] = react.useState('');
+      const [salto, setSalto] = react.useState(0);
+      const [texto, setTexto] = react.useState('');
+      const [escolhidas, setEscolhidas] = react.useState(() => (typeof Set === 'function' ? new Set() : []));
+      const [modelo, setModelo] = react.useState(() => {
+        const p = props.catalogoInicial && props.catalogoInicial.modeloPadrao;
+        return p && p.model ? `${p.provider}/${p.model}` : '';
+      });
+      // `catalogoInicial` (testes) já vem carregado; em produção o efeito
+      // abaixo puxa skills e modelos do DSH uma vez por abertura.
+      const [catalogo, setCatalogo] = react.useState(() => props.catalogoInicial || null);
+      const [nota, setNota] = react.useState(null);
+      const [aCriar, setACriar] = react.useState(false);
+      const [agora, setAgora] = react.useState(() => Date.now());
+      react.useEffect(() => {
+        const relogio = setInterval(() => setAgora(Date.now()), 20000);
+        return () => clearInterval(relogio);
+      }, []);
+      // Skills do projeto e modelos do host: uma leitura por abertura.
+      react.useEffect(() => {
+        let vivo = true;
+        const pedido = typeof props.catalogoContacto === 'function'
+          ? props.catalogoContacto(recruta.referencia)
+          : Promise.resolve(null);
+        Promise.resolve(pedido).then((dados) => {
+          if (!vivo || !dados) return;
+          setCatalogo(dados);
+          const padrao = dados.modeloPadrao;
+          if (padrao && padrao.model) setModelo(`${padrao.provider}/${padrao.model}`);
+        }, (erro) => {
+          // Nunca em silêncio: a tela diz que o catálogo não veio.
+          if (!vivo) return;
+          setCatalogo({ skills: [], modelos: [], modeloPadrao: null, notas: [`Catálogo indisponível: ${String((erro && erro.message) || erro)}`] });
+        });
+        return () => { vivo = false; };
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+      }, []);
+      const tem = (n) => escolhidas.has(n);
+      const alternar = (n) => setEscolhidas((atual) => {
+        const novo = new Set(atual);
+        if (novo.has(n)) novo.delete(n); else novo.add(n);
+        return novo;
+      });
+      const identidade = identidadeDeNome(nome, salto);
+      // Sem catálogo ainda NÃO é "indisponível": é a carregar (o efeito acima
+      // puxa-o do DSH uma vez por abertura) — a tela distingue os dois.
+      const aCarregar = catalogo === null && !props.catalogoInicial;
+      const skills = (catalogo && Array.isArray(catalogo.skills)) ? catalogo.skills : [];
+      const modelos = (catalogo && Array.isArray(catalogo.modelos)) ? catalogo.modelos : [];
+      const notas = (catalogo && Array.isArray(catalogo.notas)) ? catalogo.notas : [];
+      const porGrupo = new Map();
+      for (const m of modelos) {
+        if (!porGrupo.has(m.grupo)) porGrupo.set(m.grupo, []);
+        porGrupo.get(m.grupo).push(m);
+      }
+      const final = comporPromptContacto(texto, [...escolhidas]);
+      const podeEnviar = !aCriar && nome.trim().length > 0;
+      const adicionar = async () => {
+        if (!podeEnviar) { setNota('Escreve um nome para o contacto.'); return; }
+        setACriar(true);
+        setNota(null);
+        const escolhido = modelos.find((m) => `${m.provider}/${m.model}` === modelo) || null;
+        let r = null;
+        try {
+          r = await props.criarContacto({
+            identidade,
+            prompt: texto,
+            skills: [...escolhidas],
+            modelo: escolhido ? { provider: escolhido.provider, model: escolhido.model } : null,
+          });
+        } catch (erro) {
+          r = { ok: false, erro: String((erro && erro.message) || erro) };
+        }
+        setACriar(false);
+        if (!r || r.ok !== true) setNota((r && r.erro) || 'Não deu para criar o contacto.');
+        else if (r.aviso) setNota(r.aviso);
+        // Em caso de sucesso o núcleo troca já para a conversa do contacto.
+      };
+      return h('section', {
+        className: `wg-telefone${props.entrada === false ? ' wg-tel-sem-entrada' : ''}`,
+        role: 'dialog', 'aria-label': 'Adicionar contacto', 'data-vista': 'adicionar-contacto',
+      },
+        h('div', { className: 'wg-tel-ecra' },
+          h('div', { className: 'wg-tel-ilha', 'aria-hidden': 'true' }),
+          topoTel({
+            agora,
+            voltar: 'Escritório', aoVoltar: props.voltar,
+            voltarTitulo: 'Voltar ao escritório (Esc)',
+            avatar: avatarDeChave(identidade.avatar ? `${identidade.avatar}|idle` : null, '+'),
+            nome: 'Adicionar contacto',
+            subtitulo: recruta.workspaceId ? `Lugar livre · ${recruta.workspaceId}` : 'Lugar livre',
+          }),
+          h('div', { className: 'wg-tel-lista wg-tel-contacto' },
+            h('div', { className: 'wg-tel-contacto-topo' },
+              bonecoGrande(identidade.avatar ? `${identidade.avatar}|idle` : null),
+              h('div', { className: 'wg-tel-contacto-lado' },
+                h('label', { className: 'wg-tel-config-rotulo', htmlFor: 'wg-tel-contacto-nome' }, 'Nome'),
+                h('input', {
+                  id: 'wg-tel-contacto-nome', className: 'wg-tel-contacto-nome', type: 'text',
+                  value: nome, placeholder: 'Ex.: Maya', autoComplete: 'off', spellCheck: 'false',
+                  'aria-label': 'Nome do contacto', onChange: (e) => setNome(e.target.value),
+                }),
+                h('button', {
+                  type: 'button', className: 'wg-tel-contacto-trocar',
+                  title: 'Trocar o boneco deste contacto',
+                  onClick: () => setSalto((s) => s + 1),
+                }, 'Trocar boneco'))),
+            h('label', { className: 'wg-tel-config-rotulo', htmlFor: 'wg-tel-contacto-prompt' }, 'Prompt — o que ele faz'),
+            h('textarea', {
+              id: 'wg-tel-contacto-prompt', className: 'wg-tel-contacto-prompt',
+              value: texto, rows: 4, placeholder: 'Ex.: acompanha os PRs do repositório e resume o que mudou.',
+              'aria-label': 'O que o contacto deve fazer', onChange: (e) => setTexto(e.target.value),
+            }),
+            h('div', { className: 'wg-tel-config-rotulo' }, 'Skills — entram no prompt'),
+            aCarregar
+              ? h('p', { className: 'wg-tel-contacto-vazio wg-tel-contacto-a-carregar' }, 'A carregar as skills…')
+              : skills.length === 0
+              ? h('p', { className: 'wg-tel-contacto-vazio' }, 'Sem skills neste lugar.')
+              : h('ul', { className: 'wg-tel-contacto-skills', role: 'list', 'aria-label': 'Skills disponíveis' },
+                skills.map((s) => h('li', { key: s.name },
+                  h('label', { className: 'wg-tel-contacto-skill' },
+                    h('input', {
+                      type: 'checkbox', checked: tem(s.name), 'aria-label': `Skill ${s.name}`,
+                      onChange: () => alternar(s.name),
+                    }),
+                    h('span', { className: 'wg-tel-contacto-skill-nome' }, `/${s.name}`),
+                    h('span', { className: 'wg-tel-contacto-skill-desc' }, s.description || ''))))),
+            h('label', { className: 'wg-tel-config-rotulo', htmlFor: 'wg-tel-contacto-modelo' }, 'Modelo — o que corre tudo'),
+            h('select', {
+              id: 'wg-tel-contacto-modelo', className: 'wg-tel-contacto-modelo', value: modelo,
+              'aria-label': 'Modelo do contacto', onChange: (e) => setModelo(e.target.value),
+            },
+              aCarregar
+                ? h('option', { value: '' }, 'A carregar modelos…')
+                : (modelos.length === 0 ? h('option', { value: '' }, 'Modelos indisponíveis') : null),
+              [...porGrupo.entries()].map(([grupo, lista]) => h('optgroup', { key: grupo, label: grupo },
+                lista.map((m) => h('option', { key: `${m.provider}/${m.model}`, value: `${m.provider}/${m.model}` }, m.nome))))),
+            h('div', { className: 'wg-tel-config-rotulo' }, 'Prompt final'),
+            h('p', {
+              className: 'wg-tel-contacto-final',
+              'aria-label': 'Prompt final que vai ser enviado',
+            }, final || 'O prompt fica vazio — só o nome e o boneco entram.'),
+            notas.length
+              ? h('p', { className: 'wg-tel-contacto-nota' }, notas.join(' · '))
+              : null,
+            h('div', { className: 'wg-tel-config-acoes' },
+              h('button', {
+                type: 'button', className: 'wg-tel-config-guardar', disabled: !podeEnviar,
+                onClick: adicionar,
+              }, aCriar ? 'A criar…' : 'Adicionar contacto')),
+            nota ? h('p', { className: 'wg-tel-config-nota', role: 'status' }, nota) : null),
+          h('div', { className: 'wg-tel-home', 'aria-hidden': 'true' })));
+    }
+
+    const TelefoneAdicionarContactoMemo = typeof react.memo === 'function'
+      ? react.memo(TelefoneAdicionarContacto)
+      : TelefoneAdicionarContacto;
+
 
     // Painel principal: sala SVG com zoom/pan, filtros e a barra lateral da pessoa.
     function PainelEscritorio(props) {
@@ -7882,6 +8155,17 @@ function mascararChave(chave) {
 
       const podeAgir = typeof props.podeAgir === 'function' && props.podeAgir();
       const novaSessao = (workspaceId) => { if (workspaceId && typeof props.novaSessao === 'function') props.novaSessao(workspaceId); };
+      // Clique numa cadeira vazia: abre o celular no "Adicionar contacto" com
+      // o lugar, o workspace e a sessão de referência (catálogo de skills).
+      const adicionarContacto = (el) => {
+        if (typeof props.abrirAdicionarContacto !== 'function') return false;
+        props.abrirAdicionarContacto({
+          workspaceId: el.getAttribute('data-workspace-id') || null,
+          lugar: el.getAttribute('data-lugar') || null,
+          referencia: el.getAttribute('data-referencia') || null,
+        });
+        return true;
+      };
 
       // Arrastar = explorar a sala. O pan só começa depois de o ponteiro andar
       // alguns píxeis (os ouvintes vivem na window, sem captura — capturar logo
@@ -7914,6 +8198,8 @@ function mascararChave(chave) {
       };
 
       const agirSobre = (el) => {
+        const contacto = el && el.closest ? el.closest('[data-action="adicionar-contacto"]') : null;
+        if (contacto) { adicionarContacto(contacto); return true; }
         const acao = el && el.closest ? el.closest('[data-action="nova-sessao"]') : null;
         if (acao) { novaSessao(acao.getAttribute('data-workspace-id')); return true; }
         const alvo = el && el.closest ? el.closest('[data-session-id]') : null;
@@ -7958,7 +8244,14 @@ function mascararChave(chave) {
           historico: typeof props.getHistorico === 'function' ? props.getHistorico(sel.id) : null,
         })
         : null;
-      const sprite = spriteDoPainel([...layout.chaves, modelo ? modelo.avatarChave : null]);
+      // Bustos do preview do "Adicionar contacto": o sprite da sala só traz os
+      // corpos das pessoas (com a expressão que têm AGORA) e o recruta pode
+      // querer qualquer identidade — com a tela aberta, entram os 8 bustos em
+      // 'idle'; sem ela, o sprite fica como sempre.
+      const chavesContacto = telefone.aberto && telefone.vista === 'adicionar-contacto'
+        ? identidades().map((a) => chaveCorpo(a, 'idle'))
+        : [];
+      const sprite = spriteDoPainel([...layout.chaves, modelo ? modelo.avatarChave : null, ...chavesContacto]);
       // GRUPOS = os workspaces da sala (o mesmo recorte das mesas): cada grupo
       // mostra as pessoas daquele workspace; o feed conjunto é do Grupo. As
       // arquivadas não entram quando o filtro as oculta (semArquivadas).
@@ -8237,6 +8530,21 @@ function mascararChave(chave) {
                 // "‹" volta aos grupos (a pilha do celular: config → grupos).
                 return h(TelefoneConfigMemo, {
                   key: 'config', entrada,
+                  voltar: () => { if (typeof props.voltarTelefone === 'function') props.voltarTelefone(); },
+                });
+              }
+              if (vistaTel === 'adicionar-contacto') {
+                // A cadeira vazia clicada: o recruta (lugar + workspace +
+                // sessão de referência das skills) vem do núcleo.
+                return h(TelefoneAdicionarContactoMemo, {
+                  key: 'adicionar-contacto', entrada,
+                  recruta: typeof props.getRecruta === 'function' ? (props.getRecruta() || {}) : {},
+                  catalogoContacto: typeof props.catalogoContacto === 'function'
+                    ? (ref) => props.catalogoContacto(ref)
+                    : () => Promise.resolve(null),
+                  criarContacto: typeof props.criarContacto === 'function'
+                    ? (dados) => props.criarContacto(dados)
+                    : () => Promise.resolve({ ok: false, erro: 'Sem canal para criar contactos.' }),
                   voltar: () => { if (typeof props.voltarTelefone === 'function') props.voltarTelefone(); },
                 });
               }
@@ -8541,6 +8849,10 @@ function mascararChave(chave) {
       // grupo — nada fica preso em fundo). É dele que sai o feed "todos a
       // falar e a escrever" daquele workspace.
       let grupoConv = { workspaceId: null, membros: new Map() };
+      // Recruta em curso (tela "Adicionar contacto"): o lugar livre clicado e
+      // o workspace onde o contacto entra. Fica FORA do `telefone` de
+      // propósito — a forma de getTelefone() é contrato de teste (5 campos).
+      let recruta = null;
       const soltarGrupo = () => {
         for (const c of grupoConv.membros.values()) { try { c.libertar(); } catch { /* já libertada */ } }
         grupoConv = { workspaceId: null, membros: new Map() };
@@ -8550,6 +8862,7 @@ function mascararChave(chave) {
         if (!telefone.aberto && !conversa && !grupoConv.workspaceId) return;
         soltarConversa();
         soltarGrupo();
+        recruta = null;
         telefone = { aberto: false, sessionId: telefone.sessionId, vista: 'grupos', grupoId: null, origem: 'cena' };
         trace('telefone-fechado', telefone.sessionId);
         notificar();
@@ -8596,6 +8909,30 @@ function mascararChave(chave) {
         conversa = null;
         desligarHistorico();
         if (c && typeof c.libertar === 'function') { try { c.libertar(); } catch { /* já libertada */ } }
+      };
+
+      // Abre a conversa de `id` no celular (o mesmo caminho do clique numa
+      // pessoa e do recruta acabado de criar — retain da nova antes do
+      // release da anterior, como o replaceMain do DSH).
+      const abrirConversaNoTelefone = (id, origem = 'cena') => {
+        if (!id) return;
+        if (telefone.aberto && telefone.vista === 'conversa' && telefone.sessionId === id && conversa) {
+          // já aberta: só a origem/navegação pode mudar (voltar ao grupo).
+          telefone = { ...telefone, origem, grupoId: origem === 'grupo' ? grupoConv.workspaceId : telefone.grupoId };
+          notificar();
+          return;
+        }
+        const anterior = conversa;
+        conversa = fabricaConversa(id);
+        if (historico.sessionId !== id) historico = HISTORICO_VAZIO;
+        ligarHistorico(conversa);
+        if (anterior && anterior !== conversa) { try { anterior.libertar(); } catch { /* já libertada */ } }
+        telefone = {
+          aberto: true, sessionId: id, vista: 'conversa',
+          grupoId: origem === 'grupo' ? grupoConv.workspaceId : null, origem,
+        };
+        trace('telefone-aberto', id);
+        notificar();
       };
 
       const notificar = () => {
@@ -8683,28 +9020,7 @@ function mascararChave(chave) {
           notificar();
           return r;
         },
-        abrirTelefone: (id, origem = 'cena') => {
-          if (!id) return;
-          if (telefone.aberto && telefone.vista === 'conversa' && telefone.sessionId === id && conversa) {
-            // já aberta: só a origem/navegação pode mudar (voltar ao grupo).
-            telefone = { ...telefone, origem, grupoId: origem === 'grupo' ? grupoConv.workspaceId : telefone.grupoId };
-            notificar();
-            return;
-          }
-          // Trocar de pessoa: retain da NOVA e só depois release da anterior
-          // (como o replaceMain do DSH: a mesma sessão nunca fecha e reabre).
-          const anterior = conversa;
-          conversa = fabricaConversa(id);
-          if (historico.sessionId !== id) historico = HISTORICO_VAZIO;
-          ligarHistorico(conversa);
-          if (anterior && anterior !== conversa) { try { anterior.libertar(); } catch { /* já libertada */ } }
-          telefone = {
-            aberto: true, sessionId: id, vista: 'conversa',
-            grupoId: origem === 'grupo' ? grupoConv.workspaceId : null, origem,
-          };
-          trace('telefone-aberto', id);
-          notificar();
-        },
+        abrirTelefone: (id, origem = 'cena') => abrirConversaNoTelefone(id, origem),
         // Vista "Grupos" — a lista de workspaces (o "Messages" do nosso iMessage).
         abrirGrupos: () => {
           soltarConversa();
@@ -8720,6 +9036,175 @@ function mascararChave(chave) {
           telefone = { aberto: true, sessionId: null, vista: 'config', grupoId: null, origem: 'cena' };
           trace('telefone-config', null);
           notificar();
+        },
+        // Vista "Adicionar contacto" (a cadeira vazia clicada): nome, boneco,
+        // prompt, skills e modelo. O lugar fica FORA do `telefone` (a forma de
+        // getTelefone() é contrato) e lê-se com getRecruta().
+        abrirAdicionarContacto: (alvo = {}) => {
+          soltarConversa();
+          soltarGrupo();
+          recruta = {
+            workspaceId: alvo.workspaceId != null ? String(alvo.workspaceId) : null,
+            lugar: alvo.lugar != null ? String(alvo.lugar) : null,
+            referencia: alvo.referencia != null ? String(alvo.referencia) : null,
+          };
+          telefone = { aberto: true, sessionId: null, vista: 'adicionar-contacto', grupoId: null, origem: 'cena' };
+          trace('telefone-adicionar-contacto', recruta.workspaceId);
+          notificar();
+        },
+        getRecruta: () => recruta,
+        // Catálogo do "Adicionar contacto": skills do projeto da sessão de
+        // referência (cwd + preset — é o que a sessão nova vai herdar) e os
+        // modelos que o host serve hoje. Sem canal, as listas vêm vazias e as
+        // notas dizem porquê — a tela mostra-as e o prompt continua a valer.
+        catalogoContacto: async (referencia) => {
+          const saida = { skills: [], modelos: [], modeloPadrao: null, notas: [] };
+          try {
+            const ctxAlvo = (opcoes.ctx || ctxDoPlugin);
+            // Namespaces do `remote` pelo NOME COMPLETO (servicoDe): a
+            // propriedade `ctx.remote.session` exige inject declarado.
+            const canalSessao = servicoDe(ctxAlvo, 'remote.session');
+            const canalSkills = servicoDe(ctxAlvo, 'remote.skills');
+            // Referência do catálogo de skills: a sessão do LUGAR (é o cwd +
+            // preset do projeto que a sessão nova vai herdar). Se a mesa está
+            // vazia (workspace novo), usa-se QUALQUER sessão da sala — as
+            // skills do utilizador valem em todo o lado — e a nota avisa que
+            // as do projeto podem faltar.
+            let ref = (referencia != null && String(referencia)) ? String(referencia)
+              : (recruta && recruta.referencia ? String(recruta.referencia) : null);
+            let refDaSala = false;
+            if (!ref) {
+              for (const p of estado.people.values()) {
+                if (p && p.id && !p.subagent && !p.blank) { ref = String(p.id); refDaSala = true; break; }
+              }
+            }
+            if (!ref) {
+              // A sala ainda pode não ter assentado: o catálogo CRU do DSH é a
+              // mesma fonte (raízes apenas — subagentes não têm workspace).
+              try {
+                const lista = ctxAlvo && ctxAlvo.sessions ? ctxAlvo.sessions.list : null;
+                const snap = lista && typeof lista.getSnapshot === 'function' ? lista.getSnapshot() : null;
+                for (const linha of linhasDoSnapshot(snap)) {
+                  if (linha && linha.id && !linha.parentId) { ref = String(linha.id); refDaSala = true; break; }
+                }
+              } catch { /* sem catálogo de sessões: fica sem referência */ }
+            }
+            trace('contacto-catalogo', {
+              ref: ref || null, sala: refDaSala,
+              canalSkills: !!(canalSkills && typeof canalSkills.list === 'function'),
+              canalModelos: !!(canalSessao && typeof canalSessao.modelCatalog === 'function'),
+            });
+            if (canalSkills && typeof canalSkills.list === 'function' && ref) {
+              try {
+                const r = await canalSkills.list({ sessionId: ref }, undefined);
+                if (r && r.ok === true && r.value && Array.isArray(r.value.skills)) {
+                  saida.skills = r.value.skills.filter((s) => s && typeof s.name === 'string');
+                  if (refDaSala) {
+                    saida.notas.push('Este lugar ainda não tem sessões: lista de skills do utilizador (as do projeto entram quando houver sessões).');
+                  }
+                } else {
+                  saida.notas.push(`Skills indisponíveis: ${(r && r.error && r.error.message) || 'sem catálogo'}`);
+                }
+              } catch (erro) {
+                saida.notas.push(`Skills indisponíveis: ${mensagemDeErro(erro)}`);
+              }
+            } else {
+              saida.notas.push('Skills indisponíveis: este lugar não tem sessão de referência.');
+            }
+          if (canalSessao && typeof canalSessao.modelCatalog === 'function') {
+            try {
+              const r = await canalSessao.modelCatalog();
+              if (r && r.ok === true && r.value) {
+                for (const grupo of (Array.isArray(r.value.groups) ? r.value.groups : [])) {
+                  if (!grupo || !Array.isArray(grupo.models)) continue;
+                  for (const m of grupo.models) {
+                    saida.modelos.push({
+                      provider: String(grupo.id),
+                      model: String(m.id),
+                      nome: String(m.name || m.id),
+                      grupo: String(grupo.name || grupo.id),
+                    });
+                  }
+                }
+                if (r.value.default && r.value.default.model) saida.modeloPadrao = r.value.default;
+              } else {
+                saida.notas.push(`Modelos indisponíveis: ${(r && r.error && r.error.message) || 'sem catálogo'}`);
+              }
+            } catch (erro) {
+              saida.notas.push(`Modelos indisponíveis: ${mensagemDeErro(erro)}`);
+            }
+          } else {
+            saida.notas.push('Modelos indisponíveis: o DSH não expõe o catálogo.');
+            }
+          } catch (erro) {
+            // Nunca rejeita: a tela tem de conseguir explicar o que falta.
+            saida.notas.push(`Catálogo indisponível: ${mensagemDeErro(erro)}`);
+          }
+          trace('contacto-catalogo-fim', {
+            skills: saida.skills.length, modelos: saida.modelos.length, notas: saida.notas.length,
+          });
+          return saida;
+        },
+        // Cria o contacto: sessão nova no workspace do lugar, identidade
+        // escolhida (nome + boneco) gravada ANTES de a sala a ver, modelo
+        // escolhido instalado e o prompt final (texto + skills) enviado —
+        // com a conversa aberta no celular, como a recruta que é.
+        criarContacto: async ({ identidade, prompt, skills, modelo } = {}) => {
+          const nome = String((identidade && identidade.name) ?? '').trim();
+          if (!nome) return { ok: false, motivo: 'nome', erro: 'O contacto precisa de nome.' };
+          const wsId = recruta && recruta.workspaceId ? recruta.workspaceId : null;
+          const ctxAlvo = (opcoes.ctx || ctxDoPlugin);
+          const canalSessao = servicoDe(ctxAlvo, 'remote.session');
+          let sessoes = null;
+          try { sessoes = (ctxAlvo && ctxAlvo.sessions) || servicoDe(ctxAlvo, 'sessions'); } catch { sessoes = null; }
+          // 1) sessão nova no workspace do lugar (ou em qualquer, se o lugar
+          //    não tiver workspace conhecido).
+          let id = null;
+          try {
+            if (sessoes && typeof sessoes.create === 'function') {
+              id = await sessoes.create(wsId ? { workspaceId: wsId } : undefined);
+            } else if (canalSessao && typeof canalSessao.create === 'function') {
+              const r = await canalSessao.create(wsId ? { workspaceId: wsId } : {});
+              id = r && r.ok === true && r.value ? r.value.sessionId : null;
+            }
+          } catch (erro) {
+            return { ok: false, motivo: 'criar', erro: mensagemDeErro(erro) };
+          }
+          if (!id) return { ok: false, motivo: 'criar', erro: 'O DSH não criou a sessão do contacto.' };
+          // 2) identidade escolhida: a ficha nasce já com o nome e o boneco.
+          associador.definir(id, identidade);
+          trace('contacto-criado', { id, workspaceId: wsId });
+          // 3) conversa aberta no celular (retain da nova sessão).
+          abrirConversaNoTelefone(id);
+          estado = { ...estado, selecionada: id };
+          if (historico.sessionId !== id) historico = HISTORICO_VAZIO;
+          // 4) o modelo que vai correr tudo — antes do primeiro prompt.
+          if (modelo && modelo.provider && modelo.model) {
+            try {
+              if (canalSessao && typeof canalSessao.selectModel === 'function') {
+                await canalSessao.selectModel({
+                  sessionId: id, provider: String(modelo.provider), model: String(modelo.model),
+                });
+              } else {
+                trace('contacto-modelo-erro', 'sem session.selectModel');
+              }
+            } catch (erro) {
+              trace('contacto-modelo-erro', mensagemDeErro(erro));
+            }
+          }
+          // 5) prompt final = o que ele faz + as skills escolhidas.
+          const texto = comporPromptContacto(prompt, skills);
+          let aviso = null;
+          if (texto) {
+            if (!conversa) aviso = 'A conversa não abriu — o prompt fica por enviar.';
+            else {
+              const r = await conversa.enviar(texto);
+              if (!r || r.ok === false) aviso = 'O prompt não foi enviado — reenvie na conversa.';
+            }
+          }
+          recruta = null;
+          notificar();
+          return aviso ? { ok: true, sessionId: id, aviso } : { ok: true, sessionId: id };
         },
         // Vista "Grupo": o feed de TODOS os membros daquele workspace a falar e
         // a escrever. `membros` = lugares da mesa do workspace (ordem da sala).
@@ -8747,6 +9232,14 @@ function mascararChave(chave) {
             // As Definições abrem-se dos Grupos: o "‹" volta lá (nunca fecha).
             soltarConversa();
             telefone = { aberto: true, sessionId: null, vista: 'grupos', grupoId: null, origem: 'cena' };
+            notificar();
+            return;
+          }
+          if (telefone.vista === 'adicionar-contacto') {
+            // O recruta desiste-se aqui: o lugar volta a ficar livre.
+            recruta = null;
+            telefone = { aberto: true, sessionId: null, vista: 'grupos', grupoId: null, origem: 'cena' };
+            trace('telefone-adicionar-contacto-cancelado', null);
             notificar();
             return;
           }
@@ -8804,6 +9297,7 @@ function mascararChave(chave) {
             // O celular é da pessoa selecionada: mudar/fechar a barra fecha-o.
             if (telefone.aberto && telefone.sessionId !== id) {
               soltarConversa();
+              recruta = null;
               telefone = { aberto: false, sessionId: telefone.sessionId };
             }
             notificar();
@@ -8818,6 +9312,7 @@ function mascararChave(chave) {
           vigia.parar();
           soltarConversa();
           soltarGrupo();
+          recruta = null;
           historico = HISTORICO_VAZIO;
           telefone = { aberto: false, sessionId: telefone.sessionId };
           ouvintes.clear();
@@ -8864,8 +9359,12 @@ function mascararChave(chave) {
     // nome do inject é OBRIGATÓRIO — um serviço ausente deixa a entrada
     // 'pending' e o boot web aborta a UI inteira. Só se declaram serviços que
     // o web-app garante ('sessions' TEM de estar declarado para o runner o pôr
-    // em ctx.sessions); 'workspaces' lê-se com ctx.get, sem bloquear (secção 0).
-    exports.inject = ['slots', 'layout', 'sessions'];
+    // em ctx.sessions; 'remote.session' e 'remote.skills' são os namespaces do
+    // `remote` que o web-app monta — o session-controller e o ui-skill
+    // declaram-nos também); 'workspaces' lê-se com ctx.get, sem bloquear (secção 0).
+    // Sem estes dois, a PROPRIEDADE `ctx.remote.session` rebenta com "cannot
+    // get property … without inject" — é lida pelo nome completo em servicoDe.
+    exports.inject = ['slots', 'layout', 'sessions', 'remote.session', 'remote.skills'];
 
     // A função que o runtime do browser chama (padrão dos exemplos oficiais).
     exports.apply = function apply(ctx) {
@@ -9090,6 +9589,11 @@ function mascararChave(chave) {
       lerConfig, guardarConfig, limparConfig, mascararChave,
     };
     exports.__TelefoneConfig = TelefoneConfig; // seam de testes: render sem browser
+    // "Adicionar contacto" (a cadeira vazia): identidade escolhida, prompt
+    // final com as skills e o componente da tela — seams de testes.
+    exports.__identidadeDeNome = identidadeDeNome;
+    exports.__comporPromptContacto = comporPromptContacto;
+    exports.__TelefoneAdicionarContacto = TelefoneAdicionarContacto; // render sem browser
 
     try { window.__wgDiag = (window.__wgDiag || '') + '|factory:fim'; } catch { /* sem window */ }
     return module.exports;

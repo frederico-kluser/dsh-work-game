@@ -943,3 +943,85 @@ mascararChave(chave)                   -> 'sk-…abcd'
   `authorization`), limite 25 MB, 401 `{"error":{"message":"Incorrect API key
   provided…"}}`, modelo desconhecido 400 "The model `x` does not exist". Ver
   `docs/VOZ-TRANSCRICAO.md`.
+
+## 11. Adicionar contacto (2026-10-03) — a cadeira vazia recruta no celular
+
+Clicar numa **cadeira vazia** (`seat slot-free`) abre o celular no layout
+**"Adicionar contacto"**: nome livre, **preview do boneco** que a pessoa vai
+ter (com "Trocar boneco"), a **área do prompt** (o que ele faz), as **skills
+por checkbox** — que entram no prompt — e o **modelo que vai correr tudo**. O
+"Adicionar contacto" cria a sessão, instala o modelo, envia o prompt e deixa a
+conversa aberta: a recruta aparece a trabalhar na sua cadeira.
+
+**Gatilho** (render §5, `renderSeat`): o lugar livre de um workspace com
+`recrutar` ganha `data-action="adicionar-contacto"` com `data-workspace-id`,
+`data-lugar` (índice do lugar) e `data-referencia` (uma sessão já existente
+daquela mesa — o lugar ocupado, ou o lugar de casa `reservado` durante
+delegação). O clique (`agirSobre`) chama `abrirAdicionarContacto(alvo)`; o
+botão de cena "Nova sessão" mantém o `data-action="nova-sessao"` de sempre.
+
+**Estado** (núcleo): o recruta vive FORA do `telefone` de propósito — a forma
+de `getTelefone()` é contrato de teste (5 campos, "sem campos novos"):
+
+```js
+abrirAdicionarContacto({workspaceId, lugar, referencia})  // vista 'adicionar-contacto'
+getRecruta()        // {workspaceId, lugar, referencia} | null
+catalogoContacto(referencia) -> Promise<{skills, modelos, modeloPadrao, notas}>
+criarContacto({identidade, prompt, skills, modelo}) -> Promise<{ok, sessionId, aviso?} | {ok:false, motivo, erro}>
+```
+
+- `catalogoContacto`: skills vêm de `ctx.remote.skills.list({sessionId})` com a
+  **sessão de referência** do lugar (é o cwd + preset que a sessão nova herda) e
+  os modelos de `ctx.remote.session.modelCatalog()` (achatados em
+  `{provider, model, nome, grupo}`). Sem canal, as listas vêm vazias e `notas`
+  dizem o porquê — nada rebenta, o prompt continua a valer (o método é TOTAL:
+  nunca rejeita). Dois detalhes provados na instância viva (2026-10-03):
+  - **Os namespaces `remote.*` exigem `inject` declarado** (`remote.session` e
+    `remote.skills` estão no `exports.inject` do cliente): a propriedade
+    `ctx.remote.session` rebenta com `cannot get property … without inject` e
+    lê-se pelo NOME COMPLETO via `servicoDe` (`ctx.get('remote.session')`).
+    São serviços que o web-app garante (o session-controller e o ui-skill
+    declaram-nos também).
+  - **Referência com fallback**: lugar de mesa vazia (workspace novo) não tem
+    sessão nenhuma → usa-se QUALQUER sessão da sala (estado ou catálogo cru do
+    `ctx.sessions.list`) e a nota avisa que as skills do projeto podem faltar
+    (as do utilizador valem em todo o lado). Enquanto o catálogo não assenta, a
+    tela diz "A carregar…" — nunca "indisponível".
+- `criarContacto`, por ordem: (1) `sessions.create({workspaceId})` — a sessão
+  nasce NO WORKSPACE da cadeira (fallback `remote.session.create`); (2)
+  `associador.definir(id, identidade)` — o nome e o boneco escolhidos ficam
+  gravados ANTES de a sala os ver (`escolhido: true`, `v: 3` em
+  `dsh-work-game:assoc`); (3) a conversa abre no celular; (4)
+  `remote.session.selectModel({sessionId, provider, model})`; (5) o prompt
+  final é enviado pela conversa (nunca sem eco). Erros: `{ok:false, motivo:
+  'nome'|'criar', erro}`.
+
+**Identidade escolhida** (`identidadeDeNome(nome, salto)`): o nome é livre e o
+boneco nasce do MESMO gênero (regra de 2026-09-29 — um "Rui" nunca ganha boneco
+de mulher), com `salto` a rodar o pool do gênero (botão "Trocar boneco").
+Determinístico: mesmo nome + mesmo salto = mesmo boneco em qualquer browser.
+
+**Prompt final** (`comporPromptContacto(texto, skills)`): `texto` + uma linha
+`Skills: /a /b`. Os tokens `/nome` são o gesto de invocação do DSH — o pre-step
+`dsh-tool-skill` lê-os em qualquer ponto da mensagem (delimitados por espaço,
+kebab-case, deduplicados pela ordem de leitura) e injeta o corpo de cada skill
+invocável. Só nomes kebab-case viram token; o resto fica de fora. A tela mostra
+o prompt final antes de enviar.
+
+**UI do celular**: vista `adicionar-contacto` na pilha (a cadeira → a tela; o
+"‹" cancela o recruta e volta aos Grupos — o lugar fica livre outra vez;
+fechar o celular ou escolher outra pessoa limpa o recruta). Peças novas em
+`.wg-tel-contacto-*`, todas com `corner-shape:round` na regra das peças
+redondas e sem keyframes nem transições novas (lei de animação). Render do
+boneco = o mesmo `<use href="#wgav-…">` do avatar das outras telas (id gerado
+pelo plugin) — e o sprite do painel tem de trazer os corpos: com a tela aberta
+entram os 8 bustos em `idle` (o sprite da sala só tem os das pessoas, com a
+expressão que têm AGORA; sem isto o preview saía em branco).
+
+**Testes**: `tests/plugin/contacto.test.mjs` (identidade, prompt, núcleo,
+criarContacto ponta a ponta, catálogo e render da tela) e o lugar livre em
+`tests/plugin/render.test.mjs`. **E2E real**: `scripts/e2e-contacto.mjs`
+(Playwright contra um DSH web vivo, com cookie de sessão cunhado das
+credenciais; valida o fluxo todo SEM confirmar o formulário — nada de sessões
+criadas). Nota de operação: a primeira corrida depois de mexer em `client.js`
+corre contra o hot-reload do plugin e falha por desmontagem — repetir.

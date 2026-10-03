@@ -1034,7 +1034,8 @@ test('aparência: iPhone + iMessage (#0B84FE / #E9E9EB, 18px, cauda, Dynamic Isl
   assert.match(css, /\.wg-tel-campo textarea\{[^}]*padding:6px 36px 6px 12px;/, 'a caixa e a cápsula não mudam');
   assert.match(BUNDLE, /className: 'wg-tel-campo',\s*\/\/[^\n]*\n\s*onClick: \(e\) => \{/, 'clicar em qualquer ponto da cápsula dá o foco à caixa');
   assert.ok(BUNDLE.includes("'Escritório')"), '"‹ Escritório" no cabeçalho');
-  assert.deepEqual(B.inject, ['slots', 'layout', 'sessions'], 'o uiConversation lê-se com ctx.get — nunca no inject');
+  assert.deepEqual(B.inject, ['slots', 'layout', 'sessions', 'remote.session', 'remote.skills'],
+    'só o que o web-app garante: sessões + os namespaces do catálogo do "Adicionar contacto"; o uiConversation lê-se com ctx.get — nunca no inject');
 });
 
 test('fila no celular: cada mensagem em fila tem "Enviar agora" e "Remover" (o padrão da QueueDock do DSH)', () => {
