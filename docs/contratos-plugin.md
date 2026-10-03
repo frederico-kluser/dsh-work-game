@@ -13,6 +13,7 @@ dsh-plugin/
   src/index.js          # entry host (Cordis): a rota /api da PARTILHA (link + QR) — ver §8
   src/state.js          # lógica PURA do escritório (sem imports do DSH)
   src/expressoes.js     # motor de expressões PURO (cenários, sorteio, arbitragem) — ver §9
+  src/voz.js            # voz e transcrição PURO/INJETÁVEL (nível, gravador, API) — ver §10
   src/adapter.js        # eventos/projeções DSH → eventos normalizados
   src/client.js         # painel no browser (slots do DSH) que renderiza a sala
   src/render.js         # SVG do escritório (reutiliza assets/furniture.svg)
@@ -23,6 +24,7 @@ dsh-plugin/
 scripts/gerar-fundo-escritorio.py # FONTE do fundo: gera o .svg e o .txt (--embutir: client.js; --verificar)
 scripts/embutir-expressoes.py # FONTE dos corpos de expressão: assets/avatars → EXPR_AVATARS do client.js
 scripts/embutir-expressoes-motor.py # embute expressoes.js em expressions.js/client.js (--alvo; ver §9)
+scripts/embutir-voz.py   # embute voz.js no client.js (--alvo client; ver §10)
 dwg-cli/
   bin/dwg               # executável Node (#!/usr/bin/env node)
   lib/commands.js       # implementação dos comandos
@@ -36,6 +38,7 @@ tests/plugin/*.test.mjs # testes de state/adapter/CLI/partilha (node --test)
 docs/contratos-plugin.md  # este ficheiro
 docs/integracao-dsh.md    # como o plugin liga ao DSH (fontes verificadas)
 docs/terminal.md          # manual do dwg (controlo/debug por terminal)
+docs/VOZ-TRANSCRICAO.md   # voz e transcrição no celular (fluxo, API, segurança) — ver §10
 logs/                     # artefatos de execução (gitignored)
 ```
 
@@ -868,3 +871,75 @@ Sem cenário (não disparam cara nova): `question/answered`, `approval/decided`,
   `expressaoCenario`, `expressaoAt`, `expressaoTerminal`, `ctxNivel`, `retries`) — tudo
   serializável e clonável. `deriveExpression` mantém a precedência: override >
   pergunta/aprovação ('waiting') > resultado do motor > 'idle'.
+
+## 10. Voz e transcrição (2026-10-03) — `dsh-plugin/src/voz.js` + Definições do celular
+
+O botão de microfone do celular grava a mensagem de voz, mostra o NÍVEL da voz
+enquanto se fala (barras estilo iMessage) e transcreve-a com o speech-to-text da
+OpenAI para a caixa de mensagem — para REVER e enviar (nunca envia sozinho). A
+chave da API vive nas Definições do telemóvel (localStorage). Detalhe operacional:
+`docs/VOZ-TRANSCRICAO.md`.
+
+**API** (fonte única `dsh-plugin/src/voz.js`; cópia embutida em
+`dsh-plugin/src/client.js` entre `=== INÍCIO/FIM voz.js embutido ===`, via
+`python3 scripts/embutir-voz.py --embutir --alvo client`, paridade por teste em
+`tests/plugin/voz.test.mjs`):
+
+```js
+VOZ_MODELOS         // ['gpt-transcribe','gpt-4o-transcribe','gpt-4o-mini-transcribe','whisper-1']
+VOZ_LIMITE_BYTES    // 25 MB (limite do endpoint de transcrição)
+VOZ_DURACAO_MAX_MS  // 2 min (a gravação PARA sozinha)
+VOZ_URL_TRANSCRICAO // 'https://api.openai.com/v1/audio/transcriptions'
+CHAVE_CONFIG        // 'dsh-work-game:config' — a configuração no localStorage
+escolherMimeType(isTypeSupported)      -> 'audio/webm;codecs=opus'|'audio/webm'|'audio/mp4'|''
+rmsParaDb(rms)                         -> dBFS (piso -100)
+suavizarDb(atual, novo, dtMs, ops)     -> dBFS suavizado (ataque 20 ms / queda 250 ms)
+dbParaAltura(db, ops)                  -> 0..1 (janela -60..0 dB, gama 0.6)
+criarGravadorVoz({getUserMedia, MediaRecorder, AudioContext, agora?})
+  -> Promise<{ parar() -> Promise<Blob>, cancelar(), assinarNivel(fn) -> soltar(), duracaoMs() }>
+transcreverAudio(blob, {chave, modelo?, idioma?, fetch?, agora?})
+  -> Promise<{ text, modeloUsado, usage }>
+lerConfig(storage) -> {chaveOpenAI, idioma}
+guardarConfig(storage, {chaveOpenAI, idioma}) -> boolean
+limparConfig(storage) -> boolean
+mascararChave(chave)                   -> 'sk-…abcd'
+```
+
+**Regras:**
+- **Puro onde a matemática o permite, injetável onde o mundo entra**: sem
+  `Date.now`/`Math.random` no módulo (o relógio entra por `agora`), plataforma
+  toda por injeção (`fetch`, `FormData`, `Blob`, gravador) — testável em Node puro.
+- **Nível**: `AnalyserNode` do MESMO stream que grava (fftSize 2048) → RMS →
+  dBFS → envelope ataque/queda → `dbParaAltura`, ~10 níveis/s. As 28 barras
+  movem-se SÓ por `transform:scaleY` escrito num loop `requestAnimationFrame`
+  que PARA (e não reagenda) com a aba escondida ou o painel em `.wg-oculto`;
+  sob `prefers-reduced-motion: reduce` não há rAF — só o indicador estático
+  `.wg-tel-voz-estatico` (lei de animação: nada de keyframes/transições novas).
+- **Transcrição**: `POST` multipart (`file` + `model` [+ `language`]) com SÓ
+  `Authorization: Bearer <chave>` — o `Content-Type` NUNCA se define à mão (o
+  boundary do multipart é do browser). Resposta `{text, usage, languages?}`.
+  A cadeia de modelos anda SÓ quando a API diz que o modelo não existe (4xx —
+  400 "The model `x` does not exist" ou 404 `error.code: 'model_not_found'`).
+- **Erros tipados** `{codigo, mensagem}`: `sem-chave` · `chave-invalida` (401) ·
+  `limite` (402/429) · `audio-grande` (413 ou blob > 25 MB, recusado ANTES do
+  upload) · `rede` · `microfone` · `api` (a mensagem vem da API). A UI mostra a
+  mensagem MAPEADA em pt-PT + botão "Tentar de novo" (retranscreve o mesmo áudio).
+- **Configuração** (localStorage `dsh-work-game:config`): `{chaveOpenAI, idioma}`
+  com `idioma ∈ {auto, pt, en}`. Normalizada e tolerante a JSON estragado e a
+  storage bloqueado (modo privado), como `lerFiltros`/`guardarFiltros` (§7). A
+  chave NUNCA é logada nem mostrada em claro — o ecrã mostra só
+  `mascararChave` (`sk-…abcd`) e o campo de escrita é `type="password"`.
+- **UI do celular**: vista `config` na pilha (Grupos → Configurações; o "‹" volta
+  a Grupos, nunca fecha). Entradas: a linha da engrenagem no fim da lista de
+  Grupos (`ICONES_TELEFONE.engrenagem`, SVG inline) e o microfone quando não há
+  chave. Estados do microfone: sem chave → ATIVO mas o toque abre as Definições
+  (título literal `Mensagem de voz: use o DSH`); com chave → `Gravar mensagem de
+  voz`/`Parar gravação` com `aria-pressed`; a gravar → faixa
+  `.wg-tel-voz-estado` com barras + cronómetro mm:ss + "Toque para parar";
+  a transcrever → "A transcrever…" (botão desativado); erro → mensagem mapeada +
+  "Tentar de novo". Auto-stop aos `VOZ_DURACAO_MAX_MS` (2 min).
+- **API da OpenAI verificada AO VIVO** (2026-10-03): `gpt-transcribe` em
+  `POST /v1/audio/transcriptions`, CORS de browser confirmado (preflight permite
+  `authorization`), limite 25 MB, 401 `{"error":{"message":"Incorrect API key
+  provided…"}}`, modelo desconhecido 400 "The model `x` does not exist". Ver
+  `docs/VOZ-TRANSCRICAO.md`.

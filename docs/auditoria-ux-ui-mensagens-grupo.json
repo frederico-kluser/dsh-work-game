@@ -1,0 +1,89 @@
+{
+  "interface_type": "ai-chat",
+  "interface_type_note": "Superfície avaliada: o chat de GRUPOS do telemóvel simulado (fator mobile-app, iMessage-style) que mostra as conversas de agentes de IA por workspace. Tipo dominante ai-chat; avaliadas as Parts 1, 2 e 5 — a Part 2 entrou porque o problema reportado é de consistência entre superfícies (conversa individual vs feed de grupo vs chat do DSH). Auditoria de 1.ª ronda (pré-correção) do problema 'mensagens em grupos às vezes vêm sem formatação'. Sem UXUI_API_KEY (api_enriched: false). REMEDIAÇÃO IMPLEMENTADA NA MESMA SESSÃO: finding-1 cortarSeguro (corte à prova de sintaxe nos dois renders); finding-2 paridade do parser (itálico, __duplo__, ~~riscado~~, > citação com contorno, listas numeradas pinadas) + teste de render do grupo; finding-3 resolvido pelos dois anteriores; finding-4 conteudoDe aceita content string/array-de-strings (mensagem deixa de desaparecer). Verificado por 5 testes novos em tests/plugin/telefone.test.mjs (399/399 verdes).",
+  "overall_score": 76,
+  "band": "good",
+  "findings": [
+    {
+      "id": "finding-1",
+      "principle": {
+        "code": "C.1.4.01",
+        "slug": "error-prevention",
+        "title": "Error Prevention",
+        "part": "part-2"
+      },
+      "severity": "warning",
+      "message": "A pré-visualização de mensagens longas corta o TEXTO a 1600 caracteres por contagem crua, sem noção de sintaxe: um corte a meio de um bloco ``` transforma o resto visível em <pre> monoespaçado sem formatação; um corte dentro de `código` deixa crases soltas; um corte dentro de **negrito** perde o realce. É a mesma classe do bug histórico dos 240 caracteres (commit 2b398cc) — o limite mudou, a mecânica do corte não. Só afeta mensagens longas e consoante onde o corte cai: daí o 'às vezes'.",
+      "remediation": "Corte à prova de sintaxe (cortarSeguro) antes de segmentar: fechar/retirar o fence ``` aberto, retirar crases e ** sem par na fronteira, manter o '…' + 'Ler mais'. Resultado esperado: nenhuma pré-visualização com delimitadores literais ou cauda <pre> engolindo o resto.",
+      "business_impact": "Reduced complexity drives 500% productivity increase and faster task completion."
+    },
+    {
+      "id": "finding-2",
+      "principle": {
+        "code": "C.1.1.01",
+        "slug": "consistency-and-standards",
+        "title": "Consistency and Standards",
+        "part": "part-2"
+      },
+      "severity": "warning",
+      "message": "O mesmo conteúdo renderiza-se de forma diferente conforme a superfície e o estado: (a) o chat do DSH renderiza CommonMark completo enquanto o telemóvel só formata um subconjunto leve (sem *itálico*, ~~riscado~~, > citação, listas numeradas, tabelas GFM sem pipes exteriores) — essas mensagens 'vêm sem formatação' face ao que o utilizador viu no DSH; (b) mensagens em streaming chegam com delimitadores por fechar e aparecem literais até assentarem. Os grupos agregam vários agentes (mais diversidade de markdown), por isso o efeito nota-se mais aí.",
+      "remediation": "Alargar segmentosDeTexto ao subconjunto mais frequente (itálico, riscado, citação, listas numeradas) mantendo os pins existentes de delimitadores não fechados; documentar o subconjunto suportado. O streaming mantém o comportamento atual (assenta quando a mensagem completa) mas a pré-visualização deixa de exibir delimitadores soltos (finding-1).",
+      "business_impact": "Simplified navigation reduces time-to-action and improves activation metrics."
+    },
+    {
+      "id": "finding-3",
+      "principle": {
+        "code": "F.1.1.02",
+        "slug": "cognitive-load",
+        "title": "Cognitive Load",
+        "part": "part-1"
+      },
+      "severity": "warning",
+      "message": "Quando a sintaxe aparece literal (crases, **, ```), o leitor tem de decodificar markup à mão para perceber a mensagem — carga adicional por mensagem, repetida em feeds de grupo com muitos agentes. A formatação existe para REDUZIR esforço de leitura; exibida de forma inconsistente passa a ruído visual.",
+      "remediation": "Com os findings 1 e 2 resolvidos, o markup deixa de chegar ao ecrã nos casos frequentes; manter o texto literal apenas como último recurso (delimitador genuinamente não fechado) e sem caudas <pre> parasitas.",
+      "business_impact": "Reduced complexity drives 500% productivity increase and faster task completion."
+    },
+    {
+      "id": "finding-4",
+      "principle": {
+        "code": "S.1.1.01",
+        "slug": "conversational-flow",
+        "title": "Conversational Flow",
+        "part": "part-5"
+      },
+      "severity": "suggestion",
+      "message": "Mensagens cujo payload 'content' vem como string simples (ou array de strings) em vez de blocos {type:'text'} são silenciosamente DESCARTADAS pelo pipeline (conteudoDe só aceita arrays de blocos): a mensagem desaparece do feed sem qualquer estado vazio ou aviso — perda de dados invisível, sobretudo em feeds de grupo onde várias fontes de payload convivem.",
+      "remediation": "Aceitar content string/array-de-strings como texto (normalização em conteudoDe) e, para payloads realmente ilegíveis, mostrar uma linha de sistema curta em vez de descartar em silêncio.",
+      "business_impact": null
+    }
+  ],
+  "strengths": [
+    {
+      "principle": {
+        "code": "D.2.1.02",
+        "slug": "visual-hierarchy",
+        "title": "Visual Hierarchy"
+      },
+      "message": "O agrupamento iMessage está bem resolvido: bolhas seguidas do mesmo lado com cauda só na última, separadores de hora, nomes de remetente no feed de grupo e 'Ler mais' para mensagens longas — a hierarquia da conversa é legível mesmo com muitos agentes."
+    },
+    {
+      "principle": {
+        "code": "F.1.1.05",
+        "slug": "recognition-rather-than-recall",
+        "title": "Recognition Rather Than Recall"
+      },
+      "message": "As linhas de ferramenta são reconhecíveis de relance (ficha cinzenta compacta e expansível, com nome da ferramenta) em vez de texto solto — o utilizador reconhece o tipo de evento sem memorizar convenções."
+    },
+    {
+      "principle": {
+        "code": "C.1.1.01",
+        "slug": "consistency-and-standards",
+        "title": "Consistency and Standards"
+      },
+      "message": "A equipa já unificou as duas vistas (conversa individual e feed do grupo) num único pipeline de segmentos (commit 2b398cc) e protege-a com testes — a base é consistente; o que falta é robustez do corte e do subconjunto de markdown."
+    }
+  ],
+  "priority_fixes": ["finding-1", "finding-2", "finding-3", "finding-4"],
+  "api_enriched": false,
+  "api_note": "Install the uxuiprinciples API key for enriched findings with citations and business impact data. See uxuiprinciples.com/en/checkout"
+}

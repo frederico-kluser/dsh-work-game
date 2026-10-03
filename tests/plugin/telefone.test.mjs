@@ -33,15 +33,23 @@ import { readFileSync } from 'node:fs';
 let moduloBundle = null;
 // React falso: createElement guarda a ÁRVORE (e não null) para se poderem
 // inspecionar os componentes sem browser; os hooks são mínimos — o que interessa
-// é o que se desenha e o que os botões chamam.
+// é o que se desenha e o que os botões chamam. O BACKEND dos hooks é
+// substituível: os testes de voz usam um com estado de verdade (useState que
+// guarda e re-renderiza) para percorrer o fluxo gravar → transcrever (ver
+// `usarHooksComEstado`, mais abaixo).
 const noDe = (tipo, props, ...filhos) => ({ tipo, props: props || {}, filhos: filhos.flat(Infinity).filter((f) => f != null && f !== false) });
+const hooksSemEstado = {
+  useState: (v) => [typeof v === 'function' ? v() : v, () => {}],
+  useRef: (v) => ({ current: v }),
+};
+let hooksBackend = hooksSemEstado;
 const reactFalso = {
   createElement: noDe,
-  useState: (v) => [typeof v === 'function' ? v() : v, () => {}],
+  useState: (v) => hooksBackend.useState(v),
   useEffect: () => {},
   useLayoutEffect: () => {},
   useMemo: (f) => f(),
-  useRef: (v) => ({ current: v }),
+  useRef: (v) => hooksBackend.useRef(v),
 };
 globalThis.window = {
   __ModuleLoader__: {
@@ -140,6 +148,23 @@ test('itensDoChat: nós reais do ui-chat → bolhas, ferramentas e linhas discre
   assert.deepEqual(steering.anexos, [{ tipo: 'imagem', nome: 'ecra.png' }]);
   assert.equal(workflow.texto, 'Workflow em execução');
   assert.deepEqual(B.__itensDoChat(undefined), [], 'antes de o alvo ativar, o snapshot é undefined');
+});
+
+test('conteudoDe: payload como string ou array de strings não faz a mensagem desaparecer', () => {
+  const C = B.__conteudoDe;
+  assert.deepEqual(C('olá'), { texto: 'olá', anexos: [] }, 'content string pura');
+  assert.deepEqual(C(['a', 'b']), { texto: 'a\nb', anexos: [] }, 'array de strings junta-se com quebra de linha');
+  assert.deepEqual(C([{ type: 'text', text: 'um' }, { type: 'text', text: 'dois' }]), { texto: 'um\ndois', anexos: [] },
+    'regressão: os blocos {type:"text", text} continuam exatamente como eram');
+  assert.deepEqual(C([{ type: 'image', attachment: { name: 'ecra.png' } }, 'nota', { type: 'desconhecido', text: 'x' }]),
+    { texto: 'nota', anexos: [{ tipo: 'imagem', nome: 'ecra.png' }] },
+    'lista mista: strings contam como texto e blocos de outros tipos ignoram-se');
+  assert.deepEqual(C(null), { texto: '', anexos: [] }, 'sem payload continua vazio');
+  // fim ao fim: o nó 'user' com content string deixa de ser descartado em silêncio
+  const chat = chatDe([no('user', 'u1', { kind: 'user', seq: 40, time: T0, content: 'em string', source: { kind: 'user' } })]);
+  const itens = B.__itensDoChat(chat);
+  assert.equal(itens.length, 1, 'a mensagem não desaparece');
+  assert.equal(itens[0].texto, 'em string');
 });
 
 test('itensDoChat: em streaming relê nodes.get(key) — o `order` não muda, os nós sim', () => {
@@ -369,6 +394,81 @@ test('texto: células das tabelas — "|" em `código` e "\\|" não partem colun
   ], 'as colunas não desalinham: 3 células em cada linha');
   // Linha só com células vazias não deixa "— · —" solto.
   assert.deepEqual(B.__segmentosDeTexto('| a | b |\n|  |  |\n| c | d |'), [{ tipo: 'texto', texto: 'a · b\n\nc · d' }]);
+});
+
+test('texto: paridade com o chat do DSH — *itálico*, _itálico_, __negrito__, ~~riscado~~, "> citação" e listas "1."', () => {
+  const S = B.__segmentosDeTexto;
+  assert.deepEqual(S('*i*'), [{ tipo: 'italico', texto: 'i' }], '*i* → em');
+  assert.deepEqual(S('_i_'), [{ tipo: 'italico', texto: 'i' }], '_i_ → em');
+  assert.deepEqual(S('a _b_ c'), [
+    { tipo: 'texto', texto: 'a ' }, { tipo: 'italico', texto: 'b' }, { tipo: 'texto', texto: ' c' },
+  ]);
+  assert.deepEqual(S('__b__'), [{ tipo: 'negrito', texto: 'b' }], '__b__ → strong, como **b**');
+  assert.deepEqual(S('**b** __c__'), [
+    { tipo: 'negrito', texto: 'b' }, { tipo: 'texto', texto: ' ' }, { tipo: 'negrito', texto: 'c' },
+  ], 'os dois sabores de negrito dão o mesmo segmento');
+  assert.deepEqual(S('~~x~~'), [{ tipo: 'risca', texto: 'x' }], '~~x~~ → del');
+  assert.deepEqual(S('> citação'), [{ tipo: 'citacao', segmentos: [{ tipo: 'texto', texto: 'citação' }] }]);
+  assert.deepEqual(S('> a\n> b\ntexto'), [
+    { tipo: 'citacao', segmentos: [{ tipo: 'texto', texto: 'a\nb' }] },
+    { tipo: 'texto', texto: 'texto' },
+  ], 'linhas "> " seguidas são UM bloco; a conversa volta ao normal');
+  // Listas numeradas: o número fica — é assim que se lê uma lista numerada.
+  assert.deepEqual(S('1. primeiro\n2. segundo'), [{ tipo: 'texto', texto: '1. primeiro\n2. segundo' }]);
+  // Delimitadores "dentro de nome" não abrem nada.
+  assert.deepEqual(S('snake_case_names'), [{ tipo: 'texto', texto: 'snake_case_names' }]);
+  assert.deepEqual(S('2*3*4'), [{ tipo: 'texto', texto: '2*3*4' }]);
+  assert.deepEqual(S('FOO__BAR__BAZ'), [{ tipo: 'texto', texto: 'FOO__BAR__BAZ' }]);
+  // Sem par ficam LITERAIS (comportamento fixado, como as crases sem fecho).
+  assert.deepEqual(S('meio *itálico'), [{ tipo: 'texto', texto: 'meio *itálico' }]);
+  assert.deepEqual(S('meio ~~riscado'), [{ tipo: 'texto', texto: 'meio ~~riscado' }]);
+  // E dentro de `código` e de ```blocos``` nada se formata.
+  assert.deepEqual(S('`*a*`'), [{ tipo: 'codigo', texto: '*a*' }]);
+  assert.deepEqual(S('```\n~~x~~\n```'), [{ tipo: 'bloco', texto: '~~x~~' }]);
+  // Renderiza por conteudoDaBolha: em, del e a citação com os formatos dentro.
+  assert.deepEqual(B.__conteudoDaBolha(S('*i*')).map((n) => n.tipo), ['em']);
+  assert.deepEqual(B.__conteudoDaBolha(S('~~x~~')).map((n) => n.tipo), ['del']);
+  const citacao = B.__conteudoDaBolha(S('> **nota** e ~~feito~~'));
+  assert.equal(citacao.length, 1);
+  assert.equal(citacao[0].tipo, 'div');
+  assert.equal(citacao[0].props.className, 'wg-tel-citacao');
+  assert.deepEqual(citacao[0].filhos.map((n) => n.tipo), ['strong', 'span', 'del'],
+    'a citação guarda a formatação inline dentro do bloco');
+});
+
+test('texto: cortarSeguro corta sem partir a sintaxe — cercas, crases e ** sem par limpam-se; o "…" fica', () => {
+  const C = B.__cortarSeguro;
+  assert.equal(C('curto', 100), 'curto', 'sem corte não há "…"');
+  assert.equal(C('x'.repeat(10), 5), 'xxxxx…', 'corte a caráter, com "…" no fim');
+  // Corte DENTRO de um bloco ```: a pré-visualização mostra o texto ANTES do
+  // bloco — nunca um <pre> que engole a calda nem crases soltas.
+  const comCerca = `Resumo:\n\`\`\`js\n${'const a = 1;\n'.repeat(40)}`;
+  assert.equal(C(comCerca, 60), 'Resumo:…', 'a cerca aberta tira-se com tudo o que vem depois dela');
+  const segs = B.__segmentosDeTexto(C(comCerca, 60));
+  assert.ok(!segs.some((s) => s.tipo === 'bloco'), 'sem <pre> na pré-visualização');
+  assert.ok(!JSON.stringify(segs).includes('```'), 'sem marcador de cerca na pré-visualização');
+  // Sem texto antes da cerca: mostra-se o CONTEÚDO do bloco, sem o marcador.
+  const soCerca = `\`\`\`js\n${'const a = 1;\n'.repeat(30)}`;
+  const previa = C(soCerca, 40);
+  assert.ok(!previa.includes('```') && previa.includes('const a = 1;') && previa.endsWith('…'),
+    `conteúdo do bloco sem o marcador (${JSON.stringify(previa)})`);
+  // Corte dentro de `código`: a crase que abriu sem fecho sai — nada de "`" solto.
+  const semCrase = C('Veja o `nome_da_variavel_especial` aqui e mais texto para o corte', 22);
+  assert.ok(!semCrase.includes('`'), 'sem crase solta na fronteira');
+  assert.equal(semCrase, 'Veja o nome_da_variav…');
+  // Um par completo antes do corte continua a ser código.
+  assert.ok(C('usa `x` e `y` agora', 12).includes('`x`'), 'os pares fechados ficam');
+  // Corte dentro de **negrito**: o "**" que abriu sem fecho sai.
+  const semNegrito = C('isto é **muito importante** e continua com muito mais texto depois', 22);
+  assert.ok(!semNegrito.includes('**'), 'sem ** pendurado');
+  assert.ok(semNegrito.startsWith('isto é muito') && semNegrito.endsWith('…'));
+  // E o par completo, quando o corte o deixa inteiro, mantém-se.
+  assert.ok(C('isto é **muito importante** e continua com muito mais texto depois', 31)
+    .includes('**muito importante**'), '** completo preservado');
+  // E o corte seguro aplica-se nos DOIS renders (conversa e grupo) — nunca o slice cru.
+  assert.ok(!BUNDLE.includes('l.texto.slice(0, TEXTO_LONGO)'), 'o slice cru saiu dos dois renders');
+  const usos = BUNDLE.match(/segmentosEmCache\(curto \? cortarSeguro\(l\.texto, TEXTO_LONGO\) : l\.texto\)/g) || [];
+  assert.equal(usos.length, 2, 'usado na conversa individual E no feed do grupo');
 });
 
 test('histórico da conversa → Atividade: pedidos, ferramentas (✓/✕/a correr), respostas assentes e erros, com a hora', () => {
@@ -1071,10 +1171,327 @@ test('grupo: mensagens com a formatação COMPLETA da conversa — sem cortes a 
   assert.match(BUNDLE, /conteudoDaBolha\(segmentos\),\n\s+\.\.\.\(l\.anexos/, 'segmentos completos + anexos, como na conversa individual');
 });
 
+test('grupo: o feed RENDERIZA a formatação markdown (strong, code, pre) — o gap de cobertura fecha', () => {
+  const snap = conversa([msg('m1', 'ele', T0, 'Olá **todos**:\n```js\nconst a = 1;\n```\nusa `x`')]);
+  const grupo = {
+    id: 'ws1', nome: 'Equipa', subtitulo: '2 pessoas',
+    membros: [{ id: 'a', nome: 'Ana', avatarChave: null, conv: { getSnapshot: () => snap, subscribe: () => () => {} } }],
+  };
+  const arvore = B.__TelefoneGrupo({ grupo, abrirTelefone: () => {}, voltar: () => {} });
+  const fortes = nosDe(arvore, (n) => n.tipo === 'strong' && n.filhos.join('') === 'todos');
+  const codigos = nosDe(arvore, (n) => n.tipo === 'code' && n.filhos.join('') === 'x');
+  const blocos = nosDe(arvore, (n) => n.tipo === 'pre' && n.filhos.join('') === 'const a = 1;');
+  assert.ok(fortes.length >= 1 && codigos.length >= 1 && blocos.length >= 1,
+    `o feed do grupo mostra negrito, código inline e bloco (${fortes.length}/${codigos.length}/${blocos.length})`);
+  // o texto chega sempre como nós de texto do react falso (nunca HTML)
+  const bolhas = nosDe(arvore, (n) => String(n.props.className || '').includes('wg-tel-bolha'));
+  assert.ok(bolhas.length >= 1, 'a mensagem desenha-se na bolha');
+});
+
+test('pipeline: os segmentos das linhas (memoizados ou não) são sempre os de segmentosDeTexto', () => {
+  const longo = `${'texto comum '.repeat(150)}**negrito** e \`código\``; // acima de TEXTO_LONGO
+  const itens = [
+    msg('a', 'eu', T0, 'Olá **todos**:\n```js\nconst a = 1;\n```\nusa `x`'),
+    msg('b', 'ele', T0 + 1000, longo),
+    msg('c', 'ele', T0 + 2000, '> citação e ~~feito~~'),
+  ];
+  const { linhas } = B.__linhasDoTelefone(conversa(itens), { agora: T0 });
+  const doGrupo = B.__linhasDoGrupo([{ id: 'a', nome: 'Ana', linhas }], { agora: T0 });
+  const todas = [...linhas, ...doGrupo].filter((l) => l.tipo === 'msg');
+  assert.ok(todas.length >= 6, 'linhas da conversa e do grupo para comparar');
+  for (const l of todas) {
+    assert.deepEqual(l.segmentos ?? B.__segmentosEmCache(l.texto), B.__segmentosDeTexto(l.texto),
+      `segmentos de ${l.key} batem certo com o parser`);
+  }
+  // As longas não trazem segmentos memoizados: fazem-se no componente, já cortados.
+  assert.equal(linhas.find((l) => l.key === 'b').segmentos, null, 'acima de TEXTO_LONGO o memo fica para o componente');
+});
+
 test('grupo: ferramentas ficam na linha COMPACTA cinzenta (a da conversa) e clicáveis', () => {
   // o caso do GRUPO é o último (o da conversa individual vem antes)
   const bloco = BUNDLE.slice(BUNDLE.lastIndexOf("case 'ferramentas': {"), BUNDLE.lastIndexOf("case 'a-escrever':"));
   assert.ok(bloco.includes("h('button', {"), 'a ferramenta do grupo usa o botão compacto (não texto grande)');
   assert.ok(/className: 'wg-tel-clicavel'/.test(bloco), 'e é clicável — abre a conversa de quem a usou');
   assert.ok(/`\$\{l\.membro\.nome\} · \$\{resumo\}`/.test(bloco), 'com o nome de quem fala');
+});
+
+/* ---------- voz e transcrição (o microfone do celular) ---------- */
+
+// Backend de hooks COM ESTADO para os fluxos de voz: cada `render` volta ao
+// primeiro hook e os setters guardam mesmo — re-renderizar = chamar de novo.
+const usarHooksComEstado = () => {
+  const slots = [];
+  let i = 0;
+  hooksBackend = {
+    useState: (v) => {
+      const k = i; i += 1;
+      if (!(k in slots)) slots[k] = { valor: typeof v === 'function' ? v() : v };
+      return [slots[k].valor, (novo) => { slots[k].valor = typeof novo === 'function' ? novo(slots[k].valor) : novo; }];
+    },
+    useRef: (v) => {
+      const k = i; i += 1;
+      if (!(k in slots)) slots[k] = { valor: { current: v } };
+      return slots[k].valor;
+    },
+  };
+  return {
+    render: (componente, props) => { i = 0; return componente(props); },
+    restaurar: () => { hooksBackend = hooksSemEstado; },
+  };
+};
+
+// Os fluxos de voz usam o `esperar` já definido lá em cima (uma volta de
+// event loop: os awaits resolvidos esgotam-se todos em microtarefas).
+
+const snapConversa = () => ({
+  sessionId: 's1', fase: 'aberta', erro: null, itens: [], ecos: [],
+  fila: [], falhados: [], aCorrer: false, aguardaPrimeiroTurno: false, temMais: false,
+  aCarregarAntigas: false, removida: false, subagente: false, erroEnvio: null,
+  erroAgente: null, erroFila: null, fonte: 'chat', inerte: false,
+});
+const conversaFalsa = (snap) => ({
+  getSnapshot: () => snap, subscribe: () => () => {},
+  enviar: () => {}, reenviar: () => {}, maisAntigas: () => {},
+  enviarAgora: () => {}, descartar: () => {},
+});
+// Gravador falso: regista a assinatura do nível e resolve com um blob.
+const gravadorFalso = () => {
+  const g = {
+    assinado: null, parado: false, cancelado: false,
+    assinarNivel(fn) { g.assinado = fn; return () => { g.assinado = null; }; },
+    async parar() { g.parado = true; return new Blob(['abc'], { type: 'audio/webm' }); },
+    cancelar() { g.cancelado = true; },
+    duracaoMs() { return 1234; },
+  };
+  return g;
+};
+const comStorage = (dados = new Map()) => {
+  globalThis.window.localStorage = {
+    getItem: (k) => (dados.has(k) ? dados.get(k) : null),
+    setItem: (k, v) => dados.set(k, String(v)),
+    removeItem: (k) => dados.delete(k),
+  };
+  return dados;
+};
+
+test('voz: sem chave da API, o microfone fica ATIVO e abre as Definições (título honesto)', () => {
+  const antes = globalThis.window.localStorage;
+  try {
+    comStorage();
+    const chamados = [];
+    const arvore = B.__TelefoneConversa({
+      conversa: conversaFalsa(snapConversa()), sessionId: 's1', nome: 'Rui', estadoRotulo: '',
+      fechar: () => {}, abrirConfig: () => chamados.push('config'),
+    });
+    const [mic] = nosDe(arvore, (n) => n.props.className === 'wg-tel-voz');
+    assert.ok(mic, 'o botão de microfone desenha-se');
+    assert.ok(!mic.props.disabled, 'está ATIVO (já não é decorativo)');
+    assert.equal(mic.props.title, 'Mensagem de voz: use o DSH', 'título honesto, com a literal pregada pelos testes');
+    assert.equal(mic.props['aria-label'], 'Mensagem de voz (use o DSH)');
+    assert.equal(mic.props['aria-pressed'], undefined, 'sem chave não é um interruptor');
+    assert.equal(nosDe(arvore, (n) => String(n.props.className || '').includes('wg-tel-voz-estado')).length, 0,
+      'parado: sem faixa de estado');
+    mic.props.onClick();
+    assert.deepEqual(chamados, ['config'], 'o toque abre a tela de Configurações (onde se guarda a chave)');
+  } finally {
+    globalThis.window.localStorage = antes;
+  }
+});
+
+test('voz: com chave, o microfone grava — faixa com 28 barras, cronómetro e "Toque para parar"', async () => {
+  const antes = globalThis.window.localStorage;
+  const hooks = usarHooksComEstado();
+  try {
+    comStorage(new Map([['dsh-work-game:config', JSON.stringify({ chaveOpenAI: 'sk-teste-9999', idioma: 'auto' })]]));
+    const g = gravadorFalso();
+    const props = {
+      conversa: conversaFalsa(snapConversa()), sessionId: 's1', nome: 'Rui', estadoRotulo: '',
+      fechar: () => {}, abrirConfig: () => {}, criarGravador: async () => g,
+      transcreverVoz: async () => ({ text: 'Olá mundo', modeloUsado: 'gpt-transcribe', usage: null }),
+    };
+    const desenhar = () => hooks.render(B.__TelefoneConversa, props);
+    const [mic] = nosDe(desenhar(), (n) => n.props.className === 'wg-tel-voz');
+    assert.equal(mic.props.title, 'Gravar mensagem de voz', 'com chave: o botão GRÁVA');
+    assert.equal(mic.props['aria-pressed'], 'false');
+    mic.props.onClick();
+    await esperar();
+    assert.ok(g.assinado, 'o nível da voz assina-se (para as barras)');
+    const arvore = desenhar();
+    const [faixa] = nosDe(arvore, (n) => n.props.className === 'wg-tel-voz-estado');
+    assert.ok(faixa, 'a faixa de gravação aparece');
+    assert.equal(faixa.props['data-fase'], 'a-gravar');
+    assert.equal(faixa.props.role, 'status');
+    const [barras] = nosDe(faixa, (n) => n.props.className === 'wg-tel-voz-barras');
+    assert.equal(barras.props['aria-hidden'], 'true', 'as barras são decorativas');
+    assert.equal(barras.filhos.length, 28, '28 barras, como as ondas do iMessage');
+    assert.ok(nosDe(faixa, (n) => n.props.className === 'wg-tel-voz-estatico').length === 1,
+      'e o indicador estático do prefers-reduced-motion');
+    assert.equal(nosDe(faixa, (n) => n.props.className === 'wg-tel-voz-tempo')[0].filhos.join(''), '00:00', 'cronómetro mm:ss');
+    assert.equal(nosDe(faixa, (n) => n.props.className === 'wg-tel-voz-dica')[0].filhos.join(''), 'Toque para parar');
+    const [mic2] = nosDe(arvore, (n) => n.props.className === 'wg-tel-voz');
+    assert.equal(mic2.props['aria-pressed'], 'true', 'aria-pressed enquanto grava');
+    assert.equal(mic2.props['aria-label'], 'Parar gravação');
+    assert.equal(mic2.props.title, 'Parar gravação');
+    // O nível chega pelas barras: o loop rAF escreve transform:scaleY (nada de
+    // CSS animado — ver lei-animacao) e a submissão NUNCA é automática.
+    assert.ok(g.assinado instanceof Function);
+  } finally {
+    hooks.restaurar();
+    globalThis.window.localStorage = antes;
+  }
+});
+
+test('voz: parar transcreve para a caixa (para REVER e enviar) e limpa o estado', async () => {
+  const antes = globalThis.window.localStorage;
+  const hooks = usarHooksComEstado();
+  try {
+    comStorage(new Map([['dsh-work-game:config', JSON.stringify({ chaveOpenAI: 'sk-teste-9999', idioma: 'pt' })]]));
+    const g = gravadorFalso();
+    const transcricoes = [];
+    let resolver = null;
+    let pendurada = true;
+    const props = {
+      conversa: conversaFalsa(snapConversa()), sessionId: 's1', nome: 'Rui', estadoRotulo: '',
+      fechar: () => {}, criarGravador: async () => g,
+      transcreverVoz: async (blob, cfg) => {
+        transcricoes.push({ blob, cfg });
+        if (pendurada) return new Promise((res) => { resolver = res; });
+        return { text: 'Olá mundo', modeloUsado: 'gpt-transcribe', usage: null };
+      },
+    };
+    const desenhar = () => hooks.render(B.__TelefoneConversa, props);
+    nosDe(desenhar(), (n) => n.props.className === 'wg-tel-voz')[0].props.onClick();
+    await esperar();
+    nosDe(desenhar(), (n) => n.props.className === 'wg-tel-voz')[0].props.onClick(); // parar
+    await esperar();
+    let arvore = desenhar();
+    const [faixa] = nosDe(arvore, (n) => n.props.className === 'wg-tel-voz-estado');
+    assert.equal(faixa.props['data-fase'], 'a-transcrever', 'segundo estado: a transcrever');
+    assert.equal(nosDe(faixa, (n) => n.props.className === 'wg-tel-voz-dica')[0].filhos.join(''), 'A transcrever…');
+    const [mic] = nosDe(arvore, (n) => n.props.className === 'wg-tel-voz');
+    assert.ok(mic.props.disabled, 'nada de parar outra vez a meio da transcrição');
+    assert.equal(transcricoes.length, 1);
+    assert.ok(transcricoes[0].blob instanceof Blob, 'o blob gravado vai para a API');
+    assert.deepEqual(transcricoes[0].cfg, { chaveOpenAI: 'sk-teste-9999', idioma: 'pt' }, 'com a configuração guardada');
+    // A transcrição resolve: o texto entra na caixa e o estado limpa-se.
+    pendurada = false;
+    resolver({ text: 'Olá mundo', modeloUsado: 'gpt-transcribe', usage: null });
+    await esperar();
+    arvore = desenhar();
+    assert.equal(nosDe(arvore, (n) => n.tipo === 'textarea')[0].props.value, 'Olá mundo', 'na caixa, para rever e enviar');
+    assert.equal(nosDe(arvore, (n) => String(n.props.className || '').includes('wg-tel-voz-estado')).length, 0, 'estado limpo');
+    assert.equal(g.parado, true, 'o gravador parou');
+  } finally {
+    hooks.restaurar();
+    globalThis.window.localStorage = antes;
+  }
+});
+
+test('voz: erro mostra a mensagem MAPEADA e "Tentar de novo" retranscreve o mesmo áudio', async () => {
+  const antes = globalThis.window.localStorage;
+  const hooks = usarHooksComEstado();
+  try {
+    comStorage(new Map([['dsh-work-game:config', JSON.stringify({ chaveOpenAI: 'sk-errada', idioma: 'auto' })]]));
+    const g = gravadorFalso();
+    const blobs = [];
+    let falhar = true;
+    const props = {
+      conversa: conversaFalsa(snapConversa()), sessionId: 's1', nome: 'Rui', estadoRotulo: '',
+      fechar: () => {}, criarGravador: async () => g,
+      transcreverVoz: async (blob) => {
+        blobs.push(blob);
+        if (falhar) throw { codigo: 'chave-invalida', mensagem: 'Incorrect API key provided: sk-****.' };
+        return { text: 'segunda tentativa', modeloUsado: 'whisper-1', usage: null };
+      },
+    };
+    const desenhar = () => hooks.render(B.__TelefoneConversa, props);
+    nosDe(desenhar(), (n) => n.props.className === 'wg-tel-voz')[0].props.onClick();
+    await esperar();
+    nosDe(desenhar(), (n) => n.props.className === 'wg-tel-voz')[0].props.onClick();
+    await esperar();
+    let arvore = desenhar();
+    const [faixa] = nosDe(arvore, (n) => String(n.props.className || '').includes('wg-tel-voz-estado'));
+    assert.equal(faixa.props['data-fase'], 'erro');
+    assert.ok(String(faixa.props.className).includes('wg-tel-voz-erro'));
+    assert.equal(nosDe(faixa, (n) => n.props.className === 'wg-tel-voz-dica')[0].filhos.join(''),
+      'Chave da API inválida — verifique as Definições.', 'a mensagem mapeada (a da API nunca aparece crua)');
+    const [repetir] = nosDe(faixa, (n) => n.props.className === 'wg-tel-voz-repetir');
+    assert.equal(repetir.filhos.join(''), 'Tentar de novo');
+    falhar = false;
+    repetir.props.onClick();
+    await esperar();
+    arvore = desenhar();
+    assert.equal(blobs.length, 2, 'retranscreve');
+    assert.equal(blobs[0], blobs[1], 'o MESMO áudio gravado (sem gravar de novo)');
+    assert.equal(nosDe(arvore, (n) => n.tipo === 'textarea')[0].props.value, 'segunda tentativa');
+    assert.equal(nosDe(arvore, (n) => String(n.props.className || '').includes('wg-tel-voz-estado')).length, 0);
+  } finally {
+    hooks.restaurar();
+    globalThis.window.localStorage = antes;
+  }
+});
+
+test('config: a tela tem a chave (password, mascarada), o idioma, Guardar/Limpar e o aviso de confiança', () => {
+  const antes = globalThis.window.localStorage;
+  try {
+    comStorage(new Map([['dsh-work-game:config', JSON.stringify({ chaveOpenAI: 'sk-proj-1234abcd', idioma: 'pt' })]]));
+    const arvore = B.__TelefoneConfig({ voltar: () => {} });
+    assert.equal(arvore.props['data-vista'], 'config', 'a vista "config" da pilha do celular');
+    assert.equal(arvore.props['aria-label'], 'Definições');
+    const [campo] = nosDe(arvore, (n) => n.props.className === 'wg-tel-config-chave');
+    assert.equal(campo.props.type, 'password', 'a chave nunca se mostra em claro');
+    assert.equal(campo.props['aria-label'], 'Chave da API OpenAI');
+    assert.equal(nosDe(arvore, (n) => n.props.className === 'wg-tel-config-guardada')[0].filhos.join(''),
+      'Guardada: sk-…abcd', 'a chave guardada só aparece mascarada');
+    const [idioma] = nosDe(arvore, (n) => n.props.className === 'wg-tel-config-idioma');
+    assert.equal(idioma.props.value, 'pt');
+    assert.deepEqual(idioma.filhos.map((o) => [o.props.value, o.filhos.join('')]),
+      [['auto', 'Automático (detetar)'], ['pt', 'Português'], ['en', 'Inglês']], 'auto|pt|en');
+    assert.equal(nosDe(arvore, (n) => n.props.className === 'wg-tel-config-guardar')[0].filhos.join(''), 'Guardar');
+    assert.equal(nosDe(arvore, (n) => n.props.className === 'wg-tel-config-limpar')[0].filhos.join(''), 'Limpar chave');
+    assert.equal(nosDe(arvore, (n) => n.props.className === 'wg-tel-config-aviso')[0].filhos.join(''),
+      'A chave fica neste navegador (localStorage). Usa uma chave dedicada com limite de gasto; revoga-a em platform.openai.com se a perderes.',
+      'o aviso de confiança, em português');
+    assert.ok(BUNDLE.includes("engrenagem: () => svgTel("), 'o ícone da engrenagem é SVG inline (sem innerHTML)');
+    assert.ok(BUNDLE.includes('Abrir as Configurações'), 'a entrada é a linha da engrenagem nos Grupos');
+  } finally {
+    globalThis.window.localStorage = antes;
+  }
+});
+
+test('config: Guardar escreve no localStorage e "Limpar chave" apaga-o (com estado real dos hooks)', async () => {
+  const antes = globalThis.window.localStorage;
+  const hooks = usarHooksComEstado();
+  try {
+    const dados = comStorage();
+    const desenhar = () => hooks.render(B.__TelefoneConfig, { voltar: () => {} });
+    const arvore = desenhar();
+    assert.equal(nosDe(arvore, (n) => n.props.className === 'wg-tel-config-guardada')[0].filhos.join(''),
+      'Sem chave guardada.');
+    nosDe(arvore, (n) => n.props.className === 'wg-tel-config-chave')[0]
+      .props.onChange({ target: { value: '  sk-nova-1234  ' } });
+    nosDe(arvore, (n) => n.props.className === 'wg-tel-config-idioma')[0]
+      .props.onChange({ target: { value: 'pt' } });
+    // Re-render (como o React faria): os handlers passam a ver o estado novo.
+    nosDe(desenhar(), (n) => n.props.className === 'wg-tel-config-guardar')[0].props.onClick();
+    assert.deepEqual(JSON.parse(dados.get('dsh-work-game:config')),
+      { chaveOpenAI: 'sk-nova-1234', idioma: 'pt' }, 'guardado (sem espaços) na chave certa');
+    let arvore2 = desenhar();
+    assert.equal(nosDe(arvore2, (n) => n.props.className === 'wg-tel-config-guardada')[0].filhos.join(''),
+      'Guardada: sk-…1234', 'depois de guardar: só a máscara no ecrã');
+    assert.equal(nosDe(arvore2, (n) => n.props.className === 'wg-tel-config-chave')[0].props.value, '',
+      'o campo limpa-se depois de guardar');
+    assert.equal(nosDe(arvore2, (n) => n.props.className === 'wg-tel-config-nota')[0].filhos.join(''),
+      'Guardado neste navegador.');
+    nosDe(arvore2, (n) => n.props.className === 'wg-tel-config-limpar')[0].props.onClick();
+    assert.equal(dados.has('dsh-work-game:config'), false, 'a chave sai do navegador');
+    arvore2 = desenhar();
+    assert.equal(nosDe(arvore2, (n) => n.props.className === 'wg-tel-config-guardada')[0].filhos.join(''),
+      'Sem chave guardada.');
+    assert.equal(nosDe(arvore2, (n) => n.props.className === 'wg-tel-config-nota')[0].filhos.join(''),
+      'Chave removida.');
+  } finally {
+    hooks.restaurar();
+    globalThis.window.localStorage = antes;
+  }
 });

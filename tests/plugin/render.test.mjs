@@ -1719,3 +1719,57 @@ test('vigia de mensagens: conta user/assistant message das conversas a correr e 
   nula.parar();
   vigia.parar();
 });
+
+/* ---------- celular: a pilha de telas com as Definições (voz) ---------- */
+
+test('núcleo: as Definições abrem-se dos Grupos e o "‹" volta aos grupos (nunca fecha)', () => {
+  const n = B.__criarNucleo();
+  n.abrirGrupos();
+  n.abrirConfig();
+  assert.deepEqual(n.getTelefone(), { aberto: true, sessionId: null, vista: 'config', grupoId: null, origem: 'cena' },
+    'a vista "config" entra na MESMA forma de getTelefone() (sem campos novos)');
+  n.voltarTelefone();
+  assert.equal(n.getTelefone().vista, 'grupos', 'config → grupos');
+  assert.equal(n.getTelefone().aberto, true, 'o "‹" das Definições nunca fecha o celular');
+  // De qualquer tela a config abre e volta sempre aos grupos.
+  n.abrirGrupo('ws:w1', ['a']);
+  assert.equal(n.getTelefone().vista, 'grupo');
+  n.abrirConfig();
+  assert.equal(n.getTelefone().vista, 'config', 'abre-se também por cima do grupo');
+  assert.equal(n.getGrupo().membros.length, 0, 'as conversas do grupo libertam-se ao abrir as Definições');
+  n.voltarTelefone();
+  assert.equal(n.getTelefone().vista, 'grupos');
+  n.abrirConfig();
+  n.voltarTelefone();
+  n.voltarTelefone();
+  assert.equal(n.getTelefone().aberto, false, 'na raiz dos grupos fecha (desktop)');
+  n.dispose();
+});
+
+test('config: a chave da API OpenAI faz round-trip no localStorage (dsh-work-game:config) e mascara-se', () => {
+  assert.equal(typeof B.__voz.transcreverAudio, 'function', 'a superfície de voz.js exposta para testes');
+  assert.equal(typeof B.__voz.criarGravadorVoz, 'function');
+  assert.equal(typeof B.__TelefoneConfig, 'function', 'e o componente das Definições');
+  const antes = globalThis.window.localStorage;
+  try {
+    const guardado = new Map();
+    globalThis.window.localStorage = {
+      getItem: (k) => (guardado.has(k) ? guardado.get(k) : null),
+      setItem: (k, v) => guardado.set(k, String(v)),
+      removeItem: (k) => guardado.delete(k),
+    };
+    assert.deepEqual(B.__voz.lerConfig(globalThis.window.localStorage), { chaveOpenAI: '', idioma: 'auto' },
+      'sem chave guardada: sem transcrição (a voz pede as Definições)');
+    assert.equal(B.__voz.guardarConfig(globalThis.window.localStorage, { chaveOpenAI: 'sk-proj-1234abcd', idioma: 'pt' }), true);
+    assert.equal(guardado.get('dsh-work-game:config'), JSON.stringify({ chaveOpenAI: 'sk-proj-1234abcd', idioma: 'pt' }),
+      'na chave dsh-work-game:config (como os filtros)');
+    assert.deepEqual(B.__voz.lerConfig(globalThis.window.localStorage), { chaveOpenAI: 'sk-proj-1234abcd', idioma: 'pt' },
+      'round-trip: volta igual');
+    assert.equal(B.__voz.mascararChave('sk-proj-1234abcd'), 'sk-…abcd', 'para o ecrã, só a máscara');
+    B.__voz.limparConfig(globalThis.window.localStorage);
+    assert.deepEqual(B.__voz.lerConfig(globalThis.window.localStorage), { chaveOpenAI: '', idioma: 'auto' },
+      'limpar apaga a chave do navegador');
+  } finally {
+    globalThis.window.localStorage = antes;
+  }
+});

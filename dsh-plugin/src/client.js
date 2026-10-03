@@ -1494,6 +1494,576 @@ function criarMotorExpressoes(opts) {
   /* === FIM expressoes.js embutido === */
 
     /* ================================================================
+     * 1-ter. VOZ E TRANSCRIÇÃO — cópia embutida de dsh-plugin/src/voz.js
+     *        (fonte única; `export` removido). O botão de microfone do
+     *        celular grava, mostra o nível da voz e transcreve para a caixa
+     *        de mensagem (OpenAI speech-to-text) — ver §10 do contrato.
+     *        Regenerar: python3 scripts/embutir-voz.py --embutir
+     * ================================================================ */
+    /* === INÍCIO voz.js embutido === */
+/*
+ * dsh-plugin/src/voz.js — VOZ E TRANSCRIÇÃO (FONTE).
+ *
+ * O botão de microfone do celular grava a mensagem de voz, mostra o nível
+ * enquanto se fala e transcreve-a (OpenAI speech-to-text) para a caixa de
+ * mensagem — para REVER e enviar. A chave da API vive nas Definições do
+ * telemóvel (localStorage), nunca no código nem nos registos.
+ *
+ * Este módulo é PURO onde a matemática o permite e INJETÁVEL onde o mundo
+ * entra: sem relógio próprio (`agora` entra por injeção — nada de Date.now
+ * nem de Math.random aqui), sem `fetch`/`FormData`/`Blob`/`navigator`
+ * embutidos nas assinaturas — tudo o que é plataforma entra por opções e cai
+ * nos globais do browser quando não há injeção (os testes injetam sempre).
+ *
+ * DUAS CAMADAS:
+ *   (a) MATEMÁTICA do nível (rmsParaDb/suavizarDb/dbParaAltura) — dBFS puro,
+ *       envelope de ataque/queda e gama de desenho das barras;
+ *   (b) PLATAFORMA (criarGravadorVoz/transcreverAudio/config) — getUserMedia
+ *       + MediaRecorder + AnalyserNode, POST multipart a
+ *       https://api.openai.com/v1/audio/transcriptions com a cadeia de
+ *       modelos gpt-transcribe → gpt-4o-transcribe → gpt-4o-mini-transcribe
+ *       → whisper-1 (retentativa SÓ quando a API diz que o modelo não
+ *       existe) e erros TIPADOS {codigo, mensagem}.
+ *
+ * API verificada AO VIVO (2026-10-03, docs/VOZ-TRANSCRICAO.md): o modelo
+ * `gpt-transcribe` em POST multipart (file + model [+ language]) responde
+ * {text, usage, languages?}; o CORS do browser funciona (preflight permite
+ * authorization; nunca se define Content-Type à mão — o boundary do
+ * multipart é do browser); 401 devolve {"error":{"message":"Incorrect API
+ * key provided…"}} e um modelo desconhecido devolve erro 4xx com "The model `x`
+ * does not exist" / error.code 'model_not_found' (404 visto ao vivo; é o único
+ * caso que desencadeia a cadeia de fallback).
+ *
+ * CÓPIA EMBUTIDA (paridade por teste — regenerar quando este ficheiro mudar;
+ * o texto embutido é este ficheiro tal-e-qual com os `export` removidos):
+ *   dsh-plugin/src/client.js  — bundle do browser (não importa irmãos)
+ * Regenerar: python3 scripts/embutir-voz.py --embutir --alvo client.
+ *
+ * NOTA de autocontenção: o bloco embutido tem de ser executável sozinho —
+ * por isso os nomes internos levam prefixo `voz` e nada se importa de fora.
+ */
+
+/* ------------------------------------------------------------------ */
+/* Constantes                                                           */
+/* ------------------------------------------------------------------ */
+
+/* Cadeia de modelos de transcrição, por ordem de preferência. A retentativa
+ * automática só anda para o seguinte quando a API responde "o modelo não
+ * existe" (chaves diferentes têm acesso a modelos diferentes). */
+const VOZ_MODELOS = ['gpt-transcribe', 'gpt-4o-transcribe', 'gpt-4o-mini-transcribe', 'whisper-1'];
+
+/* Limite do endpoint de transcrição: 25 MB por ficheiro de áudio. */
+const VOZ_LIMITE_BYTES = 25 * 1024 * 1024;
+
+/* Duas minutos e PARA: a mensagem de voz é curta (iMessage) e o modelo não
+ * precisa de mais; a gravação para sozinha e transcreve o que há. */
+const VOZ_DURACAO_MAX_MS = 2 * 60 * 1000;
+
+/* Onde vive a configuração do utilizador (chave OpenAI + idioma). */
+const CHAVE_CONFIG = 'dsh-work-game:config';
+
+/* POST multipart da transcrição (a resposta é JSON por omissão). */
+const VOZ_URL_TRANSCRICAO = 'https://api.openai.com/v1/audio/transcriptions';
+
+/* Amostragem do analisador: ~10 níveis/s (as barras interpolam no rAF). */
+const VOZ_AMOSTRAGEM_MS = 100;
+
+/* Silêncio digital: por baixo disto já não há sinal útil (dBFS). */
+const VOZ_PISO_DB = -100;
+
+/* ------------------------------------------------------------------ */
+/* Erros tipados                                                        */
+/* ------------------------------------------------------------------ */
+
+/*
+ * Todo o erro que sai deste módulo é {codigo, mensagem}:
+ *   sem-chave      falta a chave da API (não há nada que tentar);
+ *   chave-invalida a API rejeitou a chave (401);
+ *   limite         quota/crédito esgotado (402/429);
+ *   audio-grande   áudio acima do limite do endpoint (413 ou > 25 MB);
+ *   rede           sem ligação / fetch rebentou;
+ *   microfone      getUserMedia/MediaRecorder indisponível ou negado;
+ *   api            qualquer outra resposta da API (a mensagem vem da API).
+ */
+function vozErro(codigo, mensagem) {
+  return { codigo, mensagem: String(mensagem || codigo) };
+}
+
+function vozMensagemDe(e) {
+  if (!e) return 'erro desconhecido';
+  if (typeof e === 'string') return e;
+  const m = e.mensagem ?? e.message ?? (e.error && e.error.message) ?? e.code;
+  return typeof m === 'string' && m ? m : String(e);
+}
+
+/* O corpo de erro da API OpenAI: {"error":{"message":"…"}}. */
+async function vozCorpoDeErro(resposta) {
+  if (!resposta) return null;
+  try {
+    if (typeof resposta.json === 'function') return await resposta.json();
+  } catch { /* não é JSON: tenta texto */ }
+  try {
+    if (typeof resposta.text === 'function') {
+      const texto = await resposta.text();
+      return texto ? { error: { message: String(texto).slice(0, 400) } } : null;
+    }
+  } catch { /* corpo ilegível */ }
+  return null;
+}
+
+/* "O modelo não existe" é o ÚNICO caso que anda na cadeia de fallback. A API
+ * nem sequer responde sempre 400: verificado AO VIVO (2026-10-03), um modelo
+ * inexistente devolve 404 com error.code 'model_not_found' — por isso aceitam-se
+ * os dois (e a mensagem em inglês ou português). */
+function vozErroDeModelo(mensagem, codigo) {
+  const m = String(mensagem || '');
+  return /does not exist/i.test(m) || /não existe/i.test(m) || /invalid model/i.test(m)
+    || String(codigo || '') === 'model_not_found';
+}
+
+/* 401/402/429/413/outro → código tipado (a mensagem vem da API quando há). */
+function vozMapearStatus(status, mensagem) {
+  if (status === 401) return vozErro('chave-invalida', mensagem || 'Chave da API OpenAI inválida.');
+  if (status === 402 || status === 429) return vozErro('limite', mensagem || 'Limite da API OpenAI atingido.');
+  if (status === 413) return vozErro('audio-grande', mensagem || 'Áudio demasiado grande para a API.');
+  return vozErro('api', mensagem || `API OpenAI respondeu ${status}.`);
+}
+
+/* ------------------------------------------------------------------ */
+/* Matemática do nível (pura — testada em tests/plugin/voz.test.mjs)    */
+/* ------------------------------------------------------------------ */
+
+/*
+ * RMS (0..1) → dBFS = 20·log10(rms), com piso: o silêncio digital não é
+ * -∞ (log de 0) nem uma varanda sem fundo — corta-se a -100 dB.
+ */
+function rmsParaDb(rms) {
+  const r = Number.isFinite(rms) ? Math.max(0, rms) : 0;
+  return Math.max(VOZ_PISO_DB, 20 * Math.log10(Math.max(r, 1e-7)));
+}
+
+/*
+ * Envelope de um medidor de nível (VU digital): sobe depressa (ataque 20 ms
+ * — a consoante está lá logo) e desce devagar (queda 250 ms — a vogal
+ * "segura"). Fator 1-exp(-dt/tau): independente do intervalo de amostragem.
+ * Sem tempo (dt não positivo — sem relógio injetado) aceita-se a amostra.
+ */
+function suavizarDb(atual, novo, dtMs, opcoes = {}) {
+  const { ataqueMs = 20, quedaMs = 250 } = opcoes || {};
+  const a = Number.isFinite(atual) ? atual : VOZ_PISO_DB;
+  const n = Number.isFinite(novo) ? novo : a;
+  const dt = Number.isFinite(dtMs) && dtMs > 0 ? dtMs : 0;
+  if (dt === 0) return n;
+  const tau = n > a
+    ? (Number.isFinite(ataqueMs) && ataqueMs > 0 ? ataqueMs : 20)
+    : (Number.isFinite(quedaMs) && quedaMs > 0 ? quedaMs : 250);
+  return a + (n - a) * (1 - Math.exp(-dt / tau));
+}
+
+/*
+ * dB → altura das barras (0..1): janela útil [minDb, maxDb] normalizada e
+ * gama < 1 para o grave do silêncio não esconder a fala (padrão 0.6).
+ */
+function dbParaAltura(db, opcoes = {}) {
+  const { minDb = -60, maxDb = 0, gama = 0.6 } = opcoes || {};
+  const d = Number.isFinite(db) ? db : minDb;
+  const span = maxDb - minDb;
+  const t = span > 0 ? Math.min(1, Math.max(0, (d - minDb) / span)) : 0;
+  const g = Number.isFinite(gama) && gama > 0 ? gama : 1;
+  return Math.min(1, Math.max(0, Math.pow(t, g)));
+}
+
+/* ------------------------------------------------------------------ */
+/* Gravador (getUserMedia + MediaRecorder + AnalyserNode)               */
+/* ------------------------------------------------------------------ */
+
+/*
+ * Tipo do ficheiro gravado. iOS pode MENTIR em isTypeSupported (diz que
+ * suporta o que depois não grava) e até atirar: por isso cada candidato vai
+ * em try/catch e, no fim, deixa-se o browser escolher (''). Ordem: o opus em
+ * webm é o que a API prefere; webm liso; mp4 é o do Safari/iOS; '' = default.
+ */
+function escolherMimeType(isTypeSupported) {
+  const candidatos = ['audio/webm;codecs=opus', 'audio/webm', 'audio/mp4', ''];
+  const suporta = typeof isTypeSupported === 'function' ? isTypeSupported : () => false;
+  for (const tipo of candidatos) {
+    if (tipo === '') return ''; // último recurso: o browser escolhe sozinho
+    try {
+      if (suporta(tipo)) return tipo;
+    } catch { /* iOS: isTypeSupported pode atirar — segue para o seguinte */ }
+  }
+  return '';
+}
+
+/*
+ * Fábrica assíncrona do gravador. Dependências da plataforma ENTREM POR
+ * INJEÇÃO (os testes passam fakes; o client.js passa os do browser):
+ *   getUserMedia({audio:true}) -> Promise<MediaStream>
+ *   MediaRecorder              construtor (+ .isTypeSupported estático)
+ *   AudioContext               construtor (createMediaStreamSource/Analyser)
+ *   agora()                    relógio em ms (sem relógio: dt = 0 e o
+ *                              auto-stop temporal cai só no setTimeout)
+ * Devolve { parar() -> Promise<Blob>, cancelar(), assinarNivel(fn),
+ * duracaoMs() }:
+ *   - parar() resolve com UM Blob (type = recorder.mimeType) e PÁRA SEMPRE
+ *     todos os tracks do stream + fecha o AudioContext;
+ *   - cancelar() faz o mesmo mas descarta o áudio (blob vazio);
+ *   - assinarNivel(fn) chama fn(nivel0..1, {db, duracaoMs}) ~10×/s e devolve
+ *     a função de desinscrição;
+ *   - passados VOZ_DURACAO_MAX_MS a gravação PARA sozinha (parar() devolve o
+ *     mesmo blob).
+ */
+async function criarGravadorVoz(opcoes = {}) {
+  const { getUserMedia, MediaRecorder, AudioContext, agora, Blob: BlobImpl } = opcoes || {};
+  const relogio = typeof agora === 'function' ? agora : () => 0;
+  const FazBlob = typeof BlobImpl === 'function'
+    ? BlobImpl
+    : (typeof Blob === 'function' ? Blob : null);
+  if (typeof getUserMedia !== 'function') {
+    throw vozErro('microfone', 'Sem getUserMedia: este browser não dá acesso ao microfone.');
+  }
+  if (typeof MediaRecorder !== 'function') {
+    throw vozErro('microfone', 'Sem MediaRecorder: este browser não grava áudio.');
+  }
+
+  let stream;
+  try {
+    stream = await getUserMedia({ audio: true });
+  } catch (e) {
+    throw vozErro('microfone', `Sem microfone: ${vozMensagemDe(e)}`);
+  }
+
+  // Tipo gravado: candidatos em try/catch e, se o construtor rejeitar o tipo,
+  // fica o default do browser (nunca se define Content-Type à mão aqui).
+  let tipoPedido = '';
+  try {
+    tipoPedido = escolherMimeType((t) => MediaRecorder.isTypeSupported(t));
+  } catch { /* sem isTypeSupported: default do browser */ }
+  let rec;
+  try {
+    rec = tipoPedido ? new MediaRecorder(stream, { mimeType: tipoPedido }) : new MediaRecorder(stream);
+  } catch {
+    try {
+      rec = new MediaRecorder(stream);
+    } catch (e) {
+      pararStream();
+      throw vozErro('microfone', `MediaRecorder recusou o áudio: ${vozMensagemDe(e)}`);
+    }
+  }
+
+  // O analisador sai do MESMO stream que grava (uma só permissão, um só
+  // microfone): fftSize 2048 → RMS da onda → dBFS suavizado.
+  let ctxAudio = null;
+  let analisador = null;
+  try {
+    if (typeof AudioContext === 'function') {
+      ctxAudio = new AudioContext();
+      const fonte = ctxAudio.createMediaStreamSource(stream);
+      analisador = ctxAudio.createAnalyser();
+      analisador.fftSize = 2048;
+      if (typeof fonte.connect === 'function') fonte.connect(analisador);
+    }
+  } catch { /* sem análise: as barras ficam mudas, a gravação continua */ }
+
+  const pedacos = [];
+  const assinantes = new Set();
+  const inicio = Math.max(0, relogio());
+  let ultimoDb = VOZ_PISO_DB;
+  let ultimaLeitura = inicio;
+  let parado = false;
+  let cancelado = false;
+  let blobFinal = null;
+  let resolverResultado = null;
+  const resultado = new Promise((res) => { resolverResultado = res; });
+
+  function pararStream() {
+    try {
+      const tracks = stream && typeof stream.getTracks === 'function' ? stream.getTracks() : [];
+      for (const t of tracks) { try { t.stop(); } catch { /* track já morta */ } }
+    } catch { /* sem tracks */ }
+  }
+
+  function encerrarTudo() {
+    pararStream();
+    if (intervalo !== null) { clearInterval(intervalo); intervalo = null; }
+    if (autoStop !== null) { clearTimeout(autoStop); autoStop = null; }
+    if (ctxAudio && typeof ctxAudio.close === 'function') {
+      try {
+        const f = ctxAudio.close();
+        if (f && typeof f.catch === 'function') f.catch(() => {});
+      } catch { /* contexto já fechado */ }
+    }
+    ctxAudio = null;
+    analisador = null;
+  }
+
+  function aoTerminar() {
+    if (parado) return;
+    parado = true;
+    if (cancelado) pedacos.length = 0;
+    encerrarTudo();
+    const tipo = (rec && rec.mimeType) || tipoPedido || 'audio/webm';
+    blobFinal = FazBlob ? new FazBlob(pedacos, { type: tipo }) : null;
+    if (resolverResultado) resolverResultado(blobFinal);
+  }
+
+  function amostrar() {
+    if (parado) return;
+    const t = Math.max(0, relogio());
+    if (analisador && typeof analisador.getFloatTimeDomainData === 'function') {
+      const dados = new Float32Array(analisador.fftSize || 2048);
+      try {
+        analisador.getFloatTimeDomainData(dados);
+        let soma = 0;
+        for (let i = 0; i < dados.length; i += 1) soma += dados[i] * dados[i];
+        const rms = Math.sqrt(soma / Math.max(1, dados.length));
+        ultimoDb = suavizarDb(ultimoDb, rmsParaDb(rms), t - ultimaLeitura, undefined);
+      } catch { /* analisador morto: mantém o último nível */ }
+    }
+    ultimaLeitura = t;
+    const nivel = dbParaAltura(ultimoDb);
+    for (const fn of assinantes) {
+      try { fn(nivel, { db: ultimoDb, duracaoMs: Math.max(0, t - inicio) }); } catch { /* assinante mau */ }
+    }
+    // Auto-stop pelo relógio INJETADO (testável) — o setTimeout abaixo é a
+    // rede de segurança para quem não injeta relógio nenhum.
+    if (t - inicio >= VOZ_DURACAO_MAX_MS) parar();
+  }
+
+  rec.ondataavailable = (e) => {
+    if (e && e.data && e.data.size > 0) pedacos.push(e.data);
+  };
+  rec.onstop = () => aoTerminar();
+
+  let intervalo = setInterval(amostrar, VOZ_AMOSTRAGEM_MS);
+  let autoStop = setTimeout(() => { parar().catch(() => {}); }, VOZ_DURACAO_MAX_MS);
+  // Em Node (testes) os temporizadores não seguram o processo.
+  if (intervalo && typeof intervalo.unref === 'function') intervalo.unref();
+  if (autoStop && typeof autoStop.unref === 'function') autoStop.unref();
+
+  try {
+    rec.start(1000); // timeslice 1 s: pedaços de 1 em 1 s, nada se perde se fechar
+  } catch (e) {
+    encerrarTudo();
+    throw vozErro('microfone', `Não deu para começar a gravar: ${vozMensagemDe(e)}`);
+  }
+
+  function parar() {
+    if (parado) return Promise.resolve(blobFinal);
+    let largado = false;
+    try {
+      if (rec && typeof rec.stop === 'function' && rec.state !== 'inactive') {
+        rec.stop(); // o browser dispara 'dataavailable' (último pedaço) e 'stop'
+        largado = true;
+      }
+    } catch { /* stop() rebentou: termina à mão */ }
+    if (!largado) {
+      aoTerminar();
+    } else if (!parado) {
+      // Rede de segurança: um MediaRecorder que nunca dispare 'stop' não deixa
+      // a promessa pendurada — passados 500 ms termina-se com o que há.
+      const salvaguarda = setTimeout(() => aoTerminar(), 500);
+      if (salvaguarda && typeof salvaguarda.unref === 'function') salvaguarda.unref();
+    }
+    return resultado;
+  }
+
+  function cancelar() {
+    if (parado) return;
+    cancelado = true;
+    try {
+      if (rec && typeof rec.stop === 'function' && rec.state !== 'inactive') rec.stop();
+    } catch { /* stop() rebentou */ }
+    aoTerminar();
+  }
+
+  function assinarNivel(fn) {
+    if (typeof fn !== 'function') return () => {};
+    assinantes.add(fn);
+    return () => { assinantes.delete(fn); };
+  }
+
+  function duracaoMs() {
+    return Math.max(0, Math.max(0, relogio()) - inicio);
+  }
+
+  return { parar, cancelar, assinarNivel, duracaoMs };
+}
+
+/* ------------------------------------------------------------------ */
+/* Transcrição (OpenAI speech-to-text)                                  */
+/* ------------------------------------------------------------------ */
+
+/* Nome do ficheiro multipart pela extensão do mime (a API deduz o formato). */
+function vozExtensao(tipo) {
+  const base = String(tipo || '').split(';')[0].trim().toLowerCase();
+  const sub = base.split('/')[1] || 'webm';
+  const mapa = { 'x-wav': 'wav', 'x-m4a': 'm4a', 'x-mpeg': 'mp3', mp4: 'm4a' };
+  return mapa[sub] || sub.replace(/^x-/, '');
+}
+
+/*
+ * Transcreve um Blob de áudio com o speech-to-text da OpenAI.
+ *   POST https://api.openai.com/v1/audio/transcriptions (multipart)
+ *   campos: file (blob + nome pela extensão), model, language (só se pedida)
+ *   cabeçalhos: SÓ Authorization: Bearer <chave> — o Content-Type NUNCA se
+ *   define à mão (o boundary do multipart é do browser; define-lo rebenta o
+ *   envio) — verificado ao vivo com preflight CORS.
+ * Resposta: { text, modeloUsado, usage } (usage pode ser null).
+ * Cadeia de modelos: pede-se `modelo` (por omissão o primeiro da lista) e,
+ * SÓ quando a API diz "o modelo não existe" (400), tenta-se o seguinte de
+ * VOZ_MODELOS. Erros: {codigo, mensagem} — sem-chave · chave-invalida (401) ·
+ * limite (402/429) · audio-grande (413 ou >25 MB) · rede · api.
+ */
+async function transcreverAudio(blob, opcoes = {}) {
+  const { chave, modelo, idioma, fetch: pedido, agora, FormData: FazFormData } = opcoes || {};
+  const chaveLimpa = typeof chave === 'string' ? chave.trim() : '';
+  if (!chaveLimpa) {
+    throw vozErro('sem-chave', 'Sem chave da API OpenAI — guarde-a nas Definições do telemóvel.');
+  }
+  if (!blob || typeof blob.size !== 'number') {
+    throw vozErro('api', 'Sem áudio para transcrever.');
+  }
+  if (blob.size > VOZ_LIMITE_BYTES) {
+    throw vozErro('audio-grande', 'Gravação acima de 25 MB — parta a mensagem de voz em duas.');
+  }
+  const f = typeof pedido === 'function'
+    ? pedido
+    : (typeof fetch === 'function' ? fetch : null);
+  if (!f) {
+    throw vozErro('rede', 'Sem fetch: este browser não fala com a API.');
+  }
+  const FD = typeof FazFormData === 'function'
+    ? FazFormData
+    : (typeof FormData === 'function' ? FormData : null);
+  if (!FD) {
+    throw vozErro('rede', 'Sem FormData: este browser não envia multipart.');
+  }
+  void agora; // a transcrição não mede tempo — o relógio é do gravador
+
+  const modelos = VOZ_MODELOS.slice();
+  const pedidoModelo = typeof modelo === 'string' && modelo.trim() ? modelo.trim() : modelos[0];
+  const cadeia = modelos.includes(pedidoModelo)
+    ? modelos.slice(modelos.indexOf(pedidoModelo))
+    : [pedidoModelo, ...modelos];
+  const nomeFicheiro = `gravacao.${vozExtensao(blob.type)}`;
+
+  let ultimoErro = null;
+  for (const m of cadeia) {
+    const fd = new FD();
+    fd.append('file', blob, nomeFicheiro);
+    fd.append('model', m);
+    if (typeof idioma === 'string' && idioma.trim() && idioma.trim() !== 'auto') {
+      fd.append('language', idioma.trim());
+    }
+    let resposta;
+    try {
+      resposta = await f(VOZ_URL_TRANSCRICAO, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${chaveLimpa}` },
+        body: fd,
+      });
+    } catch (e) {
+      throw vozErro('rede', `Sem ligação à API OpenAI: ${vozMensagemDe(e)}`);
+    }
+    const status = resposta && Number.isFinite(resposta.status) ? resposta.status : 0;
+    const ok = !!resposta && (typeof resposta.ok === 'boolean'
+      ? resposta.ok
+      : status >= 200 && status < 300);
+    if (ok) {
+      let corpo = null;
+      try { corpo = await resposta.json(); } catch { corpo = null; }
+      return {
+        text: corpo && typeof corpo.text === 'string' ? corpo.text : '',
+        modeloUsado: m,
+        usage: (corpo && corpo.usage) || null,
+      };
+    }
+    const corpoErro = await vozCorpoDeErro(resposta);
+    const erroApi = corpoErro && corpoErro.error && typeof corpoErro.error === 'object' ? corpoErro.error : null;
+    const mensagemApi = erroApi && erroApi.message
+      ? String(erroApi.message)
+      : `A API OpenAI respondeu ${status}.`;
+    const erro = vozMapearStatus(status, mensagemApi);
+    // Modelo inexistente/sem acesso (4xx): anda-se para o seguinte da cadeia.
+    if (status >= 400 && status < 500 && vozErroDeModelo(mensagemApi, erroApi && erroApi.code)) {
+      ultimoErro = erro;
+      continue;
+    }
+    throw erro;
+  }
+  throw ultimoErro || vozErro('api', 'Sem modelo de transcrição disponível.');
+}
+
+/* ------------------------------------------------------------------ */
+/* Configuração (chave OpenAI + idioma em localStorage)                 */
+/* ------------------------------------------------------------------ */
+
+/* Idiomas aceites na transcrição ('auto' = deixar a API detetar). */
+const VOZ_IDIOMAS = ['auto', 'pt', 'en'];
+
+function vozConfigPadrao() {
+  return { chaveOpenAI: '', idioma: 'auto' };
+}
+
+/* Normaliza como `normalizarFiltros`: só campos conhecidos, tipos certos. */
+function vozNormalizarConfig(bruto) {
+  const c = vozConfigPadrao();
+  if (bruto && typeof bruto === 'object') {
+    if (typeof bruto.chaveOpenAI === 'string') c.chaveOpenAI = bruto.chaveOpenAI.trim();
+    if (typeof bruto.idioma === 'string' && VOZ_IDIOMAS.includes(bruto.idioma)) c.idioma = bruto.idioma;
+  }
+  return c;
+}
+
+/* Lê a configuração guardada. Sem storage (modo privado, sandbox) ou JSON
+ * estragado: padrão — a voz fica simplesmente desligada. */
+function lerConfig(storage) {
+  try {
+    const bruto = storage && typeof storage.getItem === 'function' ? storage.getItem(CHAVE_CONFIG) : null;
+    return vozNormalizarConfig(bruto ? JSON.parse(bruto) : null);
+  } catch {
+    return vozConfigPadrao();
+  }
+}
+
+/* Guarda {chaveOpenAI, idioma}. true = guardado; false = persistência
+ * indisponível (a configuração vale só nesta página). A chave NUNCA é
+ * registada em lado nenhum — só escrita no storage do próprio navegador. */
+function guardarConfig(storage, config) {
+  try {
+    if (!storage || typeof storage.setItem !== 'function') return false;
+    storage.setItem(CHAVE_CONFIG, JSON.stringify(vozNormalizarConfig(config)));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/* Limpa a configuração guardada (remove a chave do navegador). */
+function limparConfig(storage) {
+  try {
+    if (!storage) return false;
+    if (typeof storage.removeItem === 'function') storage.removeItem(CHAVE_CONFIG);
+    else if (typeof storage.setItem === 'function') storage.setItem(CHAVE_CONFIG, JSON.stringify(vozConfigPadrao()));
+    else return false;
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/* Chave para MOSTRAR sem a revelar: 'sk-…abcd' (prefixo + 4 últimos). */
+function mascararChave(chave) {
+  const c = typeof chave === 'string' ? chave.trim() : '';
+  if (!c) return '';
+  if (c.length <= 4) return '…';
+  return `${c.slice(0, 3)}…${c.slice(-4)}`;
+}
+
+  /* === FIM voz.js embutido === */
+
+    /* ================================================================
      * 2. Estado do escritório — contrato §2 (projeção browser)
      * ================================================================ */
 
@@ -4103,11 +4673,20 @@ function criarMotorExpressoes(opts) {
       return typeof m === 'string' && m ? m : String(e);
     };
 
-    /** ContentBlock[] (tipos com hífen do llm: text/image/file/…) → texto + anexos. */
+    /**
+     * ContentBlock[] (tipos com hífen do llm: text/image/file/…) → texto + anexos.
+     * Normalização de payload: `content` também pode ser uma STRING pura ou um
+     * array de strings (há rotas do DSH que mandam assim) — antes devolvia-se
+     * {texto:''} e a mensagem DESAPARECIA (o chamador descartava-a por vazia).
+     * Numa lista mista, as strings contam como texto e os blocos de outros
+     * tipos continuam a ser ignorados.
+     */
     function conteudoDe(content) {
       const partes = [];
       const anexos = [];
-      for (const b of Array.isArray(content) ? content : []) {
+      const blocos = typeof content === 'string' ? [content] : Array.isArray(content) ? content : [];
+      for (const b of blocos) {
+        if (typeof b === 'string') { partes.push(b); continue; }
         if (!b || typeof b !== 'object') continue;
         if (b.type === 'text' && typeof b.text === 'string') partes.push(b.text);
         else if (b.type === 'image') anexos.push({ tipo: 'imagem', nome: (b.attachment && b.attachment.name) || 'imagem' });
@@ -4371,28 +4950,38 @@ function criarMotorExpressoes(opts) {
     }
 
     /**
-     * Texto → segmentos: blocos ``` (fonte mono), `código` inline, **negrito** e
-     * texto simples. Markdown LEVE (o que os agentes escrevem): títulos "## …"
-     * a negrito, itens "- " com "•", réguas "---" fora (sem deixar buracos:
-     * no máximo uma linha vazia seguida), tabelas "| a | b |" em "a · b" (o
-     * cabeçalho a negrito, o separador "|---|" fora, células vazias como "—";
-     * um "|" em `código` ou escapado "\|" não parte a célula — celulasDaTabela)
-     * — tudo continua a ser texto puro (nós de texto React, nunca HTML).
+     * Texto → segmentos: blocos ``` (fonte mono), `código` inline, **negrito**,
+     * __duplo__ a negrito, *itálico* e _itálico_, ~~riscado~~, citações "> …"
+     * ('citacao', bloco com contorno) e texto simples. Markdown LEVE (o que os
+     * agentes escrevem): títulos "## …" a negrito, itens "- " com "•", listas
+     * "1. " COM o número (é assim que se lê uma lista numerada), réguas "---"
+     * fora (sem deixar buracos: no máximo uma linha vazia seguida), tabelas
+     * "| a | b |" em "a · b" (o cabeçalho a negrito, o separador "|---|" fora,
+     * células vazias como "—"; um "|" em `código` ou escapado "\|" não parte a
+     * célula — celulasDaTabela) — tudo continua a ser texto puro (nós de texto
+     * React, nunca HTML). Delimitadores SEM PAR mantêm o comportamento
+     * fixado: um bloco ``` sem fecho (a transmitir) vai até ao fim, os "**"
+     * sem par saem e as crases sem fecho são texto; os novos (*itálico*,
+     * ~~riscado~~…) ficam LITERAIS sem par, como as crases. Delimitadores
+     * dentro de nomes não abrem nada (snake_case_names, 2*3*4).
      */
     function segmentosDeTexto(texto) {
       const s = String(texto ?? '');
       const out = [];
-      const empurrar = (tipo, t) => {
+      const empurrarPara = (alvo) => (tipo, t) => {
         if (!t) return;
-        const ultimo = out[out.length - 1];
+        const ultimo = alvo[alvo.length - 1];
         if (ultimo && ultimo.tipo === tipo && tipo === 'texto') ultimo.texto += t;
-        else out.push({ tipo, texto: t });
+        else alvo.push({ tipo, texto: t });
       };
+      const empurrar = empurrarPara(out);
       const inline = (t) => {
         if (!t) return;
         const brutas = t.split('\n');
         const linhas = [];
         brutas.forEach((linha, k) => {
+          const citacao = linha.match(/^\s*>\s?(.*)$/);
+          if (citacao) { linhas.push({ citacao: citacao[1] }); return; } // "> …" é bloco próprio
           if (/^\s*([-*_])\1{2,}\s*$/.test(linha)) { linhas.push(''); return; } // régua "---"
           if (ehSeparadorDeTabela(linha)) return; // "|---|:--:|" fora
           // Tabela: "| a | b |" → "a · b" (o cabeçalho, seguido do separador, a
@@ -4408,16 +4997,44 @@ function criarMotorExpressoes(opts) {
           if (titulo) { linhas.push(titulo[1] ? `**${titulo[1].replace(/\*\*/g, '')}**` : ''); return; }
           linhas.push(linha.replace(/^(\s*)[-*+]\s+/, '$1• '));
         });
-        const juntas = linhas.join('\n')
-          .replace(/\n{3,}/g, '\n\n')                               // réguas/linhas vazias seguidas: um só espaço
-          .replace(/\*\*`([^`\n]+)`\*\*/g, '`$1`')              // **`x`** → `x`
-          .replace(/\[([^\]\n]+)\]\(([^)\s]+)\)/g, '$1');           // [rótulo](url) → rótulo
-        partesDeCodigo(juntas).forEach((p) => {
-          if (p.codigo) { empurrar('codigo', p.texto); return; }
-          p.texto.split(/\*\*(?=\S)([^\n]*?\S)\*\*/).forEach((q, j) => (j % 2
-            ? empurrar('negrito', q)
-            : empurrar('texto', q.replace(/\*\*/g, '')))); // "**" sem par (ex.: cortado por "Ler mais")
-        });
+        // Pipeline de um troço de texto (linhas comuns ou o conteúdo de uma
+        // citação): colapsa linhas vazias, tira links, parte por `código` e
+        // por **negrito**; o resto passa pelos delimitadores novos.
+        const formatar = (juntas, alvo) => {
+          const tratado = juntas
+            .replace(/\n{3,}/g, '\n\n')                               // réguas/linhas vazias seguidas: um só espaço
+            .replace(/\*\*`([^`\n]+)`\*\*/g, '`$1`')              // **`x`** → `x`
+            .replace(/\[([^\]\n]+)\]\(([^)\s]+)\)/g, '$1');           // [rótulo](url) → rótulo
+          partesDeCodigo(tratado).forEach((p) => {
+            if (p.codigo) { alvo('codigo', p.texto); return; }
+            p.texto.split(/\*\*(?=\S)([^\n]*?\S)\*\*/).forEach((q, j) => (j % 2
+              ? alvo('negrito', q)
+              : segmentarEnfase(q.replace(/\*\*/g, ''), alvo))); // "**" sem par (ex.: cortado por "Ler mais")
+          });
+        };
+        // Junta em troços: as linhas comuns seguidas seguem o pipeline acima e
+        // as citações seguidas viram um bloco 'citacao' (com os seus segmentos
+        // inline) — tudo emitido pela ordem em que aparece na bolha.
+        let comuns = [];
+        let citacoes = [];
+        const fecharComuns = () => {
+          if (!comuns.length) return;
+          formatar(comuns.join('\n'), empurrar);
+          comuns = [];
+        };
+        const fecharCitacoes = () => {
+          if (!citacoes.length) return;
+          const temp = [];
+          formatar(citacoes.join('\n'), empurrarPara(temp));
+          if (temp.length) out.push({ tipo: 'citacao', segmentos: temp });
+          citacoes = [];
+        };
+        for (const linha of linhas) {
+          if (linha && typeof linha === 'object') { fecharComuns(); citacoes.push(linha.citacao); }
+          else { fecharCitacoes(); comuns.push(linha); }
+        }
+        fecharComuns();
+        fecharCitacoes();
       };
       const re = /```[^\n`]*\n?([\s\S]*?)(?:```|$)/g; // um bloco sem fecho (a transmitir) vai até ao fim
       let i = 0;
@@ -4435,7 +5052,7 @@ function criarMotorExpressoes(opts) {
       if (primeiro && primeiro.tipo === 'texto') primeiro.texto = primeiro.texto.replace(/^\n+/, '');
       const ultimo = out[out.length - 1];
       if (ultimo && ultimo.tipo === 'texto') ultimo.texto = ultimo.texto.replace(/\n+$/, '');
-      return out.filter((seg) => seg.tipo === 'bloco' || seg.texto);
+      return out.filter((seg) => seg.tipo === 'bloco' || seg.tipo === 'citacao' || seg.texto);
     }
     // Spans de `código` numa linha de texto, como no CommonMark: uma sequência
     // de n crases abre um span que fecha na próxima sequência de EXATAMENTE n
@@ -4472,6 +5089,34 @@ function criarMotorExpressoes(opts) {
       }
       if (texto) partes.push({ codigo: false, texto });
       return partes;
+    }
+    // Delimitadores novos (paridade com o chat do DSH), só FORA do código:
+    // `__duplo__` e ** dão negrito, *itálico* e _itálico_ dão ênfase,
+    // ~~riscado~~ risca. Cada par fecha na MESMA LINHA e sem espaços nas
+    // pontas; sem par (ex.: cortado a meio) o delimitador fica LITERAL, como
+    // as crases sem fecho. Delimitadores "dentro de nome" não abrem nada:
+    // snake_case_names, FOO__BAR__BAZ e 2*3*4 ficam tal-e-qual. Escreve em
+    // `alvo(tipo, texto)` — o mesmo contrato do empurrar dos segmentos.
+    const RE_ENFASE = /__(?=\S)([^\n]*?\S)__|~~(?=\S)([^\n]*?\S)~~|\*(?=\S)([^\n]*?\S)\*|_(?=\S)([^\n]*?\S)_/g;
+    const INTRANOME = /[\p{L}\p{N}_]/u;
+    function segmentarEnfase(t, alvo) {
+      if (!t) return;
+      let i = 0;
+      let m;
+      RE_ENFASE.lastIndex = 0;
+      while ((m = RE_ENFASE.exec(t)) !== null) {
+        const ini = m.index;
+        const fim = RE_ENFASE.lastIndex;
+        // "~" nunca é intranome; "*" e "_" só abrem fora de um nome.
+        const intranome = m[0][0] !== '~'
+          && (INTRANOME.test(t[ini - 1] ?? '') || INTRANOME.test(t[fim] ?? ''));
+        if (intranome) { RE_ENFASE.lastIndex = ini + 1; continue; } // fica literal
+        alvo('texto', t.slice(i, ini));
+        alvo(m[1] !== undefined ? 'negrito' : m[2] !== undefined ? 'risca' : 'italico',
+          m[1] ?? m[2] ?? m[3] ?? m[4]);
+        i = fim;
+      }
+      alvo('texto', t.slice(i));
     }
     // Linha separadora de uma tabela Markdown ("|---|:--:|", "--- | ---").
     function ehSeparadorDeTabela(linha) {
@@ -4520,6 +5165,75 @@ function criarMotorExpressoes(opts) {
       // Depois do último "|" (numa linha "| … |", nada) não há célula.
       if (atual.trim()) celulas.push(atual.trim());
       return celulas;
+    }
+
+    /**
+     * Corta `texto` até `max` SEM partir a sintaxe leve da bolha — o corte a
+     * caráter antigo (o bug histórico dos 240) deixava cercas ``` sem fecho
+     * (a calda inteira virava <pre>), crases soltas e ** pendurados. Depois do
+     * corte, limpa-se a fronteira:
+     *   1) cerca ``` aberta (número ÍMPAR de marcas até ao corte): tira-se a
+     *      LINHA do marcador e tudo o que vem depois — a pré-visualização
+     *      mostra o texto ANTES do bloco e, quando não há texto antes, o
+     *      CONTEÚDO do bloco sem o marcador (nunca uma pré-visualização vazia);
+     *   2) na última linha, os `código` e **negrito** que abrem sem fecho: o
+     *      marcador solto sai e o conteúdo fica texto simples (o mesmo que o
+     *      parser faz aos "**" sem par).
+     * O "…" do fim fica sempre: a mensagem é maior do que o mostrado.
+     */
+    function cortarSeguro(texto, max) {
+      const t = String(texto ?? '');
+      const limite = Number.isFinite(max) && max > 0 ? Math.floor(max) : TEXTO_LONGO;
+      if (t.length <= limite) return t;
+      let corte = t.slice(0, limite).trimEnd();
+      // 1) bloco ``` aberto sem fecho até ao corte (mesma semântica do parser)
+      const marcas = [...corte.matchAll(/```/g)];
+      if (marcas.length % 2 === 1) {
+        const marca = marcas[marcas.length - 1];
+        const inicioLinha = corte.lastIndexOf('\n', marca.index) + 1;
+        const antes = corte.slice(0, inicioLinha).trimEnd();
+        const depois = corte.slice(marca.index + 3);
+        const saltoLinha = depois.indexOf('\n');
+        const conteudo = (saltoLinha < 0 ? '' : depois.slice(saltoLinha + 1)).trimEnd(); // sem a linha "```js"
+        corte = antes || conteudo;
+      }
+      // 2) marcadores sem par na última linha (foi o corte que os abriu)
+      const salto = corte.lastIndexOf('\n') + 1;
+      corte = `${corte.slice(0, salto)}${limparFronteira(corte.slice(salto))}`.trimEnd();
+      return corte ? `${corte}…` : '…';
+    }
+    // Fronteira de uma linha cortada a meio da sintaxe: os pares `código` e
+    // **negrito** ficam; os marcadores que abrem sem fecho SAEM (o conteúdo
+    // fica texto simples — uma pré-visualização limpa, sem crases soltas).
+    function limparFronteira(linha) {
+      // "**" sem par sai, os pares ficam (é o que o parser faz à vista).
+      const comNegrito = linha.split(/\*\*(?=\S)([^\n]*?\S)\*\*/)
+        .map((p, k) => (k % 2 ? `**${p}**` : p.replace(/\*\*/g, '')))
+        .join('');
+      // Crases: n crases abrem span que fecha em EXATAMENTE n (como
+      // partesDeCodigo); "\`" é crase literal; uma sequência sem fecho sai.
+      let s = '';
+      let i = 0;
+      while (i < comNegrito.length) {
+        const c = comNegrito[i];
+        if (c === '\\' && comNegrito[i + 1] === '`') { s += '\\`'; i += 2; continue; }
+        if (c !== '`') { s += c; i += 1; continue; }
+        let n = 1;
+        while (comNegrito[i + n] === '`') n += 1;
+        let j = i + n;
+        let fecho = -1;
+        while (j < comNegrito.length) {
+          if (comNegrito[j] !== '`') { j += 1; continue; }
+          let m = 1;
+          while (comNegrito[j + m] === '`') m += 1;
+          if (m === n) { fecho = j; break; }
+          j += m;
+        }
+        if (fecho < 0) { i += n; continue; } // crases sem par: o marcador sai
+        s += comNegrito.slice(i, fecho + n);
+        i = fecho + n;
+      }
+      return s;
     }
 
     // Cache das bolhas já segmentadas: durante o streaming só o texto da
@@ -5296,6 +6010,10 @@ function criarMotorExpressoes(opts) {
       '.wg-tel-bolha code{padding:1px 4px;border-radius:5px;background:rgba(0,0,0,.07);font:12.5px ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;letter-spacing:0}',
       '.wg-tel-eu .wg-tel-bolha code{background:rgba(255,255,255,.2)}',
       '.wg-tel-bolha strong{font-weight:600}',
+      // Citação ("> …"): bloco com contorno à esquerda, no tom da bolha.
+      // Estático — a lei de animação não se aplica (nada anima aqui).
+      '.wg-tel-citacao{display:block;margin:3px 0;padding:1px 6px 1px 9px;border-left:3px solid rgba(0,0,0,.22);border-radius:3px}',
+      '.wg-tel-eu .wg-tel-citacao{border-left-color:rgba(255,255,255,.45)}',
       '.wg-tel-anexo{display:block;font-size:12.5px;opacity:.85}',
       '.wg-tel-ler-mais{display:block;margin-top:4px;padding:0;border:0;background:none;color:#0b84fe;font:inherit;font-size:13px;font-weight:600;cursor:pointer}',
       '.wg-tel-eu .wg-tel-ler-mais{color:#fff;text-decoration:underline}',
@@ -5367,6 +6085,39 @@ function criarMotorExpressoes(opts) {
       '.wg-tel-remetente{margin:9px 0 1px 46px;font-size:11px;font-weight:600;color:#8e8e93}',
       '.wg-tel-clicavel{cursor:pointer}',
       '.wg-tel-grupo-linha:focus-visible{outline:2px solid #0b84fe;outline-offset:-2px}',
+      // ── Voz e transcrição (estilo iMessage): o microfone grava e o nível ──
+      // aparece AO VIVO enquanto se fala. As barras movem-se SÓ por
+      // transform:scaleY escrito num loop rAF (lei de animação: nada de
+      // keyframes/transições aqui) e o loop para com a aba escondida ou o
+      // painel em .wg-oculto; sob prefers-reduced-motion (bloco @media mais
+      // abaixo) as barras trocam-se por um indicador estático.
+      '.wg-tel-entrada{flex-wrap:wrap}',
+      '.wg-tel-voz-estado{flex:1 0 100%;display:flex;align-items:center;gap:8px;min-width:0;padding:3px 2px 4px}',
+      '.wg-tel-voz-barras{flex:1;min-width:0;display:flex;align-items:flex-end;gap:2px;height:22px}',
+      '.wg-tel-voz-barras span{flex:1;min-width:2px;height:100%;border-radius:2.5px;background:#c1c1c6;transform:scaleY(.1);transform-origin:50% 100%}',
+      '.wg-tel-voz-estatico{flex:none;display:none;width:100%;height:6px;border-radius:3px;background:#e5e5ea;overflow:hidden}',
+      '.wg-tel-voz-estatico i{display:block;height:100%;border-radius:3px;background:#0b84fe;transform:scaleX(.15);transform-origin:0 50%}',
+      '.wg-tel-voz-tempo{flex:none;font-size:11px;font-variant-numeric:tabular-nums;color:#8e8e93}',
+      '.wg-tel-voz-dica{flex:1;min-width:0;font-size:11px;line-height:1.4;color:#8e8e93;overflow:hidden;text-overflow:ellipsis}',
+      '.wg-tel-voz-estado.wg-tel-voz-erro .wg-tel-voz-dica{color:#ff3b30}',
+      '.wg-tel-voz-repetir{flex:none;padding:3px 11px;border:0;border-radius:12px;background:#0b84fe;color:#fff;font:600 11px/1.5 -apple-system,system-ui,sans-serif;cursor:pointer}',
+      '.wg-tel-voz-repetir:hover{background:#0a78e8}',
+      // ── Definições do telemóvel: a chave da API OpenAI (voz/transcrição) ──
+      '.wg-tel-config{padding:150px 18px 12px}',
+      '.wg-tel-config-rotulo{flex:none;margin:14px 0 5px;font-size:11px;font-weight:600;letter-spacing:.3px;text-transform:uppercase;color:#8e8e93}',
+      '.wg-tel-config-chave{flex:none;width:100%;height:34px;padding:6px 11px;border:1px solid #d1d1d6;border-radius:11px;background:#fff;color:#000;font:inherit;font-size:14px}',
+      '.wg-tel-config-chave:focus{outline:2px solid #0b84fe;outline-offset:1px}',
+      '.wg-tel-config-guardada{flex:none;margin:5px 0 0;font-size:11px;color:#8e8e93}',
+      '.wg-tel-config-idioma{flex:none;width:100%;height:34px;padding:6px 11px;border:1px solid #d1d1d6;border-radius:11px;background:#fff;color:#000;font:inherit;font-size:14px}',
+      '.wg-tel-config-acoes{flex:none;display:flex;align-items:center;gap:8px;margin:16px 0 0}',
+      '.wg-tel-config-guardar{padding:7px 17px;border:0;border-radius:15px;background:#0b84fe;color:#fff;font:600 13px/1.5 -apple-system,system-ui,sans-serif;cursor:pointer}',
+      '.wg-tel-config-guardar:hover{background:#0a78e8}',
+      '.wg-tel-config-limpar{padding:7px 13px;border:0;border-radius:15px;background:#e9e9eb;color:#ff3b30;font:600 13px/1.5 -apple-system,system-ui,sans-serif;cursor:pointer}',
+      '.wg-tel-config-limpar:hover{background:#dcdce1}',
+      '.wg-tel-config-nota{flex:none;min-height:16px;margin:10px 0 0;font-size:11px;color:#3c3c43}',
+      '.wg-tel-config-aviso{flex:none;margin:14px 0 0;font-size:11px;line-height:1.55;color:#8e8e93}',
+      '.wg-tel-config-icone{flex:none;display:grid;place-items:center;width:34px;height:34px;border-radius:50%;background:#e9e9eb;color:#8e8e93}',
+      '.wg-tel-config-icone svg{width:17px;height:17px}',
       // Modo telemóvel (um telemóvel a rodar o site): o celular É o ecrã
       // INTEIRO — por cima de tudo o que é do DSH (a barra não se vê), sem
       // moldura, sem ilha/barra de casa, sem escritório por baixo e sem
@@ -5385,7 +6136,7 @@ function criarMotorExpressoes(opts) {
       // O DSH dá `corner-shape: superellipse(1.5)` a tudo (cantos contínuos, como
       // o iOS — ótimo para a moldura e as bolhas); círculos, pílulas e as peças
       // da cauda precisam de `round` para serem círculos de verdade.
-      '.wg-tel-escrevendo span,.wg-tel-escrevendo::before,.wg-tel-escrevendo::after,.wg-tel-avatar,.wg-tel-enviar,.wg-tel-voz,.wg-tel-alerta,.wg-tel-fila-enviar,.wg-tel-fila-remover,.wg-tel-ilha,.wg-tel-home,.wg-tel-cauda .wg-tel-bolha::before,.wg-tel-cauda .wg-tel-bolha::after{corner-shape:round}',
+      '.wg-tel-escrevendo span,.wg-tel-escrevendo::before,.wg-tel-escrevendo::after,.wg-tel-avatar,.wg-tel-enviar,.wg-tel-voz,.wg-tel-alerta,.wg-tel-fila-enviar,.wg-tel-fila-remover,.wg-tel-ilha,.wg-tel-home,.wg-tel-cauda .wg-tel-bolha::before,.wg-tel-cauda .wg-tel-bolha::after,.wg-tel-voz-barras span,.wg-tel-voz-estatico,.wg-tel-voz-estatico i,.wg-tel-voz-repetir,.wg-tel-config-chave,.wg-tel-config-idioma,.wg-tel-config-guardar,.wg-tel-config-limpar,.wg-tel-config-icone{corner-shape:round}',
       '@keyframes wg-tel-entrar{from{opacity:0;transform:translateY(22px) scale(.96)}to{opacity:1;transform:none}}',
       '@keyframes wg-tel-ponto{0%,60%,100%{opacity:.35;transform:translateY(0)}30%{opacity:.9;transform:translateY(-2px)}}',
       // Painel estreito (a sala ficaria com < ~600 px ao lado da barra): o
@@ -5400,7 +6151,7 @@ function criarMotorExpressoes(opts) {
       // baixo dela). À esquerda sobram ~350 px de sala para a pessoa aberta —
       // com o celular à esquerda e a barra à direita sobravam ~40 px.
       '@media(max-width:800px){.wg-palco{z-index:auto}.wg-telefone{right:18px}}',
-      '@media(prefers-reduced-motion:reduce){.wg-telefone{animation:none}.wg-tel-escrevendo span{animation:none;opacity:.6}}',
+      '@media(prefers-reduced-motion:reduce){.wg-telefone{animation:none}.wg-tel-escrevendo span{animation:none;opacity:.6}.wg-tel-voz-barras{display:none}.wg-tel-voz-estatico{display:block}}',
       // Botão "Modo jogo" do pé: cada ocupante de `sidebar.footer.action`
       // possui a sua própria geometria e hover; cor herdada de currentColor.
       '.wg-jogar{display:inline-flex;align-items:center;gap:6px;height:28px;min-width:28px;padding:0 9px;border:0;background:transparent;border-radius:6px;color:currentColor;cursor:pointer}',
@@ -5982,14 +6733,56 @@ function criarMotorExpressoes(opts) {
           d: 'M4.6 2.6 7 2.1c.6-.1 1.2.2 1.4.8l1.1 2.8c.2.5.1 1.1-.3 1.4L8 8.5c.8 1.7 2.1 3 3.8 3.8l1.4-1.2c.4-.4 1-.5 1.4-.3l2.8 1.1c.6.2.9.8.8 1.4l-.5 2.4c-.2 1-1.1 1.7-2.1 1.6C8.8 16.9 3.6 11.6 3.2 5.2c-.1-1 .5-2 1.4-2.6Z',
           fill: 'currentColor',
         })),
+      // Engrenagem das Definições (a linha do fim da tela Grupos) — SVG
+      // inline como todos os outros (o sistema de ícones não usa innerHTML).
+      engrenagem: () => svgTel({ viewBox: '0 0 20 20', width: 17, height: 17 },
+        h('circle', { cx: 10, cy: 10, r: 3.1, fill: 'none', stroke: 'currentColor', strokeWidth: 1.8 }),
+        h('path', {
+          d: 'M10 1.7v3.1M10 15.2v3.1M1.7 10h3.1M15.2 10h3.1M4.1 4.1l2.2 2.2M13.7 13.7l2.2 2.2M15.9 4.1l-2.2 2.2M6.3 13.7l-2.2 2.2',
+          fill: 'none', stroke: 'currentColor', strokeWidth: 2.1, strokeLinecap: 'round',
+        })),
     };
 
-    // Segmentos de uma bolha → nós React (texto, `código`, bloco ``` em mono).
+    // Segmentos de uma bolha → nós React (texto, `código`, bloco ``` em mono,
+    // negrito, itálico, riscado e as citações "> …" em bloco com contorno).
     const conteudoDaBolha = (segmentos) => segmentos.map((s, i) => (
       s.tipo === 'bloco' ? h('pre', { key: i }, s.texto)
         : s.tipo === 'codigo' ? h('code', { key: i }, s.texto)
           : s.tipo === 'negrito' ? h('strong', { key: i }, s.texto)
-            : h('span', { key: i }, s.texto)));
+            : s.tipo === 'italico' ? h('em', { key: i }, s.texto)
+              : s.tipo === 'risca' ? h('del', { key: i }, s.texto)
+                : s.tipo === 'citacao'
+                  ? h('div', { key: i, className: 'wg-tel-citacao' }, ...conteudoDaBolha(s.segmentos || []))
+                  : h('span', { key: i }, s.texto)));
+
+    /* ── Voz e transcrição (voz.js embutido): utilidades da UI ─────────
+       A gravação vive em criarGravadorVoz e a transcrição em
+       transcreverAudio (secção 1-ter); aqui só se traduz para o ecrã. */
+
+    // Quantas barras tem o medidor de voz (iMessage) e mm:ss do cronómetro.
+    const VOZ_BARRAS = 28;
+    const vozTempoTexto = (s) => `${String(Math.floor(s / 60)).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`;
+
+    // Storage do browser com o máximo de cautela (modo privado, sandbox).
+    const storageDaJanela = () => {
+      try {
+        return typeof window !== 'undefined' && window.localStorage ? window.localStorage : null;
+      } catch { return null; /* sem storage */ }
+    };
+
+    // Erro {codigo, mensagem} de voz.js → o que se mostra no celular. A
+    // mensagem da API mostra-se tal e qual quando não há rótulo melhor; a
+    // chave NUNCA aparece nos erros (a API também não a ecoa).
+    const rotuloErroVoz = (e) => {
+      const codigo = e && typeof e === 'object' ? e.codigo : null;
+      if (codigo === 'sem-chave') return 'Sem chave da API OpenAI — guarde-a nas Definições.';
+      if (codigo === 'chave-invalida') return 'Chave da API inválida — verifique as Definições.';
+      if (codigo === 'limite') return 'Limite da API atingido — tente mais tarde.';
+      if (codigo === 'audio-grande') return 'Gravação demasiado grande (máximo de 25 MB).';
+      if (codigo === 'rede') return 'Sem ligação à API OpenAI.';
+      if (codigo === 'microfone') return 'Sem acesso ao microfone.';
+      return (e && typeof e === 'object' && e.mensagem) || 'Não foi possível transcrever.';
+    };
 
     // Props só com primitivos + a conversa (estável enquanto está aberta) e
     // `fechar` estável: com React.memo, o celular NÃO se redesenha a cada
@@ -6009,12 +6802,35 @@ function criarMotorExpressoes(opts) {
         ? conversa.getSnapshot()
         : conversaVazia(m ? m.id : null, 'sem-canal', 'Sem ligação a esta conversa.');
       const [texto, setTexto] = react.useState('');
+      // ── Voz (iMessage): gravar → ver o nível ao vivo → transcrever para a ──
+      // caixa (para REVER e enviar). Estados: null (parado) ·
+      // {fase:'a-gravar', segundos} · {fase:'a-transcrever'} ·
+      // {fase:'erro', erro}. O nível ao vivo NÃO passa por estado (a 10 Hz
+      // redesenharia o celular todo): assinarNivel → rAF escreve
+      // transform:scaleY nas barras e o loop PARA com a aba escondida ou o
+      // painel em .wg-oculto; sob prefers-reduced-motion não há rAF nenhum
+      // (só o indicador estático, ver CSS).
+      const [voz, setVoz] = react.useState(null);
+      const vozGravadorRef = react.useRef(null);   // gravador vivo (null = parado)
+      const vozUltimoRef = react.useRef(null);     // {blob} — retranscrever no "Tentar de novo"
+      const vozNiveisRef = react.useRef({
+        atual: 0, hist: new Array(VOZ_BARRAS).fill(0.1), vistos: new Array(VOZ_BARRAS).fill(0.1),
+        barras: null, estatico: null, anim: 0, tempo: null, auto: null,
+      });
       const [limite, setLimite] = react.useState(MAX_ITENS_TELEFONE);
       const [abertos, setAbertos] = react.useState(() => new Set()); // ferramentas / textos longos expandidos
       const [agora, setAgora] = react.useState(() => Date.now());
       react.useEffect(() => {
         const relogio = setInterval(() => setAgora(Date.now()), 20000); // hora da barra de estado
         return () => clearInterval(relogio);
+      }, []);
+      // Desmontar o celular (ou trocar de pessoa): nenhuma gravação nem
+      // temporizador fica pendurado.
+      react.useEffect(() => () => {
+        const g = vozGravadorRef.current;
+        vozGravadorRef.current = null;
+        vozLimparTempo();
+        if (g && typeof g.cancelar === 'function') { try { g.cancelar(); } catch { /* já parada */ } }
       }, []);
       const listaRef = react.useRef(null);
       const campoRef = react.useRef(null);
@@ -6102,6 +6918,147 @@ function criarMotorExpressoes(opts) {
         enviar();
       };
 
+      // ── Fluxo de voz: gravar → parar → transcrever → escrever na caixa ──
+      // Tudo por injeção quando há (testes): props.criarGravador e
+      // props.transcreverVoz; no browser são criGravadorVoz/transcreverAudio
+      // (voz.js embutido) com os globais da plataforma.
+      const vozConfig = () => lerConfig(storageDaJanela());
+      const vozSemMovimento = () => {
+        try {
+          return typeof matchMedia === 'function'
+            && matchMedia('(prefers-reduced-motion: reduce)').matches === true;
+        } catch { return false; }
+      };
+      // A aba escondida (ou o painel em .wg-oculto, já pousado pelo
+      // visibilitychange do bundle) = nada visível = nada anima.
+      const vozEscondido = () => {
+        try {
+          if (typeof document !== 'undefined' && document.hidden) return true;
+          const e = vozNiveisRef.current;
+          const painel = e.barras && e.barras.closest ? e.barras.closest('.wg-painel') : null;
+          return !!(painel && painel.classList && painel.classList.contains('wg-oculto'));
+        } catch { return false; }
+      };
+      // As barras seguem a HISTÓRIA do nível (uma por amostra, como as ondas
+      // do iMessage), interpoladas a cada frame — só transform:scaleY.
+      const vozPasso = () => {
+        const e = vozNiveisRef.current;
+        e.anim = 0;
+        if (vozEscondido() || vozSemMovimento()) return; // para e não reagenda
+        const filhos = e.barras && e.barras.children ? e.barras.children : null;
+        if (filhos && filhos.length) {
+          for (let i = 0; i < filhos.length; i += 1) {
+            const alvo = e.hist[i] != null ? e.hist[i] : 0.1;
+            e.vistos[i] += (alvo - e.vistos[i]) * 0.4;
+            filhos[i].style.transform = `scaleY(${Math.max(0.1, e.vistos[i]).toFixed(3)})`;
+          }
+        }
+        if (typeof requestAnimationFrame === 'function') e.anim = requestAnimationFrame(vozPasso);
+      };
+      const vozGarantirLoop = () => {
+        const e = vozNiveisRef.current;
+        if (!e.anim && typeof requestAnimationFrame === 'function' && !vozEscondido() && !vozSemMovimento()) {
+          e.anim = requestAnimationFrame(vozPasso);
+        }
+      };
+      const vozNivelChegou = (nivel) => {
+        const e = vozNiveisRef.current;
+        e.atual = Number.isFinite(nivel) ? Math.min(1, Math.max(0, nivel)) : 0.1;
+        e.hist.unshift(e.atual);
+        if (e.hist.length > VOZ_BARRAS) e.hist.length = VOZ_BARRAS;
+        vozGarantirLoop();
+      };
+      const vozLimparTempo = () => {
+        const e = vozNiveisRef.current;
+        if (e.tempo !== null) { clearInterval(e.tempo); e.tempo = null; }
+        if (e.auto !== null) { clearTimeout(e.auto); e.auto = null; }
+        if (e.anim) { if (typeof cancelAnimationFrame === 'function') cancelAnimationFrame(e.anim); e.anim = 0; }
+      };
+      const transcreverEInserir = async (blob) => {
+        setVoz({ fase: 'a-transcrever' });
+        try {
+          const cfg = vozConfig();
+          const r = typeof props.transcreverVoz === 'function'
+            ? await props.transcreverVoz(blob, cfg)
+            : await transcreverAudio(blob, {
+              chave: cfg.chaveOpenAI,
+              idioma: cfg.idioma === 'auto' ? undefined : cfg.idioma,
+              fetch: (url, opcoes) => fetch(url, opcoes),
+              agora: () => Date.now(),
+            });
+          const transcrito = String((r && r.text) || '').trim();
+          // O texto entra na caixa para REVER e enviar (nunca envia sozinho).
+          if (transcrito) setTexto((atual) => (atual ? atual + ' ' : '') + transcrito);
+          vozUltimoRef.current = null;
+          setVoz(null);
+        } catch (e) {
+          vozUltimoRef.current = { blob };
+          setVoz({ fase: 'erro', erro: rotuloErroVoz(e) });
+        }
+      };
+      const encerrarVoz = async () => {
+        const g = vozGravadorRef.current;
+        vozGravadorRef.current = null;
+        vozLimparTempo();
+        if (!g) { setVoz(null); return; }
+        setVoz({ fase: 'a-transcrever' });
+        let blob = null;
+        try { blob = await g.parar(); } catch (e) {
+          setVoz({ fase: 'erro', erro: rotuloErroVoz(e) });
+          return;
+        }
+        vozUltimoRef.current = blob ? { blob } : null;
+        if (!blob || !blob.size) { setVoz(null); return; }
+        await transcreverEInserir(blob);
+      };
+      const comecarVoz = async () => {
+        if (!podeEscrever) return;
+        if (!vozConfig().chaveOpenAI) {
+          // Sem chave não há transcrição possível: abre-se a tela de
+          // Definições (o título do botão diz a mesma coisa).
+          if (typeof props.abrirConfig === 'function') props.abrirConfig();
+          return;
+        }
+        vozUltimoRef.current = null;
+        setVoz({ fase: 'a-gravar', segundos: 0 });
+        try {
+          const g = typeof props.criarGravador === 'function'
+            ? await props.criarGravador()
+            : await criarGravadorVoz({
+              getUserMedia: (requisicao) => navigator.mediaDevices.getUserMedia(requisicao),
+              MediaRecorder: window.MediaRecorder,
+              AudioContext: window.AudioContext || window.webkitAudioContext,
+              agora: () => Date.now(),
+            });
+          vozGravadorRef.current = g;
+          if (typeof g.assinarNivel === 'function') g.assinarNivel(vozNivelChegou);
+          const e = vozNiveisRef.current;
+          e.tempo = setInterval(() => {
+            // Cronómetro mm:ss (1×/s) e, sob reduced-motion, o indicador
+            // estático — sem rAF nenhum.
+            setVoz((v) => (v && v.fase === 'a-gravar' ? { ...v, segundos: (v.segundos || 0) + 1 } : v));
+            if (e.estatico) e.estatico.style.transform = `scaleX(${Math.max(0.1, e.atual).toFixed(3)})`;
+          }, 1000);
+          if (e.tempo && typeof e.tempo.unref === 'function') e.tempo.unref();
+          e.auto = setTimeout(() => { encerrarVoz(); }, VOZ_DURACAO_MAX_MS); // auto-stop aos 2 min
+          if (e.auto && typeof e.auto.unref === 'function') e.auto.unref();
+        } catch (e) {
+          vozLimparTempo();
+          vozGravadorRef.current = null;
+          setVoz({ fase: 'erro', erro: rotuloErroVoz(e) });
+        }
+      };
+      const aoTocarVoz = () => {
+        if (voz && voz.fase === 'a-gravar') { encerrarVoz(); return; }
+        if (voz && voz.fase === 'a-transcrever') return;
+        comecarVoz();
+      };
+      const repetirVoz = () => {
+        const u = vozUltimoRef.current;
+        if (u && u.blob) transcreverEInserir(u.blob);
+        else comecarVoz();
+      };
+
       const linha = (l) => {
         switch (l.tipo) {
           case 'data':
@@ -6133,7 +7090,7 @@ function criarMotorExpressoes(opts) {
           case 'msg': {
             const longo = l.texto.length > TEXTO_LONGO;
             const curto = longo && !abertos.has(l.key);
-            const segmentos = l.segmentos || segmentosEmCache(curto ? `${l.texto.slice(0, TEXTO_LONGO).trimEnd()}…` : l.texto);
+            const segmentos = l.segmentos || segmentosEmCache(curto ? cortarSeguro(l.texto, TEXTO_LONGO) : l.texto);
             const classes = ['wg-tel-msg', `wg-tel-${l.lado}`, `wg-tel-est-${l.estado}`];
             if (l.inicioGrupo) classes.push('wg-tel-inicio');
             if (l.cauda) classes.push('wg-tel-cauda');
@@ -6186,6 +7143,8 @@ function criarMotorExpressoes(opts) {
             : conv.fase === 'a-abrir' ? 'A abrir a conversa…'
               : 'Ainda sem mensagens. Escreva a primeira.')
         : null;
+      // Há chave da API OpenAI guardada? (Determina o que o microfone faz.)
+      const temChave = !!vozConfig().chaveOpenAI;
       const avatar = m && m.avatarChave
         ? h('div', {
           className: 'wg-tel-avatar', 'aria-hidden': 'true',
@@ -6229,9 +7188,47 @@ function criarMotorExpressoes(opts) {
             vazio ? h('div', { className: 'wg-tel-vazio' }, vazio) : null,
             ...linhas.map(linha)),
           h('div', { className: 'wg-tel-entrada' },
-            // Microfone ao lado do campo (era o "+" dos anexos) — decorativo,
-            // como era o dos anexos: voz é no DSH.
-            h('button', { type: 'button', className: 'wg-tel-voz', disabled: true, 'aria-label': 'Mensagem de voz (use o DSH)', title: 'Mensagem de voz: use o DSH' }, ICONES_TELEFONE.microfone()),
+            // Microfone ao lado do campo (era o "+" dos anexos): grava a
+            // mensagem de voz, mostra o nível enquanto se fala e transcreve-a
+            // para a caixa (§10 do contrato). Sem chave da API guardada, o
+            // botão está ATIVO mas o toque abre as Definições — o título
+            // explica ("use o DSH" era o comportamento antigo, sem gravação).
+            voz
+              ? h('div', {
+                className: `wg-tel-voz-estado${voz.fase === 'erro' ? ' wg-tel-voz-erro' : ''}`,
+                role: 'status', 'data-fase': voz.fase,
+              },
+                voz.fase === 'a-gravar'
+                  ? h('div', {
+                    className: 'wg-tel-voz-barras', 'aria-hidden': 'true',
+                    ref: (el) => { vozNiveisRef.current.barras = el; },
+                  }, ...Array.from({ length: VOZ_BARRAS }, (_, i) => h('span', { key: i })))
+                  : null,
+                voz.fase === 'a-gravar'
+                  ? h('div', { className: 'wg-tel-voz-estatico', 'aria-hidden': 'true' },
+                    h('i', { ref: (el) => { vozNiveisRef.current.estatico = el; } }))
+                  : null,
+                voz.fase === 'a-gravar'
+                  ? h('span', { className: 'wg-tel-voz-tempo' }, vozTempoTexto(voz.segundos || 0))
+                  : null,
+                h('span', { className: 'wg-tel-voz-dica' },
+                  voz.fase === 'a-gravar' ? 'Toque para parar'
+                    : voz.fase === 'a-transcrever' ? 'A transcrever…'
+                      : voz.erro || 'Não foi possível gravar.'),
+                voz.fase === 'erro'
+                  ? h('button', { type: 'button', className: 'wg-tel-voz-repetir', onClick: repetirVoz }, 'Tentar de novo')
+                  : null)
+              : null,
+            h('button', {
+              type: 'button', className: 'wg-tel-voz',
+              disabled: !podeEscrever || (voz && voz.fase === 'a-transcrever'),
+              ...(voz && voz.fase === 'a-gravar'
+                ? { 'aria-pressed': 'true', 'aria-label': 'Parar gravação', title: 'Parar gravação' }
+                : temChave
+                  ? { 'aria-pressed': 'false', 'aria-label': 'Gravar mensagem de voz', title: 'Gravar mensagem de voz' }
+                  : { 'aria-label': 'Mensagem de voz (use o DSH)', title: 'Mensagem de voz: use o DSH' }),
+              onClick: aoTocarVoz,
+            }, ICONES_TELEFONE.microfone()),
             h('div', {
               className: 'wg-tel-campo',
               // Clicar em qualquer ponto da cápsula (borda, microfone) leva o foco à caixa.
@@ -6296,7 +7293,7 @@ function criarMotorExpressoes(opts) {
 
     // Tela "Grupos": a lista de workspaces (o "Messages" do nosso iMessage).
     function TelefoneGrupos(props) {
-      const { grupos, abrirGrupo, fechar, podeFechar } = props;
+      const { grupos, abrirGrupo, fechar, podeFechar, abrirConfig } = props;
       const [, setTick] = react.useState(0);
       const [agora, setAgora] = react.useState(() => Date.now());
       react.useEffect(() => {
@@ -6336,7 +7333,19 @@ function criarMotorExpressoes(opts) {
                 h('div', { className: 'wg-tel-grupo-texto' },
                   h('div', { className: 'wg-tel-grupo-nome' }, g.nome),
                   h('div', { className: 'wg-tel-grupo-sub' }, g.subtitulo)),
-                h('span', { className: 'wg-tel-grupo-seta', 'aria-hidden': 'true' }, ICONES_TELEFONE.chevron())))),
+                h('span', { className: 'wg-tel-grupo-seta', 'aria-hidden': 'true' }, ICONES_TELEFONE.chevron()))),
+            // Definições (a engrenagem do fim da lista): a chave da API
+            // OpenAI para a voz e a transcrição das mensagens.
+            h('button', {
+              type: 'button', className: 'wg-tel-grupo-linha', role: 'listitem',
+              title: 'Configurações — chave da API OpenAI', 'aria-label': 'Abrir as Configurações',
+              onClick: () => { if (typeof abrirConfig === 'function') abrirConfig(); },
+            },
+              h('span', { className: 'wg-tel-config-icone', 'aria-hidden': 'true' }, ICONES_TELEFONE.engrenagem()),
+              h('div', { className: 'wg-tel-grupo-texto' },
+                h('div', { className: 'wg-tel-grupo-nome' }, 'Configurações'),
+                h('div', { className: 'wg-tel-grupo-sub' }, 'Chave da API OpenAI · voz e transcrição')),
+              h('span', { className: 'wg-tel-grupo-seta', 'aria-hidden': 'true' }, ICONES_TELEFONE.chevron()))),
           h('div', { className: 'wg-tel-home', 'aria-hidden': 'true' })));
     }
 
@@ -6421,7 +7430,7 @@ function criarMotorExpressoes(opts) {
             // crases soltas, palavras cortadas.
             const longo = l.texto.length > TEXTO_LONGO;
             const curto = longo && !abertos.has(l.key);
-            const segmentos = l.segmentos || segmentosEmCache(curto ? `${l.texto.slice(0, TEXTO_LONGO).trimEnd()}…` : l.texto);
+            const segmentos = l.segmentos || segmentosEmCache(curto ? cortarSeguro(l.texto, TEXTO_LONGO) : l.texto);
             return h('div', {
               key: l.key, className: classes.join(' '), 'data-lado': l.lado, 'data-session-id': l.membro.id,
               ...(meu ? {} : {
@@ -6486,6 +7495,77 @@ function criarMotorExpressoes(opts) {
 
     const TelefoneGruposMemo = typeof react.memo === 'function' ? react.memo(TelefoneGrupos) : TelefoneGrupos;
     const TelefoneGrupoMemo = typeof react.memo === 'function' ? react.memo(TelefoneGrupo) : TelefoneGrupo;
+
+    // Tela "Configurações" (vista 'config' da pilha do celular): a chave da
+    // API OpenAI que a voz precisa para transcrever. A chave fica SÓ no
+    // localStorage deste navegador (CHAVE_CONFIG), mostra-se sempre mascarada
+    // e nunca vai para registos nem para o DOM por innerHTML — são nós de
+    // texto React como tudo o resto.
+    function TelefoneConfig(props) {
+      const guardada = lerConfig(storageDaJanela());
+      const [chave, setChave] = react.useState('');
+      const [idioma, setIdioma] = react.useState(guardada.idioma);
+      const [nota, setNota] = react.useState('');
+      const [agora, setAgora] = react.useState(() => Date.now());
+      react.useEffect(() => {
+        const relogio = setInterval(() => setAgora(Date.now()), 20000);
+        return () => clearInterval(relogio);
+      }, []);
+      const guardar = () => {
+        // Escrever vazio mantém a chave já guardada (apaga-se com "Limpar").
+        const ok = guardarConfig(storageDaJanela(), {
+          chaveOpenAI: chave.trim() || guardada.chaveOpenAI,
+          idioma,
+        });
+        setChave('');
+        setNota(ok ? 'Guardado neste navegador.' : 'Não deu para guardar (armazenamento bloqueado).');
+      };
+      const limpar = () => {
+        const ok = limparConfig(storageDaJanela());
+        setChave('');
+        setNota(ok ? 'Chave removida.' : 'Não deu para remover a chave.');
+      };
+      return h('section', {
+        className: `wg-telefone${props.entrada === false ? ' wg-tel-sem-entrada' : ''}`,
+        role: 'dialog', 'aria-label': 'Definições', 'data-vista': 'config',
+      },
+        h('div', { className: 'wg-tel-ecra' },
+          h('div', { className: 'wg-tel-ilha', 'aria-hidden': 'true' }),
+          topoTel({
+            agora,
+            voltar: 'Grupos', aoVoltar: props.voltar,
+            voltarTitulo: 'Voltar aos grupos',
+            avatar: avatarIniciais('C'),
+            nome: 'Configurações',
+            subtitulo: 'Chave da API OpenAI',
+          }),
+          h('div', { className: 'wg-tel-lista wg-tel-config' },
+            h('label', { className: 'wg-tel-config-rotulo', htmlFor: 'wg-tel-config-chave' }, 'Chave da API OpenAI'),
+            h('input', {
+              id: 'wg-tel-config-chave', className: 'wg-tel-config-chave', type: 'password',
+              value: chave, placeholder: 'sk-…', autoComplete: 'off', spellCheck: 'false',
+              'aria-label': 'Chave da API OpenAI', onChange: (e) => setChave(e.target.value),
+            }),
+            h('p', { className: 'wg-tel-config-guardada' },
+              guardada.chaveOpenAI ? `Guardada: ${mascararChave(guardada.chaveOpenAI)}` : 'Sem chave guardada.'),
+            h('label', { className: 'wg-tel-config-rotulo', htmlFor: 'wg-tel-config-idioma' }, 'Idioma da transcrição'),
+            h('select', {
+              id: 'wg-tel-config-idioma', className: 'wg-tel-config-idioma', value: idioma,
+              'aria-label': 'Idioma da transcrição', onChange: (e) => setIdioma(e.target.value),
+            },
+              h('option', { value: 'auto' }, 'Automático (detetar)'),
+              h('option', { value: 'pt' }, 'Português'),
+              h('option', { value: 'en' }, 'Inglês')),
+            h('div', { className: 'wg-tel-config-acoes' },
+              h('button', { type: 'button', className: 'wg-tel-config-guardar', onClick: guardar }, 'Guardar'),
+              h('button', { type: 'button', className: 'wg-tel-config-limpar', onClick: limpar }, 'Limpar chave')),
+            h('p', { className: 'wg-tel-config-nota', role: 'status' }, nota),
+            h('p', { className: 'wg-tel-config-aviso' },
+              'A chave fica neste navegador (localStorage). Usa uma chave dedicada com limite de gasto; revoga-a em platform.openai.com se a perderes.')),
+          h('div', { className: 'wg-tel-home', 'aria-hidden': 'true' })));
+    }
+
+    const TelefoneConfigMemo = typeof react.memo === 'function' ? react.memo(TelefoneConfig) : TelefoneConfig;
 
     const TelefoneMemo = typeof react.memo === 'function' ? react.memo(TelefoneConversa) : TelefoneConversa;
 
@@ -7148,7 +8228,16 @@ function criarMotorExpressoes(opts) {
                     const g = grupos.find((x) => x.id === id);
                     if (typeof props.abrirGrupo === 'function') props.abrirGrupo(id, g ? g.membros : []);
                   },
+                  abrirConfig: () => { if (typeof props.abrirConfig === 'function') props.abrirConfig(); },
                   fechar: celular ? fecharModoJogo : fecharTelefone, podeFechar: !celular,
+                });
+              }
+              if (vistaTel === 'config') {
+                // Definições (chave da API OpenAI para voz/transcrição): o
+                // "‹" volta aos grupos (a pilha do celular: config → grupos).
+                return h(TelefoneConfigMemo, {
+                  key: 'config', entrada,
+                  voltar: () => { if (typeof props.voltarTelefone === 'function') props.voltarTelefone(); },
                 });
               }
               if (vistaTel === 'grupo' && grupoAtual) {
@@ -7167,6 +8256,8 @@ function criarMotorExpressoes(opts) {
                   sessionId: modelo.id, nome: modelo.nome, avatarChave: modelo.avatarChave,
                   titulo: modelo.titulo, estadoRotulo: modelo.estado.rotulo, fechar: fecharTelefone,
                   voltar: () => { if (typeof props.voltarTelefone === 'function') props.voltarTelefone(); },
+                  // Sem chave da API, o microfone abre as Definições.
+                  abrirConfig: () => { if (typeof props.abrirConfig === 'function') props.abrirConfig(); },
                   voltarRotulo: telefone.origem === 'grupo' && telefone.grupoId
                     ? cortar((grupos.find((x) => x.id === telefone.grupoId) || {}).nome || 'Grupo', 10)
                     : 'Grupos',
@@ -7621,6 +8712,15 @@ function criarMotorExpressoes(opts) {
           trace('telefone-grupos', null);
           notificar();
         },
+        // Vista "Configurações" (a engrenagem dos Grupos): a chave da API
+        // OpenAI que a voz precisa para transcrever (§10 do contrato).
+        abrirConfig: () => {
+          soltarConversa();
+          soltarGrupo();
+          telefone = { aberto: true, sessionId: null, vista: 'config', grupoId: null, origem: 'cena' };
+          trace('telefone-config', null);
+          notificar();
+        },
         // Vista "Grupo": o feed de TODOS os membros daquele workspace a falar e
         // a escrever. `membros` = lugares da mesa do workspace (ordem da sala).
         abrirGrupo: (wsId, membros = []) => {
@@ -7639,9 +8739,17 @@ function criarMotorExpressoes(opts) {
           trace('telefone-grupo', wsId);
           notificar();
         },
-        // "‹" do celular: sobe a pilha (conversa → grupo → grupos). Na raiz,
-        // fecha no desktop; no telemóvel não fecha (o celular É o ecrã).
+        // "‹" do celular: sobe a pilha (conversa → grupo → grupos; config →
+        // grupos). Na raiz, fecha no desktop; no telemóvel não fecha (o
+        // celular É o ecrã).
         voltarTelefone: () => {
+          if (telefone.vista === 'config') {
+            // As Definições abrem-se dos Grupos: o "‹" volta lá (nunca fecha).
+            soltarConversa();
+            telefone = { aberto: true, sessionId: null, vista: 'grupos', grupoId: null, origem: 'cena' };
+            notificar();
+            return;
+          }
           if (telefone.vista === 'conversa' && telefone.origem === 'grupo' && telefone.grupoId) {
             soltarConversa();
             telefone = { ...telefone, vista: 'grupo', sessionId: null };
@@ -7930,6 +9038,10 @@ function criarMotorExpressoes(opts) {
     exports.__linhasDoTelefone = linhasDoTelefone;
     exports.__aEscrever = aEscrever;
     exports.__segmentosDeTexto = segmentosDeTexto;
+    exports.__segmentosEmCache = segmentosEmCache;
+    exports.__cortarSeguro = cortarSeguro;
+    exports.__conteudoDe = conteudoDe;
+    exports.__conteudoDaBolha = conteudoDaBolha;
     exports.__celulasDaTabela = celulasDaTabela;
     exports.__historicoDaConversa = historicoDaConversa;
     exports.__resumoArgs = resumoArgs;
@@ -7938,6 +9050,7 @@ function criarMotorExpressoes(opts) {
     exports.__criarVigiaMensagens = criarVigiaMensagens;
     exports.__linhasDoGrupo = linhasDoGrupo;
     exports.__TelefoneConversa = TelefoneConversa; // seam de testes: render sem browser
+    exports.__TelefoneGrupo = TelefoneGrupo; // seam de testes: o feed do grupo, render sem browser
     exports.__emCelular = emCelular;
     exports.__partilhaReduz = partilhaReduz;
     exports.__PARTILHA_INICIAL = PARTILHA_INICIAL;
@@ -7968,6 +9081,15 @@ function criarMotorExpressoes(opts) {
     exports.__pararComSubagentes = pararComSubagentes;
     exports.__FONTE_TELEFONE = FONTE_TELEFONE;
     exports.__MAX_ITENS_TELEFONE = MAX_ITENS_TELEFONE;
+    // Voz e transcrição (voz.js embutido, secção 1-ter) — a superfície do
+    // módulo para os testes (matemática do nível, gravador, API e config).
+    exports.__voz = {
+      VOZ_MODELOS, VOZ_LIMITE_BYTES, VOZ_DURACAO_MAX_MS, VOZ_URL_TRANSCRICAO, CHAVE_CONFIG,
+      escolherMimeType, rmsParaDb, suavizarDb, dbParaAltura,
+      criarGravadorVoz, transcreverAudio,
+      lerConfig, guardarConfig, limparConfig, mascararChave,
+    };
+    exports.__TelefoneConfig = TelefoneConfig; // seam de testes: render sem browser
 
     try { window.__wgDiag = (window.__wgDiag || '') + '|factory:fim'; } catch { /* sem window */ }
     return module.exports;
