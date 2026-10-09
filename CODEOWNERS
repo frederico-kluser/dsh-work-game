@@ -1,0 +1,18 @@
+# CODEOWNERS — dsh-work-game
+#
+# Review obligation: every change MUST be approved by the owner of the affected
+# paths before it can be merged (code owner review is required by repository
+# rulesets). The last matching pattern wins; keep the most specific rules at the
+# bottom.
+#
+# Repository hygiene: do not commit generated artifacts or large binaries —
+# keep the tree lean (source, SVG assets and screenshots only).
+
+# Default owner for everything in the repository.
+*       @frederico-kluser
+
+# Documentation: the owner reviews every markdown change.
+*.md    @frederico-kluser
+
+# CI/CD, workflows, and repository configuration.
+/.github/ @frederico-kluser
