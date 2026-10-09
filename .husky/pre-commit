@@ -1,0 +1,10 @@
+#!/usr/bin/env sh
+# .husky/pre-commit — higiene rápida antes do commit (zero dependências).
+# Corre `node --check` sobre os scripts staged: apanha erros de sintaxe
+# sem custo. O CI continua a ser o gate final (npm test).
+set -e
+
+git diff --cached --name-only --diff-filter=ACM | grep -E '\.(m?js|cjs)$' | while IFS= read -r f; do
+  echo "pre-commit: node --check $f"
+  node --check "$f" || exit 1
+done

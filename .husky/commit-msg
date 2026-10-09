@@ -1,0 +1,26 @@
+#!/usr/bin/env sh
+# .husky/commit-msg — Gate 1: Commits Convencionais (zero dependências).
+# Rejeita mensagens fora de `tipo(escopo)!: descrição` (máx. 72 chars).
+# Se o commitlint estiver instalado localmente, delega nele (regras em
+# commitlint.config.js); caso contrário aplica o mesmo contrato embutido.
+# Ative os hooks com: git config core.hooksPath .husky
+set -e
+
+arquivo="$1"
+
+if [ -x node_modules/.bin/commitlint ]; then
+  exec node_modules/.bin/commitlint --edit "$arquivo"
+fi
+
+assunto=$(head -n 1 "$arquivo")
+
+printf '%s' "$assunto" | grep -Eq '^(feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert)(\([^)]*\))?!?: .+' || {
+  echo "commit-msg: cabeçalho fora do padrão Convencional: '$assunto'" >&2
+  echo "formato exigido: tipo(escopo)!: descrição — ex.: fix(auth): corrige validação de token" >&2
+  exit 1
+}
+
+[ "${#assunto}" -le 72 ] || {
+  echo "commit-msg: cabeçalho com ${#assunto} chars (máx. 72)" >&2
+  exit 1
+}
