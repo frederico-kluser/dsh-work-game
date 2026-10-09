@@ -1,4 +1,11 @@
 # dsh-work-game — o escritório 2D dos seus agentes
+<p align="center">
+  <a href="https://github.com/frederico-kluser/dsh-work-game/actions/workflows/ci.yml"><img src="https://github.com/frederico-kluser/dsh-work-game/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="https://securityscorecards.dev/viewer/?uri=github.com/frederico-kluser/dsh-work-game"><img src="https://api.securityscorecards.dev/projects/github.com/frederico-kluser/dsh-work-game/badge" alt="OpenSSF Scorecard"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License: MIT"></a>
+  <a href="https://img.shields.io/badge/node-%3E%3D22-brightgreen.svg"><img src="https://img.shields.io/badge/node-%3E%3D22-brightgreen.svg" alt="Node: &gt;=22"></a>
+  <a href="https://img.shields.io/badge/tests-414%20passing-blue.svg"><img src="https://img.shields.io/badge/tests-414%20passing-blue.svg" alt="Tests: 414 passing"></a>
+</p>
 
 **Front-end puro em HTML, CSS, JavaScript e SVG — zero dependências, zero build, zero backend.** Uma sala onde times de agentes trabalham lado a lado, com mesas modulares, balões de output e expressões que mudam com o estado de cada pessoa. Duas formas de a ver: a **demo** (tudo simulado em memória) e o **Modo jogo** dentro do DeepSeek Harness (DSH), com as conversas e os workspaces reais.
 
@@ -221,6 +228,10 @@ Na demo: arranque com a cena-semente, zero requisições externas, inspetor com 
 - **Avataaars**: bustos e expressões baseados na biblioteca [Avataaars](https://github.com/fangpenlin/avataaars) — design original de **Pablo Stanley**, implementação de **Fang-Pen Lin** — sob licença MIT.
 - **avataaars.io** foi usado apenas para baixar os SVGs durante o desenvolvimento; a demo não consulta o serviço em runtime.
 - **Atribuições completas**: [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md); proveniência dos avatares em [assets/AVATARS-SOURCES.md](assets/AVATARS-SOURCES.md) e [assets/AVATARS-EXPRESSIONS.md](assets/AVATARS-EXPRESSIONS.md).
+
+## Contribuindo
+
+Contribuições são bem-vindas — ver [CONTRIBUTING.md](CONTRIBUTING.md) para o fluxo (ramos efémeros, Commits Convencionais, squash merge), [SECURITY.md](SECURITY.md) para relatórios privados de vulnerabilidade e [CHANGELOG.md](CHANGELOG.md) para o histórico gerado. O projeto adota o [Código de Conduta](CODE_OF_CONDUCT.md).
 
 ## English summary
 
