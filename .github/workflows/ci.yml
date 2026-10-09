@@ -1,0 +1,73 @@
+# =============================================================================
+# CI — dsh-work-game (frederico-kluser/dsh-work-game)
+#
+# Projeto zero dependências: não há `npm ci` nem build — o teste é `npm test`
+# (node --test + Chrome/Chromium headless via CDP).
+#
+# NOTA (para o agente): as actions estão fixadas por SHA com
+# `bash scripts/oss-pin-actions.sh`. Formato obrigatório em TODOS os `uses:`:
+#     owner/repo@<PIN_SHA> # vX.Y.Z
+#
+# CONTEXT DE REQUIRED STATUS CHECK: o ruleset exige o NOME DO JOB `build`.
+# A matriz gera nomes instáveis ("test (22, ubuntu-latest)"), por isso o job
+# agregador `build` (nome estável) é o contexto exigido em
+# .github/rulesets/regras-main.json → required_status_checks[].context.
+# =============================================================================
+
+name: CI
+
+on:
+  push:
+    branches:
+      - "main"
+  pull_request:
+  workflow_dispatch:
+
+# Privilégio mínimo: o CI só precisa de ler o repositório.
+permissions:
+  contents: read
+
+# Evita corridas duplicadas e desperdiçadas no mesmo PR/ramo.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: test (node ${{ matrix.node }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ["22", "24"]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ matrix.node }}
+
+      - name: Browser disponível para os testes funcionais
+        run: google-chrome --version
+
+      - name: Testar
+        run: npm test
+
+  # Agregador estável: é o `context` exigido pelo ruleset de main.
+  build:
+    name: build
+    needs: [test]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Falhar se algum teste falhou
+        run: |
+          if [ "${{ needs.test.result }}" != "success" ]; then
+            echo "test falhou: ${{ needs.test.result }}"
+            exit 1
+          fi
+          echo "### build ✅ (testes verdes em node 22 e 24)" >> "$GITHUB_STEP_SUMMARY"

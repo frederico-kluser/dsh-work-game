@@ -1,0 +1,58 @@
+# =============================================================================
+# codeql — análise estática (SAST) com CodeQL · opensource-project
+#
+# NOTA (para o agente):
+#   * O CodeQL interpreta o código e sobe alertas para o tab Security →
+#     Code scanning; combina com secret scanning e OpenSSF Scorecard.
+#   * `security-events: write` é necessário para submeter SARIF e fica
+#     restrito A ESTE JOB (menor privilégio pontual).
+#   * Actions fixadas por SHA (`bash scripts/oss-pin-actions.sh`).
+# =============================================================================
+
+name: codeql
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+  schedule:
+    - cron: "0 6 * * 1" # segunda-feira às 06:00 UTC
+
+permissions:
+  contents: read
+
+concurrency:
+  group: codeql-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  analyze:
+    name: analyze (${{ matrix.language }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      security-events: write # upload de SARIF — só aqui
+    strategy:
+      fail-fast: false
+      matrix:
+        language: [javascript-typescript]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@24c54180a607b1449ed407dd24f251e4e9147c8d # v4.38.3
+        with:
+          languages: ${{ matrix.language }}
+
+      # JavaScript/TypeScript é interpretado: sem passo de build.
+
+      - name: Perform CodeQL analysis
+        uses: github/codeql-action/analyze@24c54180a607b1449ed407dd24f251e4e9147c8d # v4.38.3
+        with:
+          category: "/language:${{ matrix.language }}"
+
+      - name: Sumário do run
+        run: echo "### codeql ✅" >> "$GITHUB_STEP_SUMMARY"

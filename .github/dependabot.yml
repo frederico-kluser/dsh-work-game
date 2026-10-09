@@ -1,0 +1,15 @@
+# Dependabot — atualizações automáticas e seguras.
+# O projeto tem zero dependências runtime; o ecossistema `github-actions`
+# mantém as actions fixadas por SHA atualizadas (as atualizações chegam como PR
+# e passam pelos mesmos gates de revisão que qualquer outra alteração).
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    commit-message:
+      prefix: "ci"
+    labels:
+      - "dependencies"
+    open-pull-requests-limit: 5
