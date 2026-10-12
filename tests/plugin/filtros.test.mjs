@@ -66,6 +66,13 @@ const wsDsh = (items, archived = []) => ({ fonte: 'dsh', items, archived });
 const w = (id, title, sessionIds, path = `/Users/u/Projects/${title}`) => ({ id, title, path, sessionIds });
 const sentadas = (l) => l.modules.flatMap((m) => m.seats).filter((s) => typeof s === 'string');
 const ESCONDIDAS_LIMPAS = { total: 0, arquivadas: 0, emBranco: 0, semWorkspace: 0, paradas: 0, fechados: 0, arquivoDesconhecido: 0 };
+// Vista de referência dos testes de FEATURE: tudo o que a sala mostra quando
+// NENHUM filtro esconde nada. Os testes não dependem dos padrões de arranque
+// (desde 2026-10-12 o arranque é SEMPRE só "Só quem está a trabalhar" ativo).
+const BASE_TESTE = Object.freeze({
+  mostrarArquivadas: false, mostrarSemWorkspace: true, soTrabalhando: false,
+  mostrarEmBranco: false, mostrarAbertos: true,
+});
 
 /* ---------- serviços falsos do DSH (superfície real) ---------- */
 function criarFonte(inicial) {
@@ -150,13 +157,13 @@ test('arquivo: com o arquivo CONHECIDO as arquivadas não se sentam por omissão
   const view = B.__officeView(e);
   const pessoas = Object.values(view.people);
 
-  const l = B.__montarEscritorio(pessoas, view.workspaces);
+  const l = B.__montarEscritorio(pessoas, view.workspaces, BASE_TESTE);
   assert.deepEqual(sentadas(l), ['a']);
   assert.deepEqual(l.escondidas, { ...ESCONDIDAS_LIMPAS, total: 1, arquivadas: 1 });
   assert.deepEqual([...l.arquivadas], [], 'escondidas não levam a ficha cinzenta');
 
   // O interruptor mantém-se: ligado, sentam-se com a ficha "Arquivada" em cinzento.
-  const comArquivadas = B.__montarEscritorio(pessoas, view.workspaces, { mostrarArquivadas: true });
+  const comArquivadas = B.__montarEscritorio(pessoas, view.workspaces, { ...BASE_TESTE, mostrarArquivadas: true });
   assert.deepEqual(sentadas(comArquivadas), ['a', 'arq']);
   assert.deepEqual([...comArquivadas.arquivadas], ['arq']);
   assert.equal(comArquivadas.escondidas.total, 0);
@@ -170,14 +177,14 @@ test('arquivo DESCONHECIDO: ninguém é escondido por arquivamento e as sentadas
   ];
   // Antes da baseline (sem dados) e com evento sem lista: o mesmo.
   for (const ws of [null, { fonte: 'dsh', items: [w('w1', 'site', ['a', 'b'])], archived: null }]) {
-    const l = B.__montarEscritorio(pessoas, ws);
+    const l = B.__montarEscritorio(pessoas, ws, BASE_TESTE);
     assert.deepEqual(sentadas(l).sort(), ['a', 'b', 'sub'].sort(), 'sem conhecimento de arquivo ninguém sai por arquivamento');
     assert.equal(l.escondidas.arquivadas, 0);
     assert.equal(l.escondidas.arquivoDesconhecido, 2, 'as conversas sentadas contam à parte (o subagente não)');
     assert.deepEqual({ ...l.escondidas, arquivoDesconhecido: 0 }, { ...ESCONDIDAS_LIMPAS, arquivoDesconhecido: 0 });
   }
   // Nunca "limpo": o resumo do menu diz que o arquivo é desconhecido.
-  const l = B.__montarEscritorio(pessoas, null);
+  const l = B.__montarEscritorio(pessoas, null, BASE_TESTE);
   assert.equal(B.__resumoFiltros(l.escondidas), 'Ninguém escondido · 2 com arquivo desconhecido');
   // Com o arquivo conhecido e nada escondido, o resumo normal.
   assert.equal(B.__resumoFiltros(ESCONDIDAS_LIMPAS), 'Ninguém escondido pelos filtros');
@@ -197,16 +204,16 @@ test('grupos (celular): as arquivadas não entram quando o filtro as oculta — 
 test('mostrarAbertos: workspace aberto sem ação mantém as pessoas sentadas (em branco + paradas)', () => {
   const pessoas = [pessoa('vazia', { blank: true }), pessoa('parada')];
   const ws = wsDsh([w('w1', 'site', ['vazia', 'parada'])]);
-  // Padrão (mostrarAbertos): o workspace aberto mantém TODOS mesmo sem ação.
-  for (const l of [B.__montarEscritorio(pessoas, ws), B.__montarEscritorio(pessoas, ws, { soTrabalhando: true })]) {
+  // mostrarAbertos ligado: o workspace aberto mantém TODOS mesmo sem ação.
+  for (const l of [B.__montarEscritorio(pessoas, ws, BASE_TESTE), B.__montarEscritorio(pessoas, ws, { ...BASE_TESTE, soTrabalhando: true })]) {
     assert.deepEqual(sentadas(l), ['vazia', 'parada']);
     assert.deepEqual(l.escondidas, { ...ESCONDIDAS_LIMPAS });
   }
   // A mesa não sai mesmo sem ninguém a trabalhar.
-  const t = B.__montarEscritorio(pessoas, ws, { soTrabalhando: true });
+  const t = B.__montarEscritorio(pessoas, ws, { ...BASE_TESTE, soTrabalhando: true });
   assert.deepEqual(t.modules.map((m) => [m.teamId, m.seats]), [['ws:w1', ['vazia', 'parada', null, null]]]);
   // Desligado: o comportamento antigo exato (em branco e paradas escondidas).
-  const off = B.__montarEscritorio(pessoas, ws, { mostrarAbertos: false, soTrabalhando: true });
+  const off = B.__montarEscritorio(pessoas, ws, { ...BASE_TESTE, mostrarAbertos: false, soTrabalhando: true });
   assert.deepEqual(sentadas(off), []);
   assert.deepEqual(off.escondidas, { ...ESCONDIDAS_LIMPAS, total: 2, emBranco: 1, paradas: 1, fechados: 1 }, 'a mesa suprimida conta como workspace FECHADO');
 });
@@ -215,14 +222,14 @@ test('mostrarAbertos: só workspaces abertos se mantêm — fechados contam à p
   // w1 aberto (a presente e não arquivada); w2 sem pessoas = fechado.
   const pessoas = [pessoa('a', { running: true, status: 'working' }), pessoa('orfa')];
   const ws = wsDsh([w('w1', 'site', ['a']), w('w2', 'vazio', [])], []);
-  const l = B.__montarEscritorio(pessoas, ws, { soTrabalhando: true });
+  const l = B.__montarEscritorio(pessoas, ws, { ...BASE_TESTE, soTrabalhando: true });
   assert.deepEqual(l.modules.map((m) => m.teamId), ['ws:w1'], 'w1 (aberto) mantém-se; w2 (sem pessoas) sai da sala');
   assert.equal(l.escondidas.fechados, 1);
   assert.equal(l.escondidas.paradas, 1, 'a órfã parada esconde-se: "Sem workspace" não é workspace');
   assert.equal(B.__detalheEscondidas(l.escondidas), '1 parada · 1 workspace fechado');
 
   // "Sem workspace" não é workspace: as órfãs paradas continuam a esconder-se.
-  const orfa = B.__montarEscritorio([pessoa('orfa')], wsDsh([]), { soTrabalhando: true });
+  const orfa = B.__montarEscritorio([pessoa('orfa')], wsDsh([]), { ...BASE_TESTE, soTrabalhando: true });
   assert.deepEqual(sentadas(orfa), []);
   assert.deepEqual(orfa.escondidas, { ...ESCONDIDAS_LIMPAS, total: 1, paradas: 1 });
 
@@ -230,7 +237,7 @@ test('mostrarAbertos: só workspaces abertos se mantêm — fechados contam à p
   const soArq = B.__montarEscritorio(
     [pessoa('arq', { blank: true })],
     wsDsh([w('w1', 'site', ['arq'])], ['arq']),
-    { soTrabalhando: true, mostrarArquivadas: false },
+    { ...BASE_TESTE, soTrabalhando: true },
   );
   assert.deepEqual(sentadas(soArq), []);
   assert.deepEqual(soArq.escondidas, { ...ESCONDIDAS_LIMPAS, total: 1, arquivadas: 1, fechados: 1 });
@@ -247,14 +254,19 @@ test('escondidas: o detalhe e o resumo refletem fechados e arquivo desconhecido'
   assert.equal(B.__textoEscondidas({ total: 2 }), '2 escondidas pelos filtros');
 });
 
-test('mostrarAbertos: rótulo, ajuda e compatibilidade com payloads antigos de localStorage', () => {
+test('arranque: apenas "Só quem está a trabalhar" ativo; normalizar completa com o padrão', () => {
   const ui = B.__FILTROS_UI.find((f) => f.chave === 'mostrarAbertos');
   assert.equal(ui.rotulo, 'Manter workspaces abertos sem ação');
   assert.ok(ui.ajuda && ui.ajuda.length > 10, 'com texto de ajuda em pt-PT');
-  assert.equal(B.__FILTROS_PADRAO.mostrarAbertos, true, 'padrão: manter abertos');
-  // Payload antigo (sem a chave): completa com o padrão verdadeiro.
+  // ARRANQUE (pedido do utilizador, 2026-10-12): SEMPRE só "Só quem está a
+  // trabalhar" ativo — todos os outros interruptores arrancam desligados.
+  assert.deepEqual({ ...B.__FILTROS_PADRAO }, {
+    mostrarArquivadas: false, mostrarSemWorkspace: false, soTrabalhando: true,
+    mostrarEmBranco: false, mostrarAbertos: false,
+  }, 'arranque: apenas "Só quem está a trabalhar" ativo');
+  // Payload antigo (sem chaves novas): completa com o padrão atual.
   assert.deepEqual(B.__normalizarFiltros({ mostrarArquivadas: true, soTrabalhando: true }), {
-    mostrarArquivadas: true, mostrarSemWorkspace: true, soTrabalhando: true, mostrarEmBranco: false, mostrarAbertos: true,
+    mostrarArquivadas: true, mostrarSemWorkspace: false, soTrabalhando: true, mostrarEmBranco: false, mostrarAbertos: false,
   });
   assert.equal(B.__normalizarFiltros({ mostrarAbertos: false }).mostrarAbertos, false, 'e aceita o novo campo quando existe');
 });

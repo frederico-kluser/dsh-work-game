@@ -11,8 +11,9 @@
  *     (Q12, gatilho absoluto incluído) no Modo jogo;
  *   - `turn/end` aborted|interrupted desenha 'cancelado' (antes só completed e
  *     error desenhavam);
- *   - `question`/`approval` desenham 'pergunta'/'aprovacao' mas a cara visível
- *     é 'waiting' (vence as variantes — que ficam para as reações one-shot);
+ *   - `question`/`approval` desenham 'pergunta'/'aprovacao' e a cara visível é
+ *     A SUA variante de espera (própria de cada agente; 'waiting' em reserva) —
+ *     quem pergunta/aprova NUNCA dorme, nem com o turno parado;
  *   - `tool` result ok:false guarda 'ferramenta-erro' (grau 1) mas mantém a
  *     cara persistente 'error' (pin de tests/plugin/state.test.mjs:362);
  *   - identidades com 4 presets (r01..r12) caem na BASE do cenário;
@@ -125,21 +126,37 @@ test('wiring: turn/end aborted|interrupted desenha cancelado; Disponível dorme'
 });
 
 /* ------------------------------------------------------------------ */
-/* Pergunta/aprovação: 'waiting' vence as variantes                     */
+/* Pergunta/aprovação: a cara visível é A SUA cara de espera            */
 /* ------------------------------------------------------------------ */
 
-test('wiring: question/approval desenham pergunta/aprovacao mas a cara visível é waiting', () => {
+test('wiring: question/approval mostram A SUA cara de espera (própria de cada agente)', () => {
   let e = comDisparo(aCorrer());
   e = B.__applyEvent(e, { type: 'question', sessionId: 'a', id: 'q1', text: 'Posso?', at: 2000 });
   let p = pDe(e);
-  dentro(p.varianteEspera, EXPRESSOES_CENARIOS.pergunta.pool, 'variante de pergunta guardada (one-shot)');
+  dentro(p.varianteEspera, EXPRESSOES_CENARIOS.pergunta.pool, 'variante de pergunta guardada');
   assert.equal(p.expressaoCenario, 'pergunta');
-  assert.equal(caraDe(e), 'waiting', "'waiting' vence as variantes");
+  assert.equal(caraDe(e), p.varianteEspera, 'a cara visível é A SUA variante de espera (própria do agente)');
   e = B.__applyEvent(e, { type: 'question/answered', sessionId: 'a', id: 'q1', at: 2500 });
   e = B.__applyEvent(e, { type: 'approval', sessionId: 'a', id: 'ap1', toolName: 'bash', at: 3000 });
   p = pDe(e);
-  dentro(p.varianteEspera, EXPRESSOES_CENARIOS.aprovacao.pool, 'variante de aprovação guardada (one-shot)');
-  assert.equal(caraDe(e), 'waiting', 'quem espera aprovação também');
+  dentro(p.varianteEspera, EXPRESSOES_CENARIOS.aprovacao.pool, 'variante de aprovação guardada');
+  assert.equal(caraDe(e), p.varianteEspera, 'quem espera aprovação mostra A SUA cara de espera');
+});
+
+test('wiring: pergunta sem texto não fica falsy — quem pergunta NUNCA dorme', () => {
+  let e = comDisparo(aCorrer());
+  e = B.__applyEvent(e, { type: 'question', sessionId: 'a', id: 'q1', text: '', at: 2000 });
+  assert.equal(pDe(e).question, 'Pergunta', 'texto vazio/nulo ganha o marcador (nunca falsy)');
+  assert.notEqual(caraDe(e), 'sleeping', 'quem tem pergunta pendente nunca dorme');
+  assert.equal(caraDe(e), pDe(e).varianteEspera, 'mostra a cara de espera');
+});
+
+test('wiring: pergunta pendente + turno parado (status idle) continua sem dormir', () => {
+  let e = comDisparo(aCorrer());
+  e = B.__applyEvent(e, { type: 'question', sessionId: 'a', id: 'q1', text: 'E agora?', at: 2000 });
+  e = B.__applyEvent(e, { type: 'status', sessionId: 'a', status: 'idle', at: 3000 });
+  assert.notEqual(caraDe(e), 'sleeping', 'o status idle não manda na cara de quem espera resposta');
+  assert.equal(caraDe(e), pDe(e).varianteEspera, 'mantém a cara de espera');
 });
 
 /* ------------------------------------------------------------------ */

@@ -2205,6 +2205,9 @@ function mascararChave(chave) {
         subagents: 0, // subagentes A CORRER (delegação em curso) = subagentAtivos.size
         subagentAtivos: new Set(), // ids dos filhos ativos (dedupe entre ponte e adaptador)
         outputs: [],
+        // Resultado pronto POR VALIDAR: sinaliza-se na sala até alguém o VER
+        // (abrir a conversa no DSH ou clicar na janela da pessoa — ver validar()).
+        porVer: false,
         flags: {
           ocioso: true, concluido: false, erro: false, ferramenta: false,
           retry: false, compactacao: false,
@@ -2239,7 +2242,10 @@ function mascararChave(chave) {
       // Turno a correr sem sinal mais específico = a trabalhar (o catálogo do
       // DSH só diz running/idle — sem isto, quem trabalha aparecia "Disponível").
       if (!f.ocioso) return { e: '📝', status: 'working', prioridade: PRECEDENCIA.trabalho };
-      if (f.concluido) return { e: '✅', status: 'done', prioridade: PRECEDENCIA.concluido };
+      // Resultado pronto: o `concluido` transitório OU o "por validar" persistente
+      // (porVer sobrevive ao `status idle` que segue o fim do turno — a marca só
+      // desaparece quando alguém vê a conversa: ver validar()).
+      if (f.concluido || p.porVer) return { e: '✅', status: 'done', prioridade: PRECEDENCIA.concluido };
       return { e: '💤', status: 'idle', prioridade: PRECEDENCIA.ocioso };
     }
 
@@ -2329,8 +2335,10 @@ function mascararChave(chave) {
           const pessoa = p(evento.sessionId);
           if (!pessoa) break;
           // Em repouso, o Modo jogo desenha 'dormir' ANTES da mudança de
-          // estado (espelho de state.js) — quem fica Disponível dorme.
-          sortearDeEvento(pessoa, evento);
+          // estado (espelho de state.js) — quem fica Disponível dorme. Quem
+          // tem pergunta/aprovação pendente NUNCA desenha repouso: está à
+          // espera de resposta, não a dormir.
+          if (!pessoa.question && pessoa.approvals.length === 0) sortearDeEvento(pessoa, evento);
           const emExecucao = evento.status === 'running';
           // Só transições entram na linha do tempo; o 1.º `status` é o que já
           // se passava quando o painel abriu (parado não conta).
@@ -2371,16 +2379,21 @@ function mascararChave(chave) {
           if (kind === 'completed') {
             pessoa.flags.erro = false;
             pessoa.flags.concluido = true;
+            // Resultado pronto, POR VALIDAR: sinaliza na sala até alguém ver a
+            // conversa (abrir no DSH ou clicar na janela) — ver validar().
+            pessoa.porVer = true;
             adicionarOutput(pessoa, 'result', 'turno concluído');
           } else if (kind === 'error' || kind === 'blocked' || kind === 'max-tokens') {
             pessoa.flags.erro = true;
             pessoa.flags.concluido = false;
+            pessoa.porVer = false;
             adicionarOutput(pessoa, 'message', kind === 'error' ? 'erro no turno' : kind === 'blocked' ? 'bloqueado' : 'máx. de tokens');
           } else {
             // aborted | interrupted — interrupção não é erro: desenha-se
             // 'cancelado' (pool disbelief·waiting·idle) e a cara fica guardada.
             pessoa.flags.erro = false;
             pessoa.flags.concluido = false;
+            pessoa.porVer = false;
             adicionarOutput(pessoa, 'message', 'interrompido');
           }
           break;
@@ -2394,6 +2407,13 @@ function mascararChave(chave) {
           const pessoa = p(evento.sessionId);
           if (!pessoa) break;
           sortearDeEvento(pessoa, evento);
+          // Mensagem do UTILIZADOR = novo turno ativo: a conversa voltou a ter
+          // trabalho (uma pergunta feita ao bot não o deixa "dormido" à espera
+          // do 1.º `status running` — o bot passa já a Trabalhando).
+          if (evento.side === 'user') {
+            pessoa.flags.ocioso = false;
+            pessoa.flags.concluido = false;
+          }
           break;
         }
         case 'tool': {
@@ -2436,7 +2456,10 @@ function mascararChave(chave) {
           // 'pergunta' desenha a SUA variante (reação one-shot das superfícies)
           // mas a cara visível é 'waiting' — que vence as variantes (presetDe).
           sortearDeEvento(pessoa, evento);
-          pessoa.question = evento.text ?? 'Pergunta';
+          // Texto vazio/nulo NÃO pode ficar em `question` (falsy): a pergunta
+          // ficaria invisível e o bot caía em "Disponível/dormindo" à espera de
+          // resposta. Sem texto legível, usa-se o marcador 'Pergunta'.
+          pessoa.question = (typeof evento.text === 'string' && evento.text.trim()) ? evento.text : 'Pergunta';
           pessoa.flags.concluido = false;
           pessoa.flags.retry = false;
           registar(pessoa, evento, 'pergunta', `Fez uma pergunta: ${pessoa.question}`);
@@ -2590,6 +2613,19 @@ function mascararChave(chave) {
           }
           break;
         }
+        case 'session/seen': {
+          // VALIDAÇÃO: alguém VIU esta conversa (abriu-a no DSH ou clicou na
+          // janela da pessoa). O resultado pronto deixa de estar "por ver" e a
+          // marca/sinalização sai da sala.
+          const pessoa = p(evento.sessionId);
+          if (!pessoa) break;
+          if (pessoa.porVer || pessoa.flags.concluido) {
+            pessoa.porVer = false;
+            pessoa.flags.concluido = false;
+            registar(pessoa, evento, 'resultado-visto', 'Resultado visto/validado');
+          }
+          break;
+        }
         default:
           break;
       }
@@ -2610,6 +2646,19 @@ function mascararChave(chave) {
         title: p.title, cwd: p.cwd, parentId: p.parentId, subagent: p.subagent,
         blank: p.blank, running: p.running,
         tokens: p.tokens, activity: p.activity,
+        // Cara visível + marca de validação: as VARIANTES sorteadas pelo motor
+        // (varianteTrabalho/Ferramenta/Erro/Sucesso/Espera…) viajam na projeção
+        // — sem elas a cena desenhava sempre a cara BASE de cada estado e as
+        // expressões nunca mudavam durante o trabalho.
+        varianteTrabalho: p.varianteTrabalho,
+        varianteFerramenta: p.varianteFerramenta,
+        varianteFerramentaErro: p.varianteFerramentaErro,
+        varianteErro: p.varianteErro,
+        varianteSucesso: p.varianteSucesso,
+        varianteCancelado: p.varianteCancelado,
+        varianteEspera: p.varianteEspera,
+        varianteOcioso: p.varianteOcioso,
+        porVer: p.porVer === true,
       };
     }
 
@@ -3480,26 +3529,25 @@ function mascararChave(chave) {
 
     const EQUIPA_SEM_WORKSPACE = 'sem-workspace';
 
-    /* ── Filtros da sala (persistidos por navegador) ──────────────────────
-       Por omissão a sala segue a barra lateral do DSH: arquivadas e conversas
-       em branco (paradas) não se sentam; "Sem workspace" aparece. O filtro
-       "Manter workspaces abertos sem ação" (padrão) mantém sentadas as pessoas
-       de um workspace ABERTO (com conversas presentes, não arquivadas) mesmo
-       sem ação — sem o "em branco" nem o "Só quem está a trabalhar" as
-       esconderem. Subagentes nunca têm lugar próprio (só na mesa de delegação)
-       — isso não é filtro. */
+    /* ── Filtros da sala ──────────────────────────────────────────────────
+       ARRANQUE SEMPRE assim (pedido do utilizador, 2026-10-12): apenas o
+       "Só quem está a trabalhar" ativo — nada de arquivadas, "Sem workspace",
+       conversas em branco nem workspaces abertos sem ação. As escolhas da
+       sessão vivem em memória e cada novo arranque volta a este padrão.
+       Subagentes nunca têm lugar próprio (só na mesa de delegação) — isso não
+       é filtro. */
     const CHAVE_FILTROS = 'dsh-work-game:filtros';
     const FILTROS_PADRAO = Object.freeze({
       mostrarArquivadas: false,
-      mostrarSemWorkspace: true,
-      soTrabalhando: false,
+      mostrarSemWorkspace: false,
+      soTrabalhando: true,
       mostrarEmBranco: false,
-      mostrarAbertos: true,
+      mostrarAbertos: false,
     });
     const FILTROS_UI = [
       { chave: 'mostrarArquivadas', rotulo: 'Mostrar arquivadas (ocultas por omissão)', ajuda: 'Na mesa do seu workspace (ou em "Sem workspace"), com a ficha "Arquivada" em cinzento. Só quando o arquivo do DSH é conhecido.' },
       { chave: 'mostrarSemWorkspace', rotulo: 'Mostrar "Sem workspace"', ajuda: 'Conversas que nenhum workspace reclama (o Ungrouped do DSH).' },
-      { chave: 'soTrabalhando', rotulo: 'Só quem está a trabalhar', ajuda: 'Esconde quem está parado e as mesas sem ninguém a trabalhar.' },
+      { chave: 'soTrabalhando', rotulo: 'Só quem está a trabalhar', ajuda: 'Esconde quem está parado (Disponível) e as mesas sem ninguém ativo. Quem pergunta, espera aprovação ou tem resultado pronto por ver continua à vista — precisa de ti.' },
       { chave: 'mostrarEmBranco', rotulo: 'Mostrar conversas em branco', ajuda: 'Conversas novas, ainda sem nenhuma mensagem.' },
       { chave: 'mostrarAbertos', rotulo: 'Manter workspaces abertos sem ação', ajuda: 'Um workspace aberto (com conversas presentes, não arquivadas) mantém todas as pessoas sentadas mesmo sem ação — nem o "em branco" nem o "Só quem está a trabalhar" o escondem.' },
     ];
@@ -3514,13 +3562,12 @@ function mascararChave(chave) {
     }
     // Quantos interruptores estão fora do padrão (o número no botão Filtros).
     const filtrosAlterados = (f) => Object.keys(FILTROS_PADRAO).filter((k) => f[k] !== FILTROS_PADRAO[k]).length;
+    // Cada ARRANQUE parte do padrão (o utilizador pediu: SEMPRE inicia só com
+    // "Só quem está a trabalhar" ativo). As escolhas da sessão vivem em `filtros`
+    // (memória do núcleo); o localStorage guarda apenas o último arranque manual
+    // e não é relido ao iniciar.
     function lerFiltros() {
-      try {
-        const bruto = window.localStorage.getItem(CHAVE_FILTROS);
-        return normalizarFiltros(bruto ? JSON.parse(bruto) : null);
-      } catch {
-        return normalizarFiltros(null); /* sem localStorage (modo privado, sandbox): padrão */
-      }
+      return normalizarFiltros(null);
     }
     function guardarFiltros(f) {
       try {
@@ -3530,8 +3577,11 @@ function mascararChave(chave) {
         return false; /* persistência indisponível: os filtros valem nesta página */
       }
     }
-    // "A trabalhar" = turno a correr (ou sinal de trabalho/ferramenta).
-    const aTrabalhar = (p) => p.running === true || p.status === 'working' || p.status === 'tool';
+    // "A trabalhar" = turno a correr (ou sinal de trabalho/ferramenta) OU a
+    // precisar de ti (pergunta/aprovação) OU com resultado pronto por validar —
+    // quem tem trabalho pendente para o utilizador nunca é "parado".
+    const aTrabalhar = (p) => p.running === true || p.status === 'working' || p.status === 'tool'
+      || p.status === 'waiting' || p.status === 'done';
 
     /**
      * Mesas e lugares a partir das pessoas, dos workspaces do DSH e dos filtros.
@@ -3862,15 +3912,20 @@ function mascararChave(chave) {
       });
     }
 
-    // A cara a desenhar: o estado forte manda e mostra a SUA variante sorteada
-    // (preset base em reserva); quem espera mostra 'waiting' (VENCE as
-    // variantes — que ficam guardadas para as reações one-shot das superfícies)
-    // e quem está Disponível dorme sempre (Modo jogo). Espelho da
+    // A cara a desenhar: pergunta/aprovação mandam por cima de TUDO e mostram
+    // A SUA variante — a cara de espera PRÓPRIA de cada agente (sorteada do
+    // pool de pergunta/aprovação com a personalidade dele; 'waiting' em
+    // reserva). Quem espera resposta NUNCA dorme, nem que o turno já tenha
+    // parado. Os estados fortes mostram a SUA variante sorteada (preset base em
+    // reserva) e quem está Disponível dorme (Modo jogo). Espelho da
     // deriveExpression de state.js, com o vocabulário ESTADOS_DEMO.
     function presetDe(p) {
+      if (p.question || (p.approvals && p.approvals.length > 0)) {
+        return p.varianteEspera || ESTADOS_DEMO.waiting.preset;
+      }
       const info = estadoDemo(p);
       if (info === ESTADOS_DEMO.available) return info.preset;
-      if (info === ESTADOS_DEMO.waiting) return info.preset; // 'waiting' vence as variantes
+      if (info === ESTADOS_DEMO.waiting) return p.varianteEspera || info.preset;
       if (info === ESTADOS_DEMO.tool) return p.varianteFerramenta || info.preset;
       if (info === ESTADOS_DEMO.error) return p.varianteErro || info.preset;
       if (info === ESTADOS_DEMO.done) return p.varianteSucesso || info.preset;
@@ -3942,6 +3997,19 @@ function mascararChave(chave) {
         <rect x="${cx - 99}" y="509" width="198" height="26" rx="13"/>
         ${glyph('check', cx - 87, 514, 16, '#299875')}
         <text x="${cx - 64}" y="526" fill="#299875">Concluído · resultado pronto</text></g>`;
+    }
+
+    // Marca de RESULTADO PRONTO POR VER (não validado): fica na pessoa até
+    // alguém ver a conversa (abri-la no DSH ou clicar na janela — validar()).
+    // Junta-se à fita "Concluído" quando o estado é 'done' e cobre o resto do
+    // tempo sozinha (ex.: já a trabalhar de novo, com o anterior por ver).
+    function porVerBadgeSvg(p, cx) {
+      if (!p.porVer) return '';
+      return `<g class="por-ver-badge" role="img" aria-label="${esc(p.name)} tem resultado pronto por ver">
+        <title>✅ ${esc(p.name)} tem resultado pronto por ver — abra a conversa para validar</title>
+        <circle class="por-ver-badge-dot" cx="${cx - 72}" cy="250" r="15"/>
+        ${glyph('check', cx - 81, 241, 18, '#299875')}
+      </g>`;
     }
 
     // Emoji que a cara/desenhos não cobrem (aprovações, retentativas, coordenação).
@@ -4393,6 +4461,7 @@ function mascararChave(chave) {
         ${questionFlagSvg(person, cx)}
         ${contextWarnSvg(person, cx)}
         ${emojiExtraSvg(person, cx)}
+        ${porVerBadgeSvg(person, cx)}
         ${finishRibbonSvg(person, cx)}
         ${person.status === 'error' ? `<circle class="attention-marker" cx="${cx + 72}" cy="205" r="15"/>${glyph('alert', cx + 63, 195, 18, '#795d33')}` : ''}
         ${person.question ? balao(cx, person.question) : ''}
@@ -6299,6 +6368,9 @@ function mascararChave(chave) {
       '.wg-svg .question-flag-dot{fill:#e8a33d;stroke:#fffdf6;stroke-width:3}',
       '.wg-svg .question-flag-glyph{fill:#5c3f0c;font-size:21px;font-weight:800;pointer-events:none}',
       '.wg-svg .question-flag-pulse{fill:none;stroke:#e8a33d;stroke-width:2.5;opacity:.7;transform-origin:center;transform-box:fill-box;animation:flag-pulse 1.7s ease-out infinite}',
+      // Resultado pronto POR VER: marca estática (sem pulso — WCAG 2.2.2 e
+      // "animação só no evento"): o sinal é a forma + cor, nunca só a cor.
+      '.wg-svg .por-ver-badge-dot{fill:#eaf6f0;stroke:#299875;stroke-width:3}',
       '.wg-svg .context-warn-marker circle{fill:#e8a33d;stroke:#fffdf6;stroke-width:2.5}',
       '.wg-svg .seat:not(.context-over) .context-warn-marker{display:none}',
       '.wg-svg .finish-ribbon rect{fill:#e3f3ea;stroke:#b7dcc6;stroke-width:1.5}',
@@ -8939,11 +9011,24 @@ function mascararChave(chave) {
         if (c && typeof c.libertar === 'function') { try { c.libertar(); } catch { /* já libertada */ } }
       };
 
+      // VALIDAÇÃO do resultado pronto (porVer): VER uma conversa — abri-la no
+      // celular, abri-la no DSH ("Mostrar esta conversa no DSH") ou clicar na
+      // janela da pessoa — valida o que ela tinha pronto e tira o sinal da sala.
+      const validar = (id) => {
+        if (!id) return false;
+        const pessoa = estado.people.get(id);
+        if (!pessoa || (!pessoa.porVer && !pessoa.flags.concluido)) return false;
+        estado = applyEvent(estado, { type: 'session/seen', sessionId: id, at: Date.now() });
+        notificar();
+        return true;
+      };
+
       // Abre a conversa de `id` no celular (o mesmo caminho do clique numa
       // pessoa e do recruta acabado de criar — retain da nova antes do
       // release da anterior, como o replaceMain do DSH).
       const abrirConversaNoTelefone = (id, origem = 'cena') => {
         if (!id) return;
+        validar(id); // ver a conversa valida o resultado pronto dela
         if (telefone.aberto && telefone.vista === 'conversa' && telefone.sessionId === id && conversa) {
           // já aberta: só a origem/navegação pode mudar (voltar ao grupo).
           telefone = { ...telefone, origem, grupoId: origem === 'grupo' ? grupoConv.workspaceId : telefone.grupoId };
@@ -8990,6 +9075,41 @@ function mascararChave(chave) {
         }, 400);
       };
 
+      // MICRO-VARIAÇÃO de expressão DURANTE o trabalho (sem evento novo): a
+      // cada ~3s, quem está a trabalhar e já cumpriu O SEU dwell (4.5–8.5s,
+      // determinístico por pessoa) sorteia uma variante do cenário 'mensagem' —
+      // a cara vai mudando ao longo de trabalho longo (variações para a mesma
+      // ação), sem piscar (arbitragem do motor: min-dwell 1200ms) e sem repetir
+      // a cara atual (anti-repetição). Quem pergunta/aprova fica com A SUA cara
+      // de espera; terminais (sucesso/erro) mantêm-se pelo stickiness do motor.
+      let timerExpressao = null;
+      const EXPRESSAO_PULSO_MS = 3000;
+      const pulsoExpressao = () => {
+        const agora = Date.now();
+        let mudou = false;
+        for (const pessoa of estado.people.values()) {
+          const ativo = pessoa.running === true || pessoa.flags.ocioso === false;
+          if (!ativo || pessoa.question || pessoa.approvals.length > 0) continue;
+          const dwell = 4500 + (expressaoHash('dwell|' + pessoa.id) % 41) * 100;
+          const ultima = Number.isFinite(Number(pessoa.expressaoAt)) ? Number(pessoa.expressaoAt) : 0;
+          if (agora - ultima < dwell) continue;
+          if (sortearCara(pessoa, 'mensagem', agora)) mudou = true;
+        }
+        if (mudou) notificar();
+      };
+      const arrancarExpressao = () => {
+        if (timerExpressao !== null) return;
+        timerExpressao = setInterval(pulsoExpressao, EXPRESSAO_PULSO_MS);
+        // Em Node (testes) um interval ativo não segura o processo aberto.
+        if (timerExpressao && typeof timerExpressao.unref === 'function') timerExpressao.unref();
+      };
+      const pararExpressao = () => {
+        if (timerExpressao !== null) {
+          clearInterval(timerExpressao);
+          timerExpressao = null;
+        }
+      };
+
       // Expressão A CADA MENSAGEM: a vigia fica só com as conversas a correr
       // (retain leve, libertado ao parar) e cada mensagem observada avança a
       // rotação da seleção curada da pessoa (evento `message`).
@@ -9002,17 +9122,52 @@ function mascararChave(chave) {
       // Um só caminho para os eventos (adaptador e vigia): carimba a hora de
       // chegada (a linha do tempo da barra lateral), aplica ao estado — sempre
       // puro e sem relógio — e deixa a vigia reagir aos `status`.
+      //
+      // LOTE POR FRAME (anti-lag): a telemetria chega em rajadas (usage/model/
+      // ctx a cada lote de tokens) e uma notificação por evento reconstruía a
+      // sala inteira (view + layout + SVG + sprite) várias vezes por frame. Os
+      // eventos acumulam-se e aplicam-se de uma vez, com UMA notificação — a
+      // cena atualiza no máximo 1× por frame.
+      let filaEventos = [];
+      let agendado = null;
+      const aplicarPendentes = () => {
+        if (!filaEventos.length) return false;
+        const lote = filaEventos;
+        filaEventos = [];
+        for (const ev of lote) {
+          estado = applyEvent(estado, ev);
+          vigia.observar(ev);
+        }
+        return true;
+      };
+      const aplicarLote = () => {
+        agendado = null;
+        if (aplicarPendentes()) {
+          notificar();
+          agendarPurga();
+        }
+      };
       const receberEvento = (evento) => {
         const carimbado = evento && evento.at == null ? { ...evento, at: Date.now() } : evento;
-        estado = applyEvent(estado, carimbado);
-        notificar();
-        agendarPurga();
-        vigia.observar(carimbado);
+        filaEventos.push(carimbado);
+        if (agendado === null) {
+          agendado = typeof requestAnimationFrame === 'function'
+            ? requestAnimationFrame(aplicarLote)
+            : setTimeout(aplicarLote, 16);
+        }
       };
 
       return {
         ...ACOES,
+        // Abrir a conversa no DSH = alguém a VÊ: valida o resultado pronto.
+        abrirConversa: (sessionId) => {
+          validar(sessionId);
+          return ACOES.abrirConversa(sessionId);
+        },
         getView: () => {
+          // Eventos ainda na fila do lote entram antes de ler (semântica síncrona
+          // para quem lê o estado — a notificação fica para o frame).
+          if (aplicarPendentes()) vistaMemo = null;
           if (vistaMemo) return vistaMemo;
           const vista = officeView(estado);
           for (const p of Object.values(vista.people)) {
@@ -9326,10 +9481,20 @@ function mascararChave(chave) {
           }
           adaptador.start();
           agendarPurga();
+          arrancarExpressao(); // micro-variação das caras durante o trabalho
           notificar(); /* estado pode já ter avançado durante o arranque */
         },
         parar: () => {
           if (adaptador) adaptador.stop();
+          // Lote de eventos pendente e timers próprios: nada fica a correr
+          // depois de o painel sair.
+          filaEventos = [];
+          if (agendado !== null) {
+            if (typeof cancelAnimationFrame === 'function') cancelAnimationFrame(agendado);
+            clearTimeout(agendado);
+            agendado = null;
+          }
+          pararExpressao();
           // O painel desmontou (outro painel do DSH): o celular fecha e a
           // referência da conversa é libertada — nada fica retido em fundo.
           // As vigias de mensagens também largam as suas.
@@ -9337,6 +9502,8 @@ function mascararChave(chave) {
           if (telefone.aberto || conversa || grupoConv.workspaceId) fecharTudo();
         },
         selecionar: (id) => {
+          // Clicar na janela de uma pessoa = a VÊ-la: valida o resultado pronto.
+          validar(id);
           if (estado.selecionada !== id) {
             estado = { ...estado, selecionada: id };
             if (historico.sessionId !== id) historico = HISTORICO_VAZIO;
