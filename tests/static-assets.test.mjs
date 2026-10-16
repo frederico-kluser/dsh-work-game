@@ -70,10 +70,18 @@ function parseAttributes(attrText) {
  * percorre o texto, exige que cada '<' inicie uma tag bem formada, e valida o
  * aninhamento por pilha. Também recolhe nome, atributos e tipo de cada tag.
  */
+function stripXmlMeta(text) {
+  let out = text;
+  let prev;
+  do {
+    prev = out;
+    out = out.replace(/<!--[\s\S]*?-->/g, '').replace(/<\?[\s\S]*?\?>/g, '');
+  } while (out !== prev);
+  return out;
+}
+
 function parseSvgTags(rawText) {
-  const cleaned = rawText
-    .replace(/<!--[\s\S]*?-->/g, '')
-    .replace(/<\?[\s\S]*?\?>/g, '');
+  const cleaned = stripXmlMeta(rawText);
   const tagRe = /<(\/?)([A-Za-z_][A-Za-z0-9_.:-]*)((?:"[^"]*"|'[^']*'|[^>"'])*)>/g;
   const tags = [];
   const errors = [];
