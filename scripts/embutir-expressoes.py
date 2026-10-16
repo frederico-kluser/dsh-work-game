@@ -45,6 +45,8 @@ PRESETS_CANONICOS = [
     'idle', 'working', 'focused', 'tool', 'searching', 'thinking',
     'waiting', 'error', 'success', 'sleeping', 'wink',
     'approval', 'celebrating', 'surprised', 'disbelief',
+    'inspired', 'determined', 'curious', 'calm', 'snacking',
+    'dizzy', 'baffled', 'frustrated', 'nauseated', 'cheeky',
 ]
 
 INICIO_BLOCO = 'const EXPR_AVATARS = {'

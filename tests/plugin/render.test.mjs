@@ -324,7 +324,7 @@ test('cena viva: quem está Disponível dorme — olhos fechados, "zzz" e balan�
   assert.ok(css.includes('.wg-svg .wg-zzz{pointer-events:none}'), 'o zzz não apanha cliques nem o arraste');
   const regra = css.match(/\.wg-svg \.wg-z\{([^}]*)\}/)[1];
   assert.match(regra, /transform-box:view-box;transform-origin:0 0/, 'origem na própria letra (nada de fill-box: o Safari erra-a)');
-  assert.match(regra, /animation:wg-zzz 3\.60s steps\(1,end\) infinite paused/, 'em degraus, em pausa: o relógio da cena avança-as');
+  assert.match(regra, /animation:wg-zzz 3\.60s linear infinite/, 'interpolação contínua e fluida do zzz');
 });
 
 test('cena viva: o "zzz" sobe (e anda para a direita) a partir da orelha — geometria dos quadros-chave', () => {
@@ -368,11 +368,11 @@ test('cena viva: quem trabalha (Trabalhando/Executando ferramenta) balança — 
   const r = B.__ritmoDe('t');
   assert.ok(Math.abs(r * 100 - Math.round(r * 100)) < 1e-9, `ritmo quantizado a 0,01: ${r}`);
   const css = B.__CSS_PAINEL;
-  assert.ok(css.includes('.wg-svg .character.wg-balanca{transform-box:fill-box;animation:wg-balanco 2.80s steps(1,end) infinite paused}'));
-  assert.ok(css.includes('.wg-svg .character.wg-balanca-lateral{transform-box:fill-box;animation:wg-balanco-lateral 2.80s steps(1,end) infinite paused}'));
+  assert.ok(css.includes('.wg-svg .character.wg-balanca{transform-box:fill-box;transform-origin:50% 100%;animation:wg-balanco 2.80s ease-in-out infinite}'));
+  assert.ok(css.includes('.wg-svg .character.wg-balanca-lateral{transform-box:fill-box;transform-origin:50% 100%;animation:wg-balanco-lateral 2.80s ease-in-out infinite}'));
   const kf = css.match(/@keyframes wg-balanco\{((?:[\d.]+%\{[^}]*\})+)\}/)[1];
-  const ys = [...kf.matchAll(/%\{transform:translateY\((-?[\d.]+)(?:px)?\)\}/g)].map((m) => Number(m[1]));
-  assert.equal(ys.length, 15, '14 degraus de 0,2 s num ciclo de 2,8 s (+ o 100%)');
+  const ys = [...kf.matchAll(/%\{transform:translate\(-?[\d.]+(?:px)?,(-?[\d.]+)(?:px)?\)\s*rotate\(-?[\d.]+deg\)\}/g)].map((m) => Number(m[1]));
+  assert.equal(ys.length, 15, '14 pontos num ciclo de 2,8 s (+ o 100%)');
   assert.ok(ys.every((y) => y <= 0), 'só sobe — nunca desce sobre o portátil');
   assert.equal(Math.min(...ys), -7, `sobe levemente (7 unidades ≈ 2,8 px a 40%): ${Math.min(...ys)}`);
   assert.equal(ys[0], 0);
@@ -388,15 +388,15 @@ test('cena viva: quem dorme balança a cabeça LATERALMENTE — a mesma onda do 
   const css = B.__CSS_PAINEL;
   const kf = css.match(/@keyframes wg-balanco-lateral\{((?:[\d.]+%\{[^}]*\})+)\}/);
   assert.ok(kf, '@keyframes wg-balanco-lateral');
-  const xs = [...kf[1].matchAll(/%\{transform:translateX\(([\d.]+)(?:px)?\)\}/g)].map((m) => Number(m[1]));
-  assert.equal(xs.length, 15, 'os MESMOS 14 degraus do balanço do ativo (+ o 100%)');
-  assert.ok(xs.every((x) => x >= 0), 'só se desloca para o lado e volta');
+  const xs = [...kf[1].matchAll(/%\{transform:translate\(([\d.]+)(?:px)?,-?[\d.]+(?:px)?\)\s*rotate\(-?[\d.]+deg\)\}/g)].map((m) => Number(m[1]));
+  assert.equal(xs.length, 15, 'os MESMOS 14 pontos do balanço do ativo (+ o 100%)');
+  assert.ok(xs.every((x) => x >= 0), 'desloca-se para o lado e volta suavemente');
   assert.equal(Math.max(...xs), 7, 'a MESMA distância do ativo (7 unidades), mas lateral');
   assert.equal(xs[0], 0);
   assert.equal(xs[xs.length - 1], 0, 'volta ao sítio: ciclo sem salto');
   // A geometria bate certo com a do balanço vertical: mesmo cosseno, eixo trocado.
   const ky = css.match(/@keyframes wg-balanco\{((?:[\d.]+%\{[^}]*\})+)\}/)[1];
-  const ys = [...ky.matchAll(/translateY\((-?[\d.]+)(?:px)?\)/g)].map((m) => Number(m[1]));
+  const ys = [...ky.matchAll(/translate\(-?[\d.]+(?:px)?,(-?[\d.]+)(?:px)?\)/g)].map((m) => Number(m[1]));
   assert.deepEqual(xs.map((x) => -x + 0), ys, 'mesma onda, eixo X em vez de Y');
 });
 
@@ -1002,7 +1002,7 @@ test('REGRA DE OURO: cada corpo embutido é byte a byte o SVG da demo (expressio
     }
   }
   assert.equal(aDormir.length, 8, `todas as identidades dormem: ${aDormir.join(', ')}`);
-  assert.equal(conferidos, 120, '8 identidades × 15 presets embutidos (os 14 da biblioteca + sleeping)');
+  assert.equal(conferidos, 200, '8 identidades × 25 presets embutidos (os 24 da biblioteca + sleeping)');
 });
 
 test('REGRA DE OURO: o mobiliário embutido é o furniture.svg da demo (ids com prefixo wg-)', () => {
@@ -1607,8 +1607,10 @@ test('expressões durante o trabalho: cada evento sorteia a SUA variante e os es
   assert.deepEqual(Object.keys(B.__VARIANTES_EVENTOS).sort(), ['error', 'idle', 'success', 'tool', 'waiting', 'working']);
   const todos = new Set(Object.values(B.__VARIANTES_EVENTOS).flatMap((ev) => ev.pool));
   assert.deepEqual([...todos].sort(),
-    ['approval', 'celebrating', 'disbelief', 'error', 'focused', 'idle', 'searching', 'success',
-      'surprised', 'thinking', 'tool', 'waiting', 'wink', 'working']);
+    ['approval', 'baffled', 'calm', 'celebrating', 'cheeky', 'curious', 'determined',
+      'disbelief', 'dizzy', 'error', 'focused', 'frustrated', 'idle', 'inspired',
+      'nauseated', 'searching', 'snacking', 'success', 'surprised', 'thinking',
+      'tool', 'waiting', 'wink', 'working']);
   let e = escritorio([{ type: 'session/added', sessionId: 'a' }, { type: 'status', sessionId: 'a', status: 'running' }]);
   const cara = () => B.__presetDe(e.people.get('a'));
   assert.equal(cara(), 'working', 'sem eventos de expressão ainda: a cara de trabalho base');
@@ -1622,19 +1624,20 @@ test('expressões durante o trabalho: cada evento sorteia a SUA variante e os es
     e = B.__applyEvent(e, { type: 'message', sessionId: 'a', side: i % 2 ? 'assistant' : 'user', at: 1000 + i * 1200 });
     vistas.push(cara());
   }
+  const poolMsg = ['working', 'focused', 'thinking', 'wink', 'inspired', 'determined', 'curious', 'calm', 'snacking', 'cheeky'];
   for (const v of vistas) {
-    assert.ok(['working', 'focused', 'thinking', 'wink'].includes(v), `variante do cenário 'mensagem' (${v})`);
+    assert.ok(poolMsg.includes(v), `variante do cenário 'mensagem' (${v})`);
   }
   assert.ok(new Set(vistas).size > 1, 'as mensagens mudam de cara — o disparo é aleatório, nunca uma rotação fixa');
   // Os estados fortes mandam por cima das variantes…
   e = B.__applyEvent(e, { type: 'question', sessionId: 'a', id: 'q1', text: 'ok?', at: 10000 });
-  assert.ok(['waiting', 'thinking', 'surprised'].includes(cara()),
+  assert.ok(['waiting', 'thinking', 'surprised', 'curious', 'baffled'].includes(cara()),
     `quem pergunta mostra A SUA cara de espera (própria de cada agente): ${cara()}`);
   e = B.__applyEvent(e, { type: 'question/answered', sessionId: 'a', id: 'q1', at: 10500 });
-  assert.ok(['working', 'focused', 'thinking', 'wink'].includes(cara()), 'de volta às variantes de trabalho');
+  assert.ok(poolMsg.includes(cara()), 'de volta às variantes de trabalho');
   // Executar uma ferramenta → variante do cenário 'ferramenta'.
   e = B.__applyEvent(e, { type: 'tool', sessionId: 'a', phase: 'call', name: 'bash', at: 11500 });
-  assert.ok(['tool', 'searching', 'focused', 'thinking'].includes(cara()), `com ferramenta: pool de ferramenta (${cara()})`);
+  assert.ok(['tool', 'searching', 'focused', 'thinking', 'determined', 'curious'].includes(cara()), `com ferramenta: pool de ferramenta (${cara()})`);
   // Falha da ferramenta → variante transitória 'ferramenta-erro', mas a cara
   // persistente do erro é a do contrato.
   e = B.__applyEvent(e, { type: 'tool', sessionId: 'a', phase: 'result', name: 'bash', ok: false, at: 13000 });
@@ -1642,11 +1645,12 @@ test('expressões durante o trabalho: cada evento sorteia a SUA variante e os es
   // Turno concluído → variante do cenário 'sucesso'.
   e = B.__applyEvent(e, { type: 'status', sessionId: 'a', status: 'running', at: 15000 });
   e = B.__applyEvent(e, { type: 'turn/end', sessionId: 'a', kind: 'completed', at: 16000 });
-  assert.ok(['success', 'celebrating', 'approval', 'wink'].includes(cara()), `concluído: pool de sucesso (${cara()})`);
+  const poolSucesso = ['success', 'celebrating', 'approval', 'wink', 'inspired', 'cheeky'];
+  assert.ok(poolSucesso.includes(cara()), `concluído: pool de sucesso (${cara()})`);
   // Resultado pronto POR VALIDAR: o status idle seguinte NÃO o tira do
   // "Concluído" — quem tem trabalho por ver não dorme (fix 2026-10-12).
   e = B.__applyEvent(e, { type: 'status', sessionId: 'a', status: 'idle', at: 18000 });
-  assert.ok(['success', 'celebrating', 'approval', 'wink'].includes(cara()),
+  assert.ok(poolSucesso.includes(cara()),
     `continua com a cara de sucesso enquanto o resultado não é visto (${cara()})`);
   // Visto/validado (session/seen): aí sim, quem está Disponível dorme.
   e = B.__applyEvent(e, { type: 'session/seen', sessionId: 'a', at: 19000 });

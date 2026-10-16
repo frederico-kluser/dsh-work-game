@@ -48,8 +48,10 @@ const BUNDLE = readFileSync(new URL('dsh-plugin/src/client.js', RAIZ), 'utf8');
 const SEM_EXPORTS = FONTE.split('\n').map((l) => l.replace(/^export (const|function|let) /, '$1 ')).join('\n');
 
 const TODOS_OS_PRESETS = [
-  'approval', 'celebrating', 'disbelief', 'error', 'focused', 'idle', 'searching',
-  'success', 'surprised', 'thinking', 'tool', 'waiting', 'wink', 'working',
+  'approval', 'baffled', 'calm', 'celebrating', 'cheeky', 'curious', 'determined',
+  'disbelief', 'dizzy', 'error', 'focused', 'frustrated', 'idle', 'inspired',
+  'nauseated', 'searching', 'snacking', 'success', 'surprised', 'thinking',
+  'tool', 'waiting', 'wink', 'working',
 ];
 const REDUZIDOS = ['idle', 'working', 'success', 'error']; /* identidades aleatórias r01..r12 */
 const LIMIARES_MIN_DWELL = EXPRESSOES_LIMIARES.minDwellMs;
@@ -425,7 +427,7 @@ test('graus: erro-transitorio ESCALA por retentativa consecutiva (grau 1→2→3
       sal: i, probabilidade: 1
     }).preset);
   }
-  assert.deepEqual([...variados].sort(), ['disbelief', 'error', 'surprised'], 'erro terminal usa o pool todo');
+  assert.deepEqual([...variados].sort(), [...EXPRESSOES_CENARIOS.erro.pool].sort(), 'erro terminal usa o pool todo');
 });
 
 /* ------------------------------------------------------------------ */

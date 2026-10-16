@@ -765,7 +765,14 @@ function paperStackSvg(person, cx) {
 }
 function renderCharacter(person, cx) {
   const src = avatarSrc(person);
-  return `<g class="seat character-hit" data-action="select" data-agent="${person.id}" aria-hidden="true"><g transform="translate(${cx - 113} 147)"><g class="character" data-character-id="${person.id}" data-expression="${expressionOf(person)}"><image href="${esc(src)}" width="226" height="240" preserveAspectRatio="xMidYMax meet"/></g></g></g>`;
+  const trabalha = person.status === 'working' || person.status === 'tool';
+  const dorme = person.status === 'available';
+  const cls = trabalha ? ' wg-balanca' : (dorme ? ' wg-balanca-lateral' : '');
+  const h = EXPR.expressoes.hash(String(person.id));
+  const dur = (2.8 * (0.85 + (h % 36) / 100)).toFixed(2);
+  const delay = (-((h >>> 8) % 28) * 0.1).toFixed(2);
+  const anim = (trabalha || dorme) ? ` style="animation-duration:${dur}s;animation-delay:${delay}s"` : '';
+  return `<g class="seat character-hit" data-action="select" data-agent="${person.id}" aria-hidden="true"><g transform="translate(${cx - 113} 147)"><g class="character${cls}" data-character-id="${person.id}" data-expression="${expressionOf(person)}"${anim}><image href="${esc(src)}" width="226" height="240" preserveAspectRatio="xMidYMax meet"/></g></g></g>`;
 }
 function renderSeat(mod, person, index) {
   const cx = 112.5 + index * 225;

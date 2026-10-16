@@ -271,7 +271,7 @@ function subdirs(dir) {
     .sort();
 }
 
-test('assets/avatars/expressions/** mantém exatamente 112 SVGs (8 identidades × 14 presets)', () => {
+test('assets/avatars/expressions/** mantém exatamente 192 SVGs (8 identidades × 24 presets)', () => {
   const problemas = [];
   const identidades = subdirs(EXPRESSIONS_DIR);
   if (identidades.length !== 8) {
@@ -279,10 +279,10 @@ test('assets/avatars/expressions/** mantém exatamente 112 SVGs (8 identidades �
   }
   for (const id of identidades) {
     const n = listSvg(path.join(EXPRESSIONS_DIR, id)).length;
-    if (n !== 14) problemas.push(`expressions/${id}: esperados 14 presets, encontrados ${n}`);
+    if (n !== 24) problemas.push(`expressions/${id}: esperados 24 presets, encontrados ${n}`);
   }
   const total = listSvg(EXPRESSIONS_DIR).length;
-  if (total !== 112) problemas.push(`total de expressões: esperado 112, encontrado ${total}`);
+  if (total !== 192) problemas.push(`total de expressões: esperado 192, encontrado ${total}`);
   assert.equal(problemas.length, 0, 'Contagem de expressões divergente:\n' + problemas.join('\n') + '\n' + MSG_CONTAGEM);
 });
 
@@ -301,9 +301,9 @@ test('assets/avatars/random/** mantém exatamente 48 SVGs (12 identidades rNN ×
   assert.equal(problemas.length, 0, 'Contagem de avatares aleatórios divergente:\n' + problemas.join('\n') + '\n' + MSG_CONTAGEM);
 });
 
-test('há exatamente 160 avatares de expressão/aleatórios (112 + 48)', () => {
+test('há exatamente 240 avatares de expressão/aleatórios (192 + 48)', () => {
   const total = listSvg(EXPRESSIONS_DIR).length + listSvg(RANDOM_DIR).length;
-  assert.equal(total, 160, `Esperados 160 avatares (112 expressões + 48 aleatórias), encontrados ${total}. ${MSG_CONTAGEM}`);
+  assert.equal(total, 240, `Esperados 240 avatares (192 expressões + 48 aleatórias), encontrados ${total}. ${MSG_CONTAGEM}`);
 });
 
 test('assets/avatars/*.svg mantém exatamente 8 bustos base', () => {
