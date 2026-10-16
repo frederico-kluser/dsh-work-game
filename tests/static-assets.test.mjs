@@ -286,7 +286,7 @@ test('assets/avatars/expressions/** mantém exatamente 192 SVGs (8 identidades �
   assert.equal(problemas.length, 0, 'Contagem de expressões divergente:\n' + problemas.join('\n') + '\n' + MSG_CONTAGEM);
 });
 
-test('assets/avatars/random/** mantém exatamente 48 SVGs (12 identidades rNN × 4 presets)', () => {
+test('assets/avatars/random/** mantém exatamente 288 SVGs (12 identidades rNN × 24 presets)', () => {
   const problemas = [];
   const identidades = subdirs(RANDOM_DIR);
   if (identidades.length !== 12) {
@@ -294,16 +294,16 @@ test('assets/avatars/random/** mantém exatamente 48 SVGs (12 identidades rNN ×
   }
   for (const id of identidades) {
     const n = listSvg(path.join(RANDOM_DIR, id)).length;
-    if (n !== 4) problemas.push(`random/${id}: esperados 4 presets, encontrados ${n}`);
+    if (n !== 24) problemas.push(`random/${id}: esperados 24 presets, encontrados ${n}`);
   }
   const total = listSvg(RANDOM_DIR).length;
-  if (total !== 48) problemas.push(`total de variantes aleatórias: esperado 48, encontrado ${total}`);
+  if (total !== 288) problemas.push(`total de variantes aleatórias: esperado 288, encontrado ${total}`);
   assert.equal(problemas.length, 0, 'Contagem de avatares aleatórios divergente:\n' + problemas.join('\n') + '\n' + MSG_CONTAGEM);
 });
 
-test('há exatamente 240 avatares de expressão/aleatórios (192 + 48)', () => {
+test('há exatamente 480 avatares de expressão/aleatórios (192 + 288)', () => {
   const total = listSvg(EXPRESSIONS_DIR).length + listSvg(RANDOM_DIR).length;
-  assert.equal(total, 240, `Esperados 240 avatares (192 expressões + 48 aleatórias), encontrados ${total}. ${MSG_CONTAGEM}`);
+  assert.equal(total, 480, `Esperados 480 avatares (192 expressões + 288 aleatórias), encontrados ${total}. ${MSG_CONTAGEM}`);
 });
 
 test('assets/avatars/*.svg mantém exatamente 8 bustos base', () => {
@@ -343,18 +343,18 @@ function semGruposDaFace(texto) {
   return out.replace(/react-([a-z]+)-\d+/g, 'react-$1-X');
 }
 
-test('assets/avatars/sleeping/ tem exatamente 8 SVGs válidos "a dormir" (1 por identidade nomeada, olhos fechados)', () => {
+test('assets/avatars/sleeping/ tem exatamente 20 SVGs válidos "a dormir" (1 por identidade, olhos fechados)', () => {
   const SLEEPING_DIR = path.join(ASSETS_DIR, 'avatars', 'sleeping');
-  const nomeadas = subdirs(EXPRESSIONS_DIR);
+  const todas = [...subdirs(EXPRESSIONS_DIR), ...subdirs(RANDOM_DIR)].sort();
   const problemas = [];
   const entradas = fs.readdirSync(SLEEPING_DIR, { withFileTypes: true });
   const ficheiros = entradas.filter((e) => e.isFile()).map((e) => e.name).sort();
   if (entradas.some((e) => e.isDirectory())) problemas.push('sleeping/ não deve ter subpastas');
   assert.deepEqual(
-    ficheiros, nomeadas.map((id) => `${id}.svg`),
-    `assets/avatars/sleeping/ deve ter exatamente 1 SVG por identidade nomeada (${nomeadas.join(', ')}). ${MSG_CONTAGEM}`
+    ficheiros, todas.map((id) => `${id}.svg`),
+    `assets/avatars/sleeping/ deve ter exatamente 1 SVG por identidade (${todas.join(', ')}). ${MSG_CONTAGEM}`
   );
-  assert.equal(ficheiros.length, 8, `Esperados 8 SVGs "a dormir", encontrados ${ficheiros.length}. ${MSG_CONTAGEM}`);
+  assert.equal(ficheiros.length, 20, `Esperados 20 SVGs "a dormir", encontrados ${ficheiros.length}. ${MSG_CONTAGEM}`);
   for (const nome of ficheiros) {
     const svg = svgAnalisados.find((s) => s.relPath === `assets/avatars/sleeping/${nome}`);
     if (!svg) { problemas.push(`${nome}: não analisado`); continue; }
@@ -370,7 +370,9 @@ test('assets/avatars/sleeping/ tem exatamente 8 SVGs válidos "a dormir" (1 por 
       }
     }
     if (!svg.text.includes('<g id="Eyes/Closed')) problemas.push(`${nome}: sem o grupo Eyes/Closed (olhos fechados)`);
-    const idle = fs.readFileSync(path.join(EXPRESSIONS_DIR, nome.replace(/\.svg$/, ''), 'idle.svg'), 'utf8');
+    const idBase = nome.replace(/\.svg$/, '');
+    const pastaBase = /^r\d+$/.test(idBase) ? RANDOM_DIR : EXPRESSIONS_DIR;
+    const idle = fs.readFileSync(path.join(pastaBase, idBase, 'idle.svg'), 'utf8');
     const a = semGruposDaFace(svg.text);
     const b = semGruposDaFace(idle);
     if (a === null || b === null) problemas.push(`${nome}: grupos Eyes/Eyebrow/Mouth não encontrados`);

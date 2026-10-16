@@ -150,7 +150,7 @@ export const EXPRESSOES_CENARIOS = {
     pool: ['focused', 'thinking', 'determined', 'snacking'], base: 'focused', prob: 1, prioridade: 45
   },
   mensagem: {
-    pool: ['working', 'focused', 'thinking', 'wink', 'inspired', 'determined', 'curious', 'calm', 'snacking', 'cheeky'], base: 'working', prob: 0.65, prioridade: 40
+    pool: ['working', 'focused', 'thinking', 'wink', 'inspired', 'determined', 'curious', 'searching', 'snacking', 'cheeky'], base: 'working', prob: 0.65, prioridade: 40
   },
   subagente: {
     pool: ['thinking', 'tool', 'focused', 'determined', 'curious', 'inspired'], base: 'working', prob: 0.7, prioridade: 35

@@ -991,9 +991,10 @@ test('REGRA DE OURO: cada corpo embutido é byte a byte o SVG da demo (expressio
       // assets/avatars/sleeping/<id>.svg; os restantes 14 (os presets TODOS da
       // biblioteca, para o reator de variantes disparar qualquer cara) vêm de
       // assets/avatars/expressions/<id>/<preset>.svg.
+      const pasta = /^r\d+$/.test(m[1]) ? 'random' : 'expressions';
       const ficheiro = e[1] === 'sleeping'
         ? new URL(`assets/avatars/sleeping/${m[1]}.svg`, RAIZ)
-        : new URL(`assets/avatars/expressions/${m[1]}/${e[1]}.svg`, RAIZ);
+        : new URL(`assets/avatars/${pasta}/${m[1]}/${e[1]}.svg`, RAIZ);
       assert.ok(existsSync(ficheiro), `${m[1]}/${e[1]}.svg existe`);
       const original = readFileSync(ficheiro, 'utf8');
       assert.ok(original.includes(e[3]) && original.includes(`viewBox="${e[2]}"`), `${m[1]}/${e[1]} igual ao asset`);
@@ -1001,8 +1002,8 @@ test('REGRA DE OURO: cada corpo embutido é byte a byte o SVG da demo (expressio
       conferidos += 1;
     }
   }
-  assert.equal(aDormir.length, 8, `todas as identidades dormem: ${aDormir.join(', ')}`);
-  assert.equal(conferidos, 200, '8 identidades × 25 presets embutidos (os 24 da biblioteca + sleeping)');
+  assert.equal(aDormir.length, 20, `todas as 20 identidades dormem: ${aDormir.join(', ')}`);
+  assert.equal(conferidos, 500, '20 identidades × 25 presets embutidos (os 24 da biblioteca + sleeping)');
 });
 
 test('REGRA DE OURO: o mobiliário embutido é o furniture.svg da demo (ids com prefixo wg-)', () => {
@@ -1028,7 +1029,7 @@ test('nomes: nome e boneco DERIVADOS do id — a mesma conversa é a mesma pesso
   const a = B.__identidadeDe(id);
   assert.deepEqual(B.__identidadeDe(id), a, 'determinística');
   assert.ok(B.__NOMES.includes(a.name), `nome da lista da demo (${a.name})`);
-  assert.ok(['rui', 'bia', 'lia', 'pesquisa', 'codigo', 'testes', 'alex', 'maya'].includes(a.avatar), `identidade real (${a.avatar})`);
+  assert.ok(Object.keys(B.__GENERO_AVATAR).includes(a.avatar), `identidade real (${a.avatar})`);
   assert.ok(!BUNDLE.includes('Math.random('), 'nada de sorteio');
   // Dois "browsers" (armazenamentos vazios diferentes): a mesma pessoa.
   const antes = globalThis.window.localStorage;
@@ -1083,20 +1084,22 @@ test('nomes: nome e boneco DERIVADOS do id — a mesma conversa é a mesma pesso
 test('nomes: o gênero do boneco bate SEMPRE com o gênero do nome (regra 2026-09-29)', () => {
   assert.deepEqual({ ...B.__GENERO_AVATAR }, {
     rui: 'm', bia: 'f', lia: 'f', pesquisa: 'm', codigo: 'm', testes: 'f', alex: 'm', maya: 'f',
-  }, 'tabela de gênero dos 8 bonecos nomeados');
+    r01: 'f', r02: 'f', r03: 'f', r04: 'f', r05: 'f', r06: 'f',
+    r07: 'm', r08: 'm', r09: 'm', r10: 'm', r11: 'm', r12: 'm',
+  }, 'tabela de gênero dos 20 bonecos (10f + 10m)');
   for (let i = 0; i < 600; i += 1) {
     const a = B.__identidadeDe(`session-g-${i}`);
     const gAvatar = B.__GENERO_AVATAR[a.avatar];
-    const gNome = B.__GENERO_NOME[a.name] || 'any';
+    const gNome = B.__GENERO_NOME[a.name];
     assert.ok(['f', 'm'].includes(gAvatar), `session-g-${i}: boneco ${a.avatar} sem gênero`);
-    assert.ok(gNome === gAvatar || gNome === 'any',
-      `session-g-${i}: "${a.name}" (${gNome}) com boneco ${a.avatar} (${gAvatar}) — gêneros não batem`);
+    assert.equal(gNome, gAvatar,
+      `session-g-${i}: "${a.name}" (${gNome}) com boneco ${a.avatar} (${gAvatar}) — gêneros batem estritamente`);
   }
-  // Cobertura: cada gênero tem nomes e bonecos de sobra.
+  // Cobertura: cada gênero tem 40 nomes e 10 bonecos distintos.
   for (const g of ['f', 'm']) {
-    const nomes = B.__NOMES.filter((n) => { const gn = B.__GENERO_NOME[n] || 'any'; return gn === g || gn === 'any'; });
-    assert.ok(nomes.length >= 20, `poucos nomes para o gênero ${g}: ${nomes.length}`);
-    assert.ok(Object.values(B.__GENERO_AVATAR).includes(g), `sem bonecos para o gênero ${g}`);
+    const nomes = B.__NOMES.filter((n) => B.__GENERO_NOME[n] === g);
+    assert.ok(nomes.length >= 40, `poucos nomes para o gênero ${g}: ${nomes.length}`);
+    assert.equal(Object.values(B.__GENERO_AVATAR).filter((x) => x === g).length, 10, `10 bonecos para o gênero ${g}`);
   }
 });
 
@@ -1624,7 +1627,7 @@ test('expressões durante o trabalho: cada evento sorteia a SUA variante e os es
     e = B.__applyEvent(e, { type: 'message', sessionId: 'a', side: i % 2 ? 'assistant' : 'user', at: 1000 + i * 1200 });
     vistas.push(cara());
   }
-  const poolMsg = ['working', 'focused', 'thinking', 'wink', 'inspired', 'determined', 'curious', 'calm', 'snacking', 'cheeky'];
+  const poolMsg = ['working', 'focused', 'thinking', 'wink', 'inspired', 'determined', 'curious', 'searching', 'snacking', 'cheeky'];
   for (const v of vistas) {
     assert.ok(poolMsg.includes(v), `variante do cenário 'mensagem' (${v})`);
   }
@@ -1859,4 +1862,27 @@ test('questionamento: agente com pergunta continua no filtro Trabalhando e apare
   assert.match(svg, /data-mao-levantada="true"/, 'lugar e sinalizador marcados com mão levantada');
   assert.match(svg, /class="question-hand-raised"/, 'desenha o badge da mão levantada junto à cabeça');
   assert.match(svg, /href="#wg-icon-hand"/, 'usa o ícone de mão levantada do sprite');
+});
+
+test('variedade de personagens: 20 modelos (10f + 10m), sem repetição de boneco nem de nome entre ativos e género estrito', () => {
+  let e = B.__createOfficeState({});
+  for (let i = 0; i < 16; i += 1) {
+    e = B.__applyEvent(e, { type: 'session/added', sessionId: `ativa-${i}` });
+    e = B.__applyEvent(e, { type: 'status', sessionId: `ativa-${i}`, status: 'running', at: 1000 + i });
+  }
+  const ativos = [...e.people.values()];
+  const nomes = ativos.map((p) => p.name);
+  assert.equal(new Set(nomes).size, 16, `16 sessões ativas têm 16 nomes distintos: ${nomes.join(', ')}`);
+  for (const p of ativos) {
+    assert.equal(B.__GENERO_NOME[p.name], B.__GENERO_AVATAR[p.avatar],
+      `género estrito em ${p.id}: ${p.name} (${B.__GENERO_NOME[p.name]}) ↔ ${p.avatar} (${B.__GENERO_AVATAR[p.avatar]})`);
+  }
+  const fAtivos = ativos.filter((p) => B.__GENERO_AVATAR[p.avatar] === 'f');
+  const mAtivos = ativos.filter((p) => B.__GENERO_AVATAR[p.avatar] === 'm');
+  if (fAtivos.length <= 10) {
+    assert.equal(new Set(fAtivos.map((p) => p.avatar)).size, fAtivos.length, 'nenhuma personagem feminina ativa repete boneco até 10');
+  }
+  if (mAtivos.length <= 10) {
+    assert.equal(new Set(mAtivos.map((p) => p.avatar)).size, mAtivos.length, 'nenhum personagem masculino ativo repete boneco até 10');
+  }
 });

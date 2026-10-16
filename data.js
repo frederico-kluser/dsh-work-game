@@ -11,23 +11,31 @@ window.DSH_DEMO_DATA = {
     'Cleo', 'Théo', 'Lila', 'Enzo', 'Mila', 'Téo', 'Lara', 'Gael',
     'Sofia', 'Ruan', 'Dara', 'Noa', 'Yara', 'Iuri', 'Levi', 'Mel',
     'Tati', 'Vitor', 'Ari', 'Bel', 'Cauã', 'Duda', 'Ely', 'Fábio',
-    'Gil', 'Hana', 'Iara', 'Júlia', 'Kai', 'Luan', 'Manu', 'Nilo'
+    'Gil', 'Hana', 'Iara', 'Júlia', 'Kai', 'Luan', 'Manu', 'Nilo',
+    'Ada', 'Bruno', 'Carla', 'Dino', 'Elsa', 'Félix', 'Greta', 'Hugo',
+    'Júlio', 'Kira', 'Lino', 'Mara', 'Nuno', 'Olga', 'Pedro', 'Rita',
+    'Tino', 'Vera', 'Yuki', 'Zane', 'Clara', 'Breno', 'Luna', 'Igor',
+    'Bela', 'Raul', 'Cora', 'Yuri', 'Alice', 'Pietro', 'Helena', 'Heitor'
   ],
-  /* Gênero de cada primeiro nome (2026-09-29): casa o nome com o gênero do
-     boneco sorteado — "os gêneros dos bonecos têm de bater com os nomes".
-     'f' feminino · 'm' masculino · 'any' neutro (serve para qualquer boneco).
-     Cobertura OBRIGATÓRIA de todos os firstNames (testado em contracts.test.mjs). */
+  /* Gênero ESTRITO de cada primeiro nome ('f' feminino · 'm' masculino, sem 'any'
+     ambíguo): nomes masculinos casam SEMPRE com rostos masculinos e nomes
+     femininos casam SEMPRE com rostos femininos. Cobertura OBRIGATÓRIA de todos
+     os firstNames (testado em contracts.test.mjs). */
   nameGenders: {
-    // femininos
+    // femininos (40)
     Lia: 'f', Bia: 'f', Maya: 'f', Nara: 'f', Iris: 'f', Nina: 'f', Zoe: 'f',
-    Cleo: 'f', Lila: 'f', Mila: 'f', Lara: 'f', Sofia: 'f', Dara: 'f', Yara: 'f',
-    Tati: 'f', Bel: 'f', Duda: 'f', Hana: 'f', Iara: 'f', 'Júlia': 'f', Manu: 'f',
-    // masculinos
-    Rui: 'm', Tom: 'm', Caio: 'm', Otto: 'm', Davi: 'm', 'Léo': 'm', Ivo: 'm',
-    Ravi: 'm', 'Théo': 'm', Enzo: 'm', 'Téo': 'm', Gael: 'm', Ruan: 'm', Iuri: 'm',
-    Levi: 'm', Vitor: 'm', 'Cauã': 'm', 'Fábio': 'm', Gil: 'm', Luan: 'm', Nilo: 'm',
-    // neutros (apelidos curtos usados para qualquer gênero)
-    Alex: 'any', Noa: 'any', Mel: 'any', Ari: 'any', Ely: 'any', Kai: 'any'
+    Cleo: 'f', Lila: 'f', Mila: 'f', Lara: 'f', Sofia: 'f', Dara: 'f', Noa: 'f',
+    Yara: 'f', Mel: 'f', Tati: 'f', Bel: 'f', Duda: 'f', Ely: 'f', Hana: 'f',
+    Iara: 'f', 'Júlia': 'f', Manu: 'f', Ada: 'f', Carla: 'f', Elsa: 'f', Greta: 'f',
+    Kira: 'f', Mara: 'f', Olga: 'f', Rita: 'f', Vera: 'f', Yuki: 'f', Clara: 'f',
+    Luna: 'f', Bela: 'f', Cora: 'f', Alice: 'f', Helena: 'f',
+    // masculinos (40)
+    Rui: 'm', Tom: 'm', Alex: 'm', Caio: 'm', Otto: 'm', Davi: 'm', 'Léo': 'm',
+    Ivo: 'm', Ravi: 'm', 'Théo': 'm', Enzo: 'm', 'Téo': 'm', Gael: 'm', Ruan: 'm',
+    Iuri: 'm', Levi: 'm', Vitor: 'm', Ari: 'm', 'Cauã': 'm', 'Fábio': 'm', Gil: 'm',
+    Kai: 'm', Luan: 'm', Nilo: 'm', Bruno: 'm', Dino: 'm', 'Félix': 'm', Hugo: 'm',
+    'Júlio': 'm', Lino: 'm', Nuno: 'm', Pedro: 'm', Tino: 'm', Zane: 'm', Breno: 'm',
+    Igor: 'm', Raul: 'm', Yuri: 'm', Pietro: 'm', Heitor: 'm'
   },
   lastNames: [
     'Silva', 'Souza', 'Lima', 'Cruz', 'Melo', 'Rosa', 'Dias', 'Reis',
