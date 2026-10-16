@@ -70,30 +70,31 @@ function parseAttributes(attrText) {
  * percorre o texto, exige que cada '<' inicie uma tag bem formada, e valida o
  * aninhamento por pilha. Também recolhe nome, atributos e tipo de cada tag.
  */
-function stripXmlMeta(text) {
-  let out = text;
-  let prev;
-  do {
-    prev = out;
-    out = out.replace(/<!--[\s\S]*?-->/g, '').replace(/<\?[\s\S]*?\?>/g, '');
-  } while (out !== prev);
-  return out;
-}
-
 function parseSvgTags(rawText) {
-  const cleaned = stripXmlMeta(rawText);
   const tagRe = /<(\/?)([A-Za-z_][A-Za-z0-9_.:-]*)((?:"[^"]*"|'[^']*'|[^>"'])*)>/g;
   const tags = [];
   const errors = [];
   const stack = [];
   let cursor = 0;
-  while (cursor < cleaned.length) {
-    const lt = cleaned.indexOf('<', cursor);
+  while (cursor < rawText.length) {
+    const lt = rawText.indexOf('<', cursor);
     if (lt === -1) break;
+    if (rawText.startsWith('<!--', lt)) {
+      const fim = rawText.indexOf('-->', lt + 4);
+      if (fim === -1) { errors.push('comentário XML não fechado'); break; }
+      cursor = fim + 3;
+      continue;
+    }
+    if (rawText.startsWith('<?', lt)) {
+      const fim = rawText.indexOf('?>', lt + 2);
+      if (fim === -1) { errors.push('instrução XML não fechada'); break; }
+      cursor = fim + 2;
+      continue;
+    }
     tagRe.lastIndex = lt;
-    const m = tagRe.exec(cleaned);
+    const m = tagRe.exec(rawText);
     if (!m || m.index !== lt) {
-      errors.push(`tag mal formada perto de: ${JSON.stringify(cleaned.slice(lt, lt + 40))}`);
+      errors.push(`tag mal formada perto de: ${JSON.stringify(rawText.slice(lt, lt + 40))}`);
       break;
     }
     const closing = m[1] === '/';
@@ -113,7 +114,7 @@ function parseSvgTags(rawText) {
   if (stack.length > 0) {
     errors.push(`tags sem fecho: ${stack.join(', ')}`);
   }
-  return { tags, errors, cleaned };
+  return { tags, errors, cleaned: rawText };
 }
 
 function attr(tag, name) {
