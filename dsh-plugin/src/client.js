@@ -843,7 +843,14 @@ window.__ModuleLoader__.load({
         }
       };
 
+      let emLote = 0;
+      let sujo = false;
       const guardar = () => {
+        if (emLote > 0) {
+          sujo = true;
+          return;
+        }
+        sujo = false;
         try {
           window.localStorage.setItem(CLAVE_ASSOC, JSON.stringify(cache));
         } catch {
@@ -852,6 +859,11 @@ window.__ModuleLoader__.load({
       };
 
       return {
+        iniciarLote() { emLote += 1; },
+        fecharLote() {
+          if (emLote > 0) emLote -= 1;
+          if (emLote === 0 && sujo) guardar();
+        },
         // `ocupado(nome)`: o nome já é de outra pessoa na sala (desempate).
         // Só se consulta ao derivar uma identidade nova — depois, O(1).
         para(id, ocupado) {
@@ -2469,19 +2481,21 @@ function mascararChave(chave) {
     // Evento normalizado (vocabulário §1) -> NOVO estado.
     // As únicas escrituras de emoji/status/expression acontecem aqui, derivadas
     // do evento recebido — nunca de um timer.
-    function applyEvent(estado, evento) {
-      const pessoas = new Map(estado.people);
+    function applyEvent(estado, evento, mutarMapa = false) {
+      const pessoas = mutarMapa ? estado.people : new Map(estado.people);
       const p = (id) => pessoas.get(id);
       const extra = {};
 
       switch (evento.type) {
         case 'session/added':
           if (!pessoas.has(evento.sessionId)) {
-            // Desempate de homónimos: o nome preferido já é de outra pessoa da sala?
-            const asoc = associador.para(evento.sessionId, (nome) => {
-              for (const outra of pessoas.values()) if (outra.name === nome) return true;
-              return false;
-            });
+            if (!(pessoas._nomes instanceof Set)) {
+              pessoas._nomes = new Set();
+              for (const outra of pessoas.values()) if (outra && outra.name) pessoas._nomes.add(outra.name);
+            }
+            // Desempate de homónimos em O(1): o nome preferido já é de outra pessoa da sala?
+            const asoc = associador.para(evento.sessionId, (nome) => pessoas._nomes.has(nome));
+            if (asoc && asoc.name) pessoas._nomes.add(asoc.name);
             pessoas.set(evento.sessionId, criarPessoa(evento.sessionId, evento.model, asoc, evento));
           }
           break;
@@ -2506,6 +2520,7 @@ function mascararChave(chave) {
         case 'session/removed':
           // A associação fica em localStorage: se a sessão voltar, mantém
           // nome e estilo (identidade estável entre desconexões).
+          pessoas._nomes = null;
           pessoas.delete(evento.sessionId);
           break;
         case 'workspaces':
@@ -9719,9 +9734,15 @@ function mascararChave(chave) {
         if (!filaEventos.length) return false;
         const lote = filaEventos;
         filaEventos = [];
-        for (const ev of lote) {
-          estado = applyEvent(estado, ev);
-          vigia.observar(ev);
+        estado = { ...estado, people: new Map(estado.people) };
+        associador.iniciarLote();
+        try {
+          for (const ev of lote) {
+            estado = applyEvent(estado, ev, true);
+            vigia.observar(ev);
+          }
+        } finally {
+          associador.fecharLote();
         }
         return true;
       };
