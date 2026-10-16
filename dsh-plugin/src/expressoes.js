@@ -95,13 +95,13 @@ export const EXPRESSOES_LIMIARES = {
  */
 export const EXPRESSOES_CENARIOS = {
   pergunta: {
-    pool: ['waiting', 'thinking', 'surprised'], base: 'waiting', prob: 1, prioridade: 95
+    pool: ['waiting', 'thinking', 'surprised', 'curious', 'baffled'], base: 'waiting', prob: 1, prioridade: 95
   },
   aprovacao: {
-    pool: ['approval', 'waiting', 'surprised'], base: 'waiting', prob: 1, prioridade: 95
+    pool: ['approval', 'waiting', 'surprised', 'curious'], base: 'waiting', prob: 1, prioridade: 95
   },
   erro: {
-    pool: ['error', 'surprised', 'disbelief'], base: 'error', prob: 1, prioridade: 90,
+    pool: ['error', 'surprised', 'disbelief', 'frustrated', 'nauseated', 'dizzy'], base: 'error', prob: 1, prioridade: 90,
     /* terminal: mantém o pool todo por omissão; o grau doseia por severidade */
     graus: [
       { grau: 1, intensidade: 0.3, presets: ['surprised'] },
@@ -110,10 +110,10 @@ export const EXPRESSOES_CENARIOS = {
     ]
   },
   sucesso: {
-    pool: ['success', 'celebrating', 'approval', 'wink'], base: 'success', prob: 0.9, prioridade: 85
+    pool: ['success', 'celebrating', 'approval', 'wink', 'inspired', 'cheeky'], base: 'success', prob: 0.9, prioridade: 85
   },
   'ferramenta-erro': {
-    pool: ['surprised', 'disbelief', 'error'], base: 'error', prob: 1, prioridade: 80,
+    pool: ['surprised', 'disbelief', 'error', 'baffled', 'frustrated'], base: 'error', prob: 1, prioridade: 80,
     /* transitório de BAIXA intensidade [Q6: surpresa-confusão breve] */
     graus: [
       { grau: 1, intensidade: 0.3, presets: ['surprised'] },
@@ -122,7 +122,7 @@ export const EXPRESSOES_CENARIOS = {
     ]
   },
   'erro-transitorio': {
-    pool: ['surprised', 'thinking', 'disbelief'], base: 'thinking', prob: 1, prioridade: 75,
+    pool: ['surprised', 'thinking', 'disbelief', 'baffled', 'frustrated', 'dizzy'], base: 'thinking', prob: 1, prioridade: 75,
     /* ESCALA a cada retentativa consecutiva [Q6/Q11] — ver grauDeCenario */
     graus: [
       { grau: 1, intensidade: 0.3, presets: ['surprised'] },
@@ -131,34 +131,34 @@ export const EXPRESSOES_CENARIOS = {
     ]
   },
   cancelado: {
-    pool: ['disbelief', 'waiting', 'idle'], base: 'idle', prob: 1, prioridade: 70
+    pool: ['disbelief', 'waiting', 'idle', 'baffled', 'calm'], base: 'idle', prob: 1, prioridade: 70
   },
   compactacao: {
     /* micro-reação breve seguida de regresso a 'contexto' [Q12] */
-    pool: ['surprised', 'disbelief', 'thinking'], base: 'thinking', prob: 1, prioridade: 65
+    pool: ['surprised', 'disbelief', 'thinking', 'snacking', 'dizzy'], base: 'thinking', prob: 1, prioridade: 65
   },
   sobrecarga: {
     /* nível alto RARO e CURTO [Q12]: após este desenho, o próximo desenho de
        prioridade inferior regressa a 'contexto'/'focused' (estado limitado no
        tempo — ver docs/ALGORITMO-EXPRESSOES.md) */
-    pool: ['thinking', 'disbelief', 'surprised'], base: 'thinking', prob: 1, prioridade: 60
+    pool: ['thinking', 'disbelief', 'surprised', 'dizzy', 'frustrated'], base: 'thinking', prob: 1, prioridade: 60
   },
   ferramenta: {
-    pool: ['tool', 'searching', 'focused', 'thinking'], base: 'working', prob: 0.85, prioridade: 50
+    pool: ['tool', 'searching', 'focused', 'thinking', 'determined', 'curious'], base: 'working', prob: 0.85, prioridade: 50
   },
   contexto: {
-    pool: ['focused', 'thinking'], base: 'focused', prob: 1, prioridade: 45
+    pool: ['focused', 'thinking', 'determined', 'snacking'], base: 'focused', prob: 1, prioridade: 45
   },
   mensagem: {
-    pool: ['working', 'focused', 'thinking', 'wink'], base: 'working', prob: 0.5, prioridade: 40
+    pool: ['working', 'focused', 'thinking', 'wink', 'inspired', 'determined', 'curious', 'searching', 'snacking', 'cheeky'], base: 'working', prob: 0.65, prioridade: 40
   },
   subagente: {
-    pool: ['thinking', 'tool', 'focused'], base: 'working', prob: 0.6, prioridade: 35
+    pool: ['thinking', 'tool', 'focused', 'determined', 'curious', 'inspired'], base: 'working', prob: 0.7, prioridade: 35
   },
   ocioso: {
     /* 'wink' é micro-interação de repouso (vive EM CIMA do hold, não o
        substitui [Q3/S33]) — nas superfícies é reação one-shot */
-    pool: ['idle', 'wink'], base: 'idle', prob: 0.7, prioridade: 10
+    pool: ['idle', 'wink', 'calm', 'cheeky'], base: 'idle', prob: 0.7, prioridade: 10
   },
   dormir: {
     /* Modo jogo: quem está Disponível dorme (assets/avatars/sleeping/) */

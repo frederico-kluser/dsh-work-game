@@ -190,14 +190,14 @@ test('estados: os 6 estados mudam rótulo, ícone e marcador de atenção', asyn
 
 // ─────────────────────────────── 7. Expressões ───────────────────────────────
 
-test('expressões: 14 presets com enums reais e troca efetiva do rosto', async () => {
+test('expressões: 24 presets com enums reais e troca efetiva do rosto', async () => {
   await page.click('g.seat[role="button"][data-agent="p-rui"]');
   await page.click('[data-action="tab"][data-tab="expressions"]');
   const presets = await page.eval(`(() => [...document.querySelectorAll('.expression-card')].map((c) => ({
     id: c.dataset.expression,
     codigo: c.querySelector('code').textContent.trim()
   })))()`);
-  assert.equal(presets.length, 14, 'são 14 presets de expressão');
+  assert.equal(presets.length, 24, 'são 24 presets de expressão');
   for (const p of presets) {
     assert.match(p.codigo, /^[A-Za-z]+\/[A-Za-z]+\/[A-Za-z]+$/, `preset ${p.id} tem triple eye/eyebrow/mouth`);
   }

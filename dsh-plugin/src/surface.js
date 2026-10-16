@@ -317,6 +317,95 @@ export function extrairSuperficie(ctx, opts = {}) {
     return wsList !== null;
   };
 
+  /* ── uiSession.sessionStatus: perguntas pendentes (PendingQuestion) ─── */
+  let statusFonte = null;
+  let statusSoltar = null;
+  let ultimoEmitir = null;
+  const perguntasAtivas = new Map(); // sessionId -> { key, id, interacao, questions }
+
+  const normalizarPerguntas = (interacao) => {
+    const brutas = interacao && Array.isArray(interacao.questions) ? interacao.questions : null;
+    if (!brutas || brutas.length === 0) return null;
+    return brutas.filter(Boolean).map((q, idx) => {
+      const id = String(q.id ?? `q${idx + 1}`);
+      const texto = typeof q.question === 'string' && q.question.trim()
+        ? q.question.trim()
+        : (typeof q.text === 'string' && q.text.trim() ? q.text.trim() : 'Pergunta');
+      const item = { id, question: texto, multiSelect: q.multiSelect === true };
+      if (typeof q.header === 'string' && q.header.trim()) item.header = q.header.trim();
+      if (typeof q.detail === 'string' && q.detail.trim()) item.detail = q.detail.trim();
+      if (Array.isArray(q.options)) {
+        item.options = q.options.filter(Boolean).map((o) => (typeof o === 'string'
+          ? { label: o }
+          : {
+            label: String(o.label ?? ''),
+            ...(typeof o.description === 'string' && o.description.trim() ? { description: o.description.trim() } : {}),
+          }));
+      }
+      return item;
+    });
+  };
+
+  const emitirInteracoes = (emitir) => {
+    if (!statusFonte) return;
+    let snap = null;
+    try { snap = statusFonte.getSnapshot(); } catch { snap = null; }
+    if (!snap) return;
+    const entradas = snap instanceof Map ? [...snap.entries()] : Object.entries(snap);
+    const vistas = new Set();
+    for (const [idBruto, st] of entradas) {
+      const id = String(idBruto);
+      const interacao = st && typeof st === 'object' ? st.pendingInteraction : null;
+      const questions = normalizarPerguntas(interacao);
+      if (!questions) continue;
+      vistas.add(id);
+      const chave = String((interacao && interacao.key) ?? questions.map((q) => `${q.id}:${q.question}`).join('|'));
+      const antes = perguntasAtivas.get(id);
+      if (antes && antes.key === chave) {
+        antes.interacao = interacao;
+        continue;
+      }
+      const q0 = questions[0];
+      perguntasAtivas.set(id, { key: chave, id: q0.id, interacao, questions });
+      emitir({
+        type: 'question',
+        sessionId: id,
+        id: q0.id,
+        key: chave,
+        text: q0.question,
+        ...(q0.header ? { header: q0.header } : {}),
+        ...(q0.detail ? { detail: q0.detail } : {}),
+        ...(q0.options ? { options: q0.options } : {}),
+        multiSelect: q0.multiSelect,
+        questions,
+      });
+    }
+    for (const [id, reg] of [...perguntasAtivas.entries()]) {
+      if (vistas.has(id)) continue;
+      perguntasAtivas.delete(id);
+      emitir({ type: 'question/answered', sessionId: id, id: reg.id });
+    }
+  };
+
+  const ligarInteracoes = (emitir) => {
+    const servicoUi = servicoDe(ctx, 'uiSession');
+    const novo = servicoUi && servicoUi.sessionStatus && typeof servicoUi.sessionStatus.getSnapshot === 'function'
+      ? servicoUi.sessionStatus : null;
+    if (novo !== statusFonte) {
+      if (statusSoltar) { try { statusSoltar(); } catch { /* já solto */ } }
+      statusSoltar = null;
+      statusFonte = novo;
+      if (statusFonte && typeof statusFonte.subscribe === 'function') {
+        try {
+          const soltar = statusFonte.subscribe(() => emitirInteracoes(emitir));
+          statusSoltar = typeof soltar === 'function' ? soltar : null;
+        } catch { statusSoltar = null; }
+      }
+    }
+    emitirInteracoes(emitir);
+    return statusFonte !== null;
+  };
+
   /* estado anterior por sessão para diff (só muda o que mudou) */
   const anterior = new Map();      // id -> { running, usage, modelo, janela, usado, meta, paiAtivo }
   const velocidades = new Map();   // id -> { inicio, saida, v } — só do turno EM CURSO
@@ -353,6 +442,7 @@ export function extrairSuperficie(ctx, opts = {}) {
       if (atuais.has(id)) continue;
       anterior.delete(id);
       velocidades.delete(id);
+      perguntasAtivas.delete(id);
       if (antes.paiAtivo) {
         emitir({ type: 'subagent/end', sessionId: antes.paiAtivo, childId: id, runId: id });
       }
@@ -445,28 +535,33 @@ export function extrairSuperficie(ctx, opts = {}) {
 
   return {
     catalogo,
-    /** Subscreve sessões e workspaces; devolve SEMPRE a função de libertação. */
+    /** Subscreve sessões, workspaces e uiSession; devolve SEMPRE a função de libertação. */
     assinar(emitir) {
       if (typeof emitir !== 'function') return null;
+      ultimoEmitir = emitir;
       const soltas = [];
       difs(emitir); /* vislumbre imediato do que já existe */
       ligarWorkspaces(emitir);
+      ligarInteracoes(emitir);
       if (typeof list.subscribe === 'function') {
         try {
           const soltar = list.subscribe(() => {
             difs(emitir);
             ligarWorkspaces(emitir); /* religa se o serviço de workspaces apareceu/mudou */
+            ligarInteracoes(emitir);
           });
           if (typeof soltar === 'function') soltas.push(soltar);
         } catch { /* sem subscrição: fica o vislumbre inicial */ }
       }
-      /* ligação tardia: o serviço de workspaces pode ativar depois do plugin */
+      /* ligação tardia: o serviço de workspaces/uiSession pode ativar depois do plugin */
       let relogio = null;
-      if (wsList === null && intervaloWs > 0 && typeof setInterval === 'function') {
+      if ((wsList === null || statusFonte === null) && intervaloWs > 0 && typeof setInterval === 'function') {
         let tentativas = 0;
         relogio = setInterval(() => {
           tentativas += 1;
-          if (ligarWorkspaces(emitir) || tentativas >= 60) {
+          const wsOk = ligarWorkspaces(emitir);
+          const uiOk = ligarInteracoes(emitir);
+          if ((wsOk && uiOk) || tentativas >= 60) {
             clearInterval(relogio);
             relogio = null;
           }
@@ -474,17 +569,52 @@ export function extrairSuperficie(ctx, opts = {}) {
         relogio?.unref?.(); /* Node: não segura o processo (no browser é um número) */
       }
       return () => {
+        if (ultimoEmitir === emitir) ultimoEmitir = null;
         for (const soltar of soltas.splice(0)) { try { soltar(); } catch { /* já solto */ } }
         if (relogio !== null) { clearInterval(relogio); relogio = null; }
         if (wsSoltar) { try { wsSoltar(); } catch { /* já solto */ } }
+        if (statusSoltar) { try { statusSoltar(); } catch { /* já solto */ } }
         wsSoltar = null;
         wsList = null;
+        statusSoltar = null;
+        statusFonte = null;
       };
     },
     /** tok/s do turno em curso (só enquanto corre); null fora do turno ou sem produção. */
     velocidadeDe(id) {
       const reg = velocidades.get(String(id));
       return reg && reg.v !== null && reg.v >= 1 ? Math.round(reg.v) : null;
+    },
+    /** Questionário pendente de uma sessão (lido de uiSession.sessionStatus). */
+    perguntaDe(id) {
+      const reg = perguntasAtivas.get(String(id));
+      return reg ? { key: reg.key, id: reg.id, questions: reg.questions } : null;
+    },
+    /** Responde ao PendingQuestion real do DSH e limpa a pendência local. */
+    async responderPergunta(id, respostas) {
+      const chaveId = String(id);
+      const reg = perguntasAtivas.get(chaveId);
+      if (reg && reg.interacao && typeof reg.interacao.answer === 'function') {
+        await reg.interacao.answer({ answers: Array.isArray(respostas) ? respostas : [] });
+      }
+      if (perguntasAtivas.has(chaveId)) {
+        perguntasAtivas.delete(chaveId);
+        if (ultimoEmitir) ultimoEmitir({ type: 'question/answered', sessionId: chaveId, id: reg ? reg.id : undefined });
+      }
+      return { ok: true };
+    },
+    /** Cancela o PendingQuestion real do DSH e limpa a pendência local. */
+    async cancelarPergunta(id) {
+      const chaveId = String(id);
+      const reg = perguntasAtivas.get(chaveId);
+      if (reg && reg.interacao && typeof reg.interacao.cancel === 'function') {
+        await reg.interacao.cancel();
+      }
+      if (perguntasAtivas.has(chaveId)) {
+        perguntasAtivas.delete(chaveId);
+        if (ultimoEmitir) ultimoEmitir({ type: 'question/answered', sessionId: chaveId, id: reg ? reg.id : undefined });
+      }
+      return { ok: true };
     },
   };
 }

@@ -32,8 +32,10 @@ const EXPRESSIONS = readFileSync(new URL('expressions.js', RAIZ), 'utf8');
 const SEM_EXPORTS = FONTE.split('\n').map((l) => l.replace(/^export (const|function|let) /, '$1 ')).join('\n');
 
 const TODOS_OS_PRESETS = [
-  'approval', 'celebrating', 'disbelief', 'error', 'focused', 'idle', 'searching',
-  'success', 'surprised', 'thinking', 'tool', 'waiting', 'wink', 'working',
+  'approval', 'baffled', 'calm', 'celebrating', 'cheeky', 'curious', 'determined',
+  'disbelief', 'dizzy', 'error', 'focused', 'frustrated', 'idle', 'inspired',
+  'nauseated', 'searching', 'snacking', 'success', 'surprised', 'thinking',
+  'tool', 'waiting', 'wink', 'working',
 ];
 
 /* ------------------------------------------------------------------ */

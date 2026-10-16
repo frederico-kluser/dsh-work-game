@@ -4,7 +4,7 @@
   <a href="https://securityscorecards.dev/viewer/?uri=github.com/frederico-kluser/dsh-work-game"><img src="https://api.securityscorecards.dev/projects/github.com/frederico-kluser/dsh-work-game/badge" alt="OpenSSF Scorecard"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License: MIT"></a>
   <a href="https://img.shields.io/badge/node-%3E%3D22-brightgreen.svg"><img src="https://img.shields.io/badge/node-%3E%3D22-brightgreen.svg" alt="Node: &gt;=22"></a>
-  <a href="https://img.shields.io/badge/tests-414%20passing-blue.svg"><img src="https://img.shields.io/badge/tests-414%20passing-blue.svg" alt="Tests: 414 passing"></a>
+  <a href="https://img.shields.io/badge/tests-427%20passing-blue.svg"><img src="https://img.shields.io/badge/tests-427%20passing-blue.svg" alt="Tests: 427 passing"></a>
 </p>
 
 **Front-end puro em HTML, CSS, JavaScript e SVG — zero dependências, zero build, zero backend.** Uma sala onde times de agentes trabalham lado a lado, com mesas modulares, balões de output e expressões que mudam com o estado de cada pessoa. Duas formas de a ver: a **demo** (tudo simulado em memória) e o **Modo jogo** dentro do DeepSeek Harness (DSH), com as conversas e os workspaces reais.

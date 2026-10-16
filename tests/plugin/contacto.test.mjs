@@ -401,7 +401,7 @@ test('tela: nome, boneco, prompt, skills por checkbox, modelo e o botão "Adicio
     assert.equal(botao.filhos.join(''), 'Adicionar contacto');
     // O preview nasce do nome vazio (boneco derivado) e mostra o <use> certo.
     const boneco = deExato('wg-tel-contacto-boneco')[0];
-    assert.match(boneco.props.dangerouslySetInnerHTML.__html, /<use href="#wgav-[a-z]+-idle"/);
+    assert.match(boneco.props.dangerouslySetInnerHTML.__html, /<use href="#wgav-[a-z0-9]+-idle"/);
     // As skills escolhidas aparecem como /nome — o gesto que o DSH invoca.
     const nomes = nosDe(arvore, (n) => n.props.className === 'wg-tel-contacto-skill-nome');
     assert.deepEqual(nomes.map((n) => n.filhos.join('')), ['/tavily-agent-skill', '/github-agent-skill']);
@@ -422,7 +422,7 @@ test('tela: o nome escolhido muda o boneco do preview e as skills entram no prom
     });
     let arvore = desenhar();
     const deExato = (classe) => nosDe(arvore, (n) => n.props.className === classe);
-    const bonecoAtual = () => deExato('wg-tel-contacto-boneco')[0].props.dangerouslySetInnerHTML.__html.match(/#wgav-([a-z]+)-idle/)[1];
+    const bonecoAtual = () => deExato('wg-tel-contacto-boneco')[0].props.dangerouslySetInnerHTML.__html.match(/#wgav-([a-z0-9]+)-idle/)[1];
 
     deExato('wg-tel-contacto-nome')[0].props.onChange({ target: { value: 'Maya' } });
     deExato('wg-tel-contacto-prompt')[0].props.onChange({ target: { value: 'faz X' } });

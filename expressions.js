@@ -28,20 +28,30 @@
      Enums verificados em github.com/fangpenlin/avataaars
      (src/avatar/face/eyes|eyebrow|mouth/index.tsx). */
   var presets = [
-    { id: 'idle',        label: 'Em repouso',     eyeType: 'Default',   eyebrowType: 'DefaultNatural',      mouthType: 'Smile',      when: 'parado, sem tarefa em andamento' },
-    { id: 'working',     label: 'Trabalhando',    eyeType: 'Happy',     eyebrowType: 'DefaultNatural',      mouthType: 'Twinkle',    when: 'executando a tarefa normal' },
-    { id: 'focused',     label: 'Concentrado',    eyeType: 'Squint',    eyebrowType: 'FlatNatural',         mouthType: 'Serious',    when: 'foco profundo / modo silencioso' },
-    { id: 'tool',        label: 'Com ferramenta', eyeType: 'WinkWacky', eyebrowType: 'RaisedExcited',       mouthType: 'Smile',      when: 'acionou ferramenta/terminal' },
-    { id: 'searching',   label: 'Procurando',     eyeType: 'Side',      eyebrowType: 'UpDown',              mouthType: 'Concerned',  when: 'busca/varredura em andamento' },
-    { id: 'thinking',    label: 'Pensando',       eyeType: 'Squint',    eyebrowType: 'UnibrowNatural',      mouthType: 'Concerned',  when: 'planejando, deliberando' },
-    { id: 'waiting',     label: 'Esperando',      eyeType: 'Default',   eyebrowType: 'SadConcerned',        mouthType: 'Sad',        when: 'aguardando fila ou resposta' },
-    { id: 'approval',    label: 'Aprovando',      eyeType: 'Wink',      eyebrowType: 'RaisedExcited',       mouthType: 'Smile',      when: 'aprovação / sinal positivo' },
-    { id: 'success',     label: 'Sucesso',        eyeType: 'Happy',     eyebrowType: 'RaisedExcitedNatural', mouthType: 'Smile',     when: 'tarefa concluída com sucesso' },
-    { id: 'celebrating', label: 'Comemorando',    eyeType: 'WinkWacky', eyebrowType: 'RaisedExcited',       mouthType: 'Tongue',     when: 'vitória, festa, conquista' },
-    { id: 'error',       label: 'Erro',           eyeType: 'Cry',       eyebrowType: 'AngryNatural',        mouthType: 'Grimace',    when: 'falha, erro, derrota momentânea' },
-    { id: 'surprised',   label: 'Surpreso',       eyeType: 'Surprised', eyebrowType: 'RaisedExcited',       mouthType: 'ScreamOpen', when: 'evento inesperado, bug súbito' },
-    { id: 'disbelief',   label: 'Descrente',      eyeType: 'EyeRoll',   eyebrowType: 'UpDownNatural',       mouthType: 'Disbelief',  when: 'incredulidade, "não acredito"' },
-    { id: 'wink',        label: 'Piscada',        eyeType: 'Wink',      eyebrowType: 'RaisedExcited',       mouthType: 'Smile',      when: 'gracejo, interação casual' }
+    { id: 'idle',        label: 'Em repouso',     eyeType: 'Default',   eyebrowType: 'DefaultNatural',       mouthType: 'Smile',      when: 'parado, sem tarefa em andamento' },
+    { id: 'working',     label: 'Trabalhando',    eyeType: 'Happy',     eyebrowType: 'DefaultNatural',       mouthType: 'Twinkle',    when: 'executando a tarefa normal' },
+    { id: 'focused',     label: 'Concentrado',    eyeType: 'Squint',    eyebrowType: 'FlatNatural',          mouthType: 'Serious',    when: 'foco profundo / modo silencioso' },
+    { id: 'tool',        label: 'Com ferramenta', eyeType: 'WinkWacky', eyebrowType: 'RaisedExcited',        mouthType: 'Smile',      when: 'acionou ferramenta/terminal' },
+    { id: 'searching',   label: 'Procurando',     eyeType: 'Side',      eyebrowType: 'UpDown',               mouthType: 'Concerned',  when: 'busca/varredura em andamento' },
+    { id: 'thinking',    label: 'Pensando',       eyeType: 'Squint',    eyebrowType: 'UnibrowNatural',       mouthType: 'Concerned',  when: 'planejando, deliberando' },
+    { id: 'waiting',     label: 'Esperando',      eyeType: 'Default',   eyebrowType: 'SadConcerned',         mouthType: 'Sad',        when: 'aguardando fila ou resposta' },
+    { id: 'approval',    label: 'Aprovando',      eyeType: 'Default',   eyebrowType: 'RaisedExcitedNatural', mouthType: 'Smile',      when: 'aprovação / sinal positivo' },
+    { id: 'success',     label: 'Sucesso',        eyeType: 'Happy',     eyebrowType: 'RaisedExcitedNatural', mouthType: 'Smile',      when: 'tarefa concluída com sucesso' },
+    { id: 'celebrating', label: 'Comemorando',    eyeType: 'WinkWacky', eyebrowType: 'RaisedExcited',        mouthType: 'Tongue',     when: 'vitória, festa, conquista' },
+    { id: 'error',       label: 'Erro',           eyeType: 'Cry',       eyebrowType: 'AngryNatural',         mouthType: 'Grimace',    when: 'falha, erro, derrota momentânea' },
+    { id: 'surprised',   label: 'Surpreso',       eyeType: 'Surprised', eyebrowType: 'RaisedExcited',        mouthType: 'ScreamOpen', when: 'evento inesperado, bug súbito' },
+    { id: 'disbelief',   label: 'Descrente',      eyeType: 'EyeRoll',   eyebrowType: 'UpDownNatural',        mouthType: 'Disbelief',  when: 'incredulidade, "não acredito"' },
+    { id: 'wink',        label: 'Piscada',        eyeType: 'Wink',      eyebrowType: 'RaisedExcited',        mouthType: 'Smile',      when: 'gracejo, interação casual' },
+    { id: 'inspired',    label: 'Inspirado',      eyeType: 'Hearts',    eyebrowType: 'RaisedExcitedNatural', mouthType: 'Twinkle',    when: 'grande ideia, solução criativa ou entusiasmo' },
+    { id: 'determined',  label: 'Determinado',    eyeType: 'Squint',    eyebrowType: 'Angry',                mouthType: 'Default',    when: 'foco intenso, resolução firme de problema difícil' },
+    { id: 'curious',     label: 'Curioso',        eyeType: 'Side',      eyebrowType: 'RaisedExcited',        mouthType: 'Default',    when: 'investigando detalhe ou explorando hipótese' },
+    { id: 'calm',        label: 'Sereno',         eyeType: 'Close',     eyebrowType: 'Default',              mouthType: 'Smile',      when: 'fluxo tranquilo, trabalho estável sem pressão' },
+    { id: 'snacking',    label: 'Digerindo',      eyeType: 'Happy',     eyebrowType: 'UpDown',               mouthType: 'Eating',     when: 'processando lote grande de dados ou leitura longa' },
+    { id: 'dizzy',       label: 'Tonto',          eyeType: 'Dizzy',     eyebrowType: 'SadConcernedNatural',  mouthType: 'Concerned',  when: 'sobrecarga de contexto, muitas retentativas ou confusão' },
+    { id: 'baffled',     label: 'Perplexo',       eyeType: 'Surprised', eyebrowType: 'UpDownNatural',        mouthType: 'Disbelief',  when: 'resultado inesperado ou anomalia curiosa' },
+    { id: 'frustrated',  label: 'Frustrado',      eyeType: 'EyeRoll',   eyebrowType: 'AngryNatural',         mouthType: 'Serious',    when: 'obstáculo repetido, falha de ferramenta ou código teimoso' },
+    { id: 'nauseated',   label: 'Enjoado',        eyeType: 'Cry',       eyebrowType: 'SadConcerned',         mouthType: 'Vomit',      when: 'erro grave, dados corrompidos ou código esparguete' },
+    { id: 'cheeky',      label: 'Confiante',      eyeType: 'Wink',      eyebrowType: 'UpDown',               mouthType: 'Tongue',     when: 'truque engenhoso, atalho esperto ou vitória rápida' }
   ];
 
   var namedIdentityIds = ['rui', 'bia', 'lia', 'pesquisa', 'codigo', 'testes', 'alex', 'maya'];
@@ -75,51 +85,51 @@
        (paleta fixa #262E33 + #3A4C5A) — por isso essas identidades declaram
        `clotheColor: 'Black'`, que é o que sai mesmo.
        Regeneração: python3 scripts/gerar-avatares-random.py */
-    r01: { type: 'random', gender: 'f', dir: RANDOM_DIR + 'r01', presets: ['idle', 'working', 'success', 'error'],
+    r01: { type: 'random', gender: 'f', dir: RANDOM_DIR + 'r01', presets: ALL_NAMED_PRESETS,
            topType: 'LongHairBob', hairColor: 'BrownDark', accessoriesType: 'Blank',
            facialHairType: 'Blank', facialHairColor: 'BrownDark',
            clotheType: 'ShirtCrewNeck', clotheColor: 'PastelBlue', skinColor: 'Pale' },
-    r02: { type: 'random', gender: 'f', dir: RANDOM_DIR + 'r02', presets: ['idle', 'working', 'success', 'error'],
+    r02: { type: 'random', gender: 'f', dir: RANDOM_DIR + 'r02', presets: ALL_NAMED_PRESETS,
            topType: 'LongHairCurly', hairColor: 'Black', accessoriesType: 'Round',
            facialHairType: 'Blank', facialHairColor: 'Black',
            clotheType: 'CollarSweater', clotheColor: 'PastelGreen', skinColor: 'DarkBrown' },
-    r03: { type: 'random', gender: 'f', dir: RANDOM_DIR + 'r03', presets: ['idle', 'working', 'success', 'error'],
-           topType: 'LongHairStraight2', hairColor: 'Blonde', accessoriesType: 'Blank',
-           facialHairType: 'Blank', facialHairColor: 'Blonde',
-           clotheType: 'ShirtScoopNeck', clotheColor: 'Pink', skinColor: 'Light' },
-    r04: { type: 'random', gender: 'f', dir: RANDOM_DIR + 'r04', presets: ['idle', 'working', 'success', 'error'],
+    r03: { type: 'random', gender: 'f', dir: RANDOM_DIR + 'r03', presets: ALL_NAMED_PRESETS,
+           topType: 'LongHairNotTooLong', hairColor: 'Red', accessoriesType: 'Blank',
+           facialHairType: 'Blank', facialHairColor: 'Red',
+           clotheType: 'ShirtScoopNeck', clotheColor: 'PastelGreen', skinColor: 'Pale' },
+    r04: { type: 'random', gender: 'f', dir: RANDOM_DIR + 'r04', presets: ALL_NAMED_PRESETS,
            topType: 'LongHairBun', hairColor: 'Auburn', accessoriesType: 'Prescription01',
            facialHairType: 'Blank', facialHairColor: 'Auburn',
            clotheType: 'BlazerShirt', clotheColor: 'Black', skinColor: 'Tanned' },
-    r05: { type: 'random', gender: 'f', dir: RANDOM_DIR + 'r05', presets: ['idle', 'working', 'success', 'error'],
+    r05: { type: 'random', gender: 'f', dir: RANDOM_DIR + 'r05', presets: ALL_NAMED_PRESETS,
            topType: 'LongHairFro', hairColor: 'Brown', accessoriesType: 'Blank',
            facialHairType: 'Blank', facialHairColor: 'Brown',
            clotheType: 'Hoodie', clotheColor: 'Red', skinColor: 'Black' },
-    r06: { type: 'random', gender: 'f', dir: RANDOM_DIR + 'r06', presets: ['idle', 'working', 'success', 'error'],
+    r06: { type: 'random', gender: 'f', dir: RANDOM_DIR + 'r06', presets: ALL_NAMED_PRESETS,
            topType: 'LongHairMiaWallace', hairColor: 'SilverGray', accessoriesType: 'Blank',
            facialHairType: 'Blank', facialHairColor: 'SilverGray',
            clotheType: 'GraphicShirt', graphicType: 'Hola', clotheColor: 'PastelYellow', skinColor: 'Brown' },
-    r07: { type: 'random', gender: 'm', dir: RANDOM_DIR + 'r07', presets: ['idle', 'working', 'success', 'error'],
+    r07: { type: 'random', gender: 'm', dir: RANDOM_DIR + 'r07', presets: ALL_NAMED_PRESETS,
            topType: 'ShortHairShortCurly', hairColor: 'BlondeGolden', accessoriesType: 'Blank',
            facialHairType: 'BeardLight', facialHairColor: 'BlondeGolden',
            clotheType: 'BlazerSweater', clotheColor: 'Black', skinColor: 'Tanned' },
-    r08: { type: 'random', gender: 'm', dir: RANDOM_DIR + 'r08', presets: ['idle', 'working', 'success', 'error'],
+    r08: { type: 'random', gender: 'm', dir: RANDOM_DIR + 'r08', presets: ALL_NAMED_PRESETS,
            topType: 'ShortHairShortFlat', hairColor: 'Platinum', accessoriesType: 'Prescription02',
            facialHairType: 'Blank', facialHairColor: 'Platinum',
            clotheType: 'ShirtCrewNeck', clotheColor: 'White', skinColor: 'Light' },
-    r09: { type: 'random', gender: 'm', dir: RANDOM_DIR + 'r09', presets: ['idle', 'working', 'success', 'error'],
+    r09: { type: 'random', gender: 'm', dir: RANDOM_DIR + 'r09', presets: ALL_NAMED_PRESETS,
            topType: 'ShortHairDreads01', hairColor: 'BrownDark', accessoriesType: 'Blank',
            facialHairType: 'Blank', facialHairColor: 'BrownDark',
            clotheType: 'Overall', clotheColor: 'Gray01', skinColor: 'Brown' },
-    r10: { type: 'random', gender: 'm', dir: RANDOM_DIR + 'r10', presets: ['idle', 'working', 'success', 'error'],
+    r10: { type: 'random', gender: 'm', dir: RANDOM_DIR + 'r10', presets: ALL_NAMED_PRESETS,
            topType: 'ShortHairFrizzle', hairColor: 'Red', accessoriesType: 'Round',
            facialHairType: 'MoustacheFancy', facialHairColor: 'Red',
            clotheType: 'ShirtVNeck', clotheColor: 'Blue02', skinColor: 'Pale' },
-    r11: { type: 'random', gender: 'm', dir: RANDOM_DIR + 'r11', presets: ['idle', 'working', 'success', 'error'],
+    r11: { type: 'random', gender: 'm', dir: RANDOM_DIR + 'r11', presets: ALL_NAMED_PRESETS,
            topType: 'ShortHairTheCaesar', hairColor: 'Brown', accessoriesType: 'Blank',
            facialHairType: 'BeardMedium', facialHairColor: 'Brown',
            clotheType: 'CollarSweater', clotheColor: 'PastelOrange', skinColor: 'Black' },
-    r12: { type: 'random', gender: 'm', dir: RANDOM_DIR + 'r12', presets: ['idle', 'working', 'success', 'error'],
+    r12: { type: 'random', gender: 'm', dir: RANDOM_DIR + 'r12', presets: ALL_NAMED_PRESETS,
            topType: 'NoHair', hairColor: 'Black', accessoriesType: 'Blank',
            facialHairType: 'BeardMajestic', facialHairColor: 'Black',
            clotheType: 'Hoodie', clotheColor: 'Black', skinColor: 'DarkBrown' }
@@ -191,12 +201,12 @@
  * pool (ex.: identidades aleatórias só têm idle/working/success/error).
  * `prob` é a probabilidade-base do disparo (0..1); cada pessoa ainda a modula. */
 const VARIANTES_EVENTOS = {
-  tool:    { pool: ['tool', 'searching', 'focused', 'thinking'], base: 'working', prob: 0.85 },
-  error:   { pool: ['error', 'surprised', 'disbelief'], base: 'error', prob: 1 },
-  working: { pool: ['working', 'focused', 'thinking', 'searching', 'wink'], base: 'working', prob: 0.5 },
-  success: { pool: ['success', 'celebrating', 'approval', 'wink'], base: 'success', prob: 0.9 },
-  waiting: { pool: ['waiting'], base: 'waiting', prob: 0.7 },
-  idle:    { pool: ['idle'], base: 'idle', prob: 1 }
+  tool:    { pool: ['tool', 'searching', 'focused', 'thinking', 'determined', 'curious', 'snacking'], base: 'working', prob: 0.85 },
+  error:   { pool: ['error', 'surprised', 'disbelief', 'baffled', 'frustrated', 'nauseated', 'dizzy'], base: 'error', prob: 1 },
+  working: { pool: ['working', 'focused', 'thinking', 'searching', 'wink', 'inspired', 'determined', 'curious', 'calm', 'snacking', 'cheeky'], base: 'working', prob: 0.65 },
+  success: { pool: ['success', 'celebrating', 'approval', 'wink', 'inspired', 'cheeky', 'calm'], base: 'success', prob: 0.9 },
+  waiting: { pool: ['waiting', 'curious', 'thinking'], base: 'waiting', prob: 0.7 },
+  idle:    { pool: ['idle', 'calm'], base: 'idle', prob: 1 }
 };
 
 /* FNV-1a → uint32. Personalidade estável por (pessoa, variante) e sementes. */
@@ -438,13 +448,13 @@ const EXPRESSOES_LIMIARES = {
  */
 const EXPRESSOES_CENARIOS = {
   pergunta: {
-    pool: ['waiting', 'thinking', 'surprised'], base: 'waiting', prob: 1, prioridade: 95
+    pool: ['waiting', 'thinking', 'surprised', 'curious', 'baffled'], base: 'waiting', prob: 1, prioridade: 95
   },
   aprovacao: {
-    pool: ['approval', 'waiting', 'surprised'], base: 'waiting', prob: 1, prioridade: 95
+    pool: ['approval', 'waiting', 'surprised', 'curious'], base: 'waiting', prob: 1, prioridade: 95
   },
   erro: {
-    pool: ['error', 'surprised', 'disbelief'], base: 'error', prob: 1, prioridade: 90,
+    pool: ['error', 'surprised', 'disbelief', 'frustrated', 'nauseated', 'dizzy'], base: 'error', prob: 1, prioridade: 90,
     /* terminal: mantém o pool todo por omissão; o grau doseia por severidade */
     graus: [
       { grau: 1, intensidade: 0.3, presets: ['surprised'] },
@@ -453,10 +463,10 @@ const EXPRESSOES_CENARIOS = {
     ]
   },
   sucesso: {
-    pool: ['success', 'celebrating', 'approval', 'wink'], base: 'success', prob: 0.9, prioridade: 85
+    pool: ['success', 'celebrating', 'approval', 'wink', 'inspired', 'cheeky'], base: 'success', prob: 0.9, prioridade: 85
   },
   'ferramenta-erro': {
-    pool: ['surprised', 'disbelief', 'error'], base: 'error', prob: 1, prioridade: 80,
+    pool: ['surprised', 'disbelief', 'error', 'baffled', 'frustrated'], base: 'error', prob: 1, prioridade: 80,
     /* transitório de BAIXA intensidade [Q6: surpresa-confusão breve] */
     graus: [
       { grau: 1, intensidade: 0.3, presets: ['surprised'] },
@@ -465,7 +475,7 @@ const EXPRESSOES_CENARIOS = {
     ]
   },
   'erro-transitorio': {
-    pool: ['surprised', 'thinking', 'disbelief'], base: 'thinking', prob: 1, prioridade: 75,
+    pool: ['surprised', 'thinking', 'disbelief', 'baffled', 'frustrated', 'dizzy'], base: 'thinking', prob: 1, prioridade: 75,
     /* ESCALA a cada retentativa consecutiva [Q6/Q11] — ver grauDeCenario */
     graus: [
       { grau: 1, intensidade: 0.3, presets: ['surprised'] },
@@ -474,34 +484,34 @@ const EXPRESSOES_CENARIOS = {
     ]
   },
   cancelado: {
-    pool: ['disbelief', 'waiting', 'idle'], base: 'idle', prob: 1, prioridade: 70
+    pool: ['disbelief', 'waiting', 'idle', 'baffled', 'calm'], base: 'idle', prob: 1, prioridade: 70
   },
   compactacao: {
     /* micro-reação breve seguida de regresso a 'contexto' [Q12] */
-    pool: ['surprised', 'disbelief', 'thinking'], base: 'thinking', prob: 1, prioridade: 65
+    pool: ['surprised', 'disbelief', 'thinking', 'snacking', 'dizzy'], base: 'thinking', prob: 1, prioridade: 65
   },
   sobrecarga: {
     /* nível alto RARO e CURTO [Q12]: após este desenho, o próximo desenho de
        prioridade inferior regressa a 'contexto'/'focused' (estado limitado no
        tempo — ver docs/ALGORITMO-EXPRESSOES.md) */
-    pool: ['thinking', 'disbelief', 'surprised'], base: 'thinking', prob: 1, prioridade: 60
+    pool: ['thinking', 'disbelief', 'surprised', 'dizzy', 'frustrated'], base: 'thinking', prob: 1, prioridade: 60
   },
   ferramenta: {
-    pool: ['tool', 'searching', 'focused', 'thinking'], base: 'working', prob: 0.85, prioridade: 50
+    pool: ['tool', 'searching', 'focused', 'thinking', 'determined', 'curious'], base: 'working', prob: 0.85, prioridade: 50
   },
   contexto: {
-    pool: ['focused', 'thinking'], base: 'focused', prob: 1, prioridade: 45
+    pool: ['focused', 'thinking', 'determined', 'snacking'], base: 'focused', prob: 1, prioridade: 45
   },
   mensagem: {
-    pool: ['working', 'focused', 'thinking', 'wink'], base: 'working', prob: 0.5, prioridade: 40
+    pool: ['working', 'focused', 'thinking', 'wink', 'inspired', 'determined', 'curious', 'searching', 'snacking', 'cheeky'], base: 'working', prob: 0.65, prioridade: 40
   },
   subagente: {
-    pool: ['thinking', 'tool', 'focused'], base: 'working', prob: 0.6, prioridade: 35
+    pool: ['thinking', 'tool', 'focused', 'determined', 'curious', 'inspired'], base: 'working', prob: 0.7, prioridade: 35
   },
   ocioso: {
     /* 'wink' é micro-interação de repouso (vive EM CIMA do hold, não o
        substitui [Q3/S33]) — nas superfícies é reação one-shot */
-    pool: ['idle', 'wink'], base: 'idle', prob: 0.7, prioridade: 10
+    pool: ['idle', 'wink', 'calm', 'cheeky'], base: 'idle', prob: 0.7, prioridade: 10
   },
   dormir: {
     /* Modo jogo: quem está Disponível dorme (assets/avatars/sleeping/) */

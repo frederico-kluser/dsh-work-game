@@ -172,8 +172,11 @@ test('expressions.js define window.DSH_EXPRESSIONS', () => {
   assert.ok(EXPR && typeof EXPR === 'object', 'window.DSH_EXPRESSIONS não ficou definido como objeto após executar expressions.js');
 });
 
-test('DSH_EXPRESSIONS define exatamente 14 presets de expressão', () => {
-  assert.equal(presets.length, 14, `Esperados exatamente 14 presets, encontrados ${presets.length}`);
+test('DSH_EXPRESSIONS define exatamente 24 presets de expressão (100% dos enums Avataaars cobertos)', () => {
+  assert.equal(presets.length, 24, `Esperados exatamente 24 presets, encontrados ${presets.length}`);
+  assert.deepEqual(new Set(presets.map((p) => p.eyeType)), EYE_TYPES, 'cobre 100% dos 12 eyeType do Avataaars');
+  assert.deepEqual(new Set(presets.map((p) => p.eyebrowType)), EYEBROW_TYPES, 'cobre 100% dos 12 eyebrowType do Avataaars');
+  assert.deepEqual(new Set(presets.map((p) => p.mouthType)), MOUTH_TYPES, 'cobre 100% dos 12 mouthType do Avataaars');
 });
 
 test('cada preset tem id/label/eyeType/eyebrowType/mouthType/when preenchidos', () => {
