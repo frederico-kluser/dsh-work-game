@@ -96,8 +96,10 @@ function costOf(person) {
   const u = person.usage || { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
   return (u.input * prices.input + u.output * prices.output + u.cacheRead * prices.cacheRead + u.cacheWrite * prices.cacheWrite) / 1e6;
 }
+const fmtUSD = new Intl.NumberFormat('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+const fmtK = new Intl.NumberFormat('pt-BR', { maximumFractionDigits: 1 });
 function formatUSD(n) {
-  return 'US$ ' + new Intl.NumberFormat('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(n);
+  return 'US$ ' + fmtUSD.format(n);
 }
 function ago(ts) {
   const s = Math.max(0, Math.round((Date.now() - ts) / 1000));
@@ -188,7 +190,7 @@ const teamModules = (teamId) => state.modules.filter((m) => m.teamId === teamId)
 const icon = (n, cls = '') => `<svg class="icon ${cls}" aria-hidden="true"><use href="${FURNITURE}#icon-${n}"/></svg>`;
 const use = (id, x, y, w, h, extra = '') => `<use href="${FURNITURE}#${id}" x="${x}" y="${y}" width="${w}" height="${h}" ${extra}/>`;
 const glyph = (id, x, y, size, color) => `<g style="color:${color}">${use(`icon-${id}`, x, y, size, size)}</g>`;
-const formatK = (n) => new Intl.NumberFormat('pt-BR', { maximumFractionDigits: 1 }).format(n) + 'k';
+const formatK = (n) => fmtK.format(n) + 'k';
 const pct = (p) => Math.min(100, Math.round((p.context / windowOf(p)) * 100));
 const overContextWarn = (p) => p.context >= CONTEXT_WARN_K;
 
@@ -249,7 +251,10 @@ function updatePendingUI() {
 }
 function paintLiveValues() {
   for (const t of $$('[data-feed-time]')) t.textContent = ago(Number(t.dataset.feedTime));
+  const box = $('#viewport').getBoundingClientRect();
   for (const p of state.people) {
+    const pos = bubblePosition(p.id);
+    if (pos && !dentroDoEcrã(box, pos.x, pos.y)) continue;
     const seat = $(`g.seat[role="button"][data-agent="${p.id}"]`);
     if (!seat) continue;
     const role = seat.querySelector('.seat-card-role');
@@ -422,15 +427,27 @@ function motorDe(person) {
   }
   return person.motor;
 }
+function atualizarCaraDOM(person) {
+  if (!person) return;
+  const charEl = $(`[data-character-id="${person.id}"]`);
+  if (charEl) {
+    const expr = expressionOf(person);
+    charEl.setAttribute('data-expression', expr);
+    const img = charEl.querySelector('image');
+    if (img) img.setAttribute('href', avatarSrc(person, expr));
+  }
+  if (state.selected === person.id) renderInspector();
+}
 function reagir(person, cenario) {
+  if (!pessoaNoEcrã(person)) return;
   const sorteado = motorDe(person).aoEvento(cenario, expressionOf(person), Date.now());
   if (!sorteado) return;
   const duracaoMs = (EXPR.expressoes.limiares && EXPR.expressoes.limiares.duracaoMensagemMs) || 2800;
   person.autoExpression = { preset: sorteado, at: Date.now(), duracao: DURACAO_REACAO[cenario] || duracaoMs };
-  render();
+  atualizarCaraDOM(person);
   animarExpressao(person);
-  /* A reação expira sozinha: novo render para a cara voltar à do estado. */
-  setTimeout(render, person.autoExpression.duracao + 40);
+  /* A reação expira sozinha: atualiza só a cara sem reconstruir a cena toda. */
+  setTimeout(() => atualizarCaraDOM(person), person.autoExpression.duracao + 40);
 }
 
 /* ---------- layout: 3 columns × infinite rows ---------- */
@@ -1072,10 +1089,21 @@ function pessoaNoEcrã(person, folga = 260) {
   const pos = person && bubblePosition(person.id);
   return !pos || pontoNoEcrã(pos.x, pos.y, folga);
 }
+function moduloNoEcrã(box, index, folga = 260) {
+  const pos = gridPos(index);
+  const x0 = box.left + state.pan.x + pos.x * state.zoom;
+  const y0 = box.top + state.pan.y + pos.y * state.zoom;
+  const x1 = x0 + W * state.zoom;
+  const y1 = y0 + 660 * state.zoom;
+  return x1 >= box.left - folga && x0 <= box.right + folga && y1 >= box.top - folga && y0 <= box.bottom + folga;
+}
 function sincronizarAnimacoes() {
-  const flags = document.querySelectorAll('.question-flag');
-  if (!flags.length) return;
   const box = $('#viewport').getBoundingClientRect(); // UMA leitura por sincronia (nada de thrash)
+  const modulos = document.querySelectorAll('g.desk-module');
+  modulos.forEach((m, i) => {
+    m.classList.toggle('fora-de-vista', !moduloNoEcrã(box, i));
+  });
+  const flags = document.querySelectorAll('.question-flag');
   for (const g of flags) {
     const pulse = g.querySelector('.question-flag-pulse');
     if (!pulse) continue;

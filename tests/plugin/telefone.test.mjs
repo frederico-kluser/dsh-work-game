@@ -1496,3 +1496,86 @@ test('config: Guardar escreve no localStorage e "Limpar chave" apaga-o (com esta
     globalThis.window.localStorage = antes;
   }
 });
+
+test('questionário no celular: clicar no agente com questionamento mostra opções, resposta livre e envia a resposta', async () => {
+  const hooks = usarHooksComEstado();
+  try {
+    const respostasRecebidas = [];
+    let cancelado = 0;
+    let n = B.__criarNucleo({
+      surface: {
+        responderPergunta: async (id, r) => { respostasRecebidas.push({ id, r }); },
+        cancelarPergunta: async () => { cancelado += 1; },
+      },
+    });
+    let e = B.__createOfficeState({});
+    e = B.__applyEvent(e, { type: 'session/added', sessionId: 's1', title: ' Tarefa X' });
+    e = B.__applyEvent(e, {
+      type: 'question',
+      sessionId: 's1',
+      id: 'q1',
+      header: 'ARQUITETURA',
+      text: 'Como devemos persistir o cache?',
+      detail: 'Escolha a estratégia para esta sessão.',
+      options: [
+        { label: 'SQLite local (Recommended)', description: 'rápido e sem servidor' },
+        { label: 'Memória apenas', description: 'volátil' },
+      ],
+      multiSelect: false,
+      at: 1000,
+    });
+    const p = B.__officeView(e).people.s1;
+    const m = B.__modeloSidebar(p, {});
+    assert.ok(m.questionario, 'modeloSidebar expõe o questionário estruturado');
+    assert.equal(m.questionario.questions[0].question, 'Como devemos persistir o cache?');
+
+    const props = {
+      conversa: conversaFalsa(snapConversa()),
+      sessionId: 's1',
+      nome: m.nome,
+      avatarChave: m.avatarChave,
+      titulo: m.titulo,
+      estadoRotulo: m.estado.rotulo,
+      questionario: m.questionario,
+      responderQuestionario: (r) => n.responderQuestionario('s1', r),
+      cancelarQuestionario: () => n.cancelarQuestionario('s1'),
+      fechar: () => {},
+    };
+    const desenhar = () => hooks.render(B.__TelefoneConversa, props);
+    let arvore = desenhar();
+
+    const [cartao] = nosDe(arvore, (no) => no.props.className === 'wg-tel-questionario');
+    assert.ok(cartao, 'o cartão do questionário aparece diretamente no celular');
+    assert.equal(nosDe(cartao, (no) => no.props.className === 'wg-tel-q-titulo')[0].filhos.join(''),
+      'Como devemos persistir o cache?');
+    assert.equal(nosDe(cartao, (no) => no.props.className === 'wg-tel-q-detalhe')[0].filhos.join(''),
+      'Escolha a estratégia para esta sessão.');
+
+    const opcoes = nosDe(cartao, (no) => String(no.props.className || '').includes('wg-tel-q-opcao') && no.tipo === 'button');
+    assert.equal(opcoes.length, 2, 'as duas opções aparecem como botões clicáveis');
+    assert.equal(opcoes[0].props['aria-checked'], 'false');
+
+    // Selecionar a 1.ª opção e clicar em Responder:
+    opcoes[0].props.onClick();
+    arvore = desenhar();
+    const opcoesDepois = nosDe(arvore, (no) => String(no.props.className || '').includes('wg-tel-q-opcao') && no.tipo === 'button');
+    assert.equal(opcoesDepois[0].props['aria-checked'], 'true', 'opção fica selecionada');
+
+    const [btnEnviar] = nosDe(arvore, (no) => no.props.className === 'wg-tel-q-enviar');
+    assert.equal(btnEnviar.filhos.join(''), 'Responder');
+    btnEnviar.props.onClick();
+    await esperar();
+    assert.deepEqual(respostasRecebidas, [{
+      id: 's1',
+      r: [{ id: 'q1', selected: ['SQLite local (Recommended)'] }],
+    }], 'envia a resposta estruturada para o DSH');
+
+    const [btnCancelar] = nosDe(desenhar(), (no) => String(no.props.className || '').includes('wg-tel-q-cancelar'));
+    btnCancelar.props.onClick();
+    await esperar();
+    assert.equal(cancelado, 1, 'botão Cancelar delega o cancelamento');
+    n.dispose();
+  } finally {
+    hooks.restaurar();
+  }
+});

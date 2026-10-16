@@ -384,6 +384,83 @@ test('workspaces: perder o serviço volta ao agrupamento por pasta', () => {
   libertar();
 });
 
+test('uiSession: observa PendingQuestion em sessionStatus e responde/cancela', async () => {
+  const sessions = criarSessions(snapshot({ a: resumo('a', { running: true }) }));
+  const respondidas = [];
+  let canceladas = 0;
+  let statusSnap = new Map([[
+    'a',
+    {
+      running: true,
+      pendingInteraction: {
+        key: 'question:1',
+        kind: 'question',
+        sessionId: 'a',
+        questions: [{
+          id: 'q-modo',
+          header: 'MODO',
+          question: 'Qual modo usar?',
+          detail: 'Escolha como prosseguir.',
+          options: [{ label: 'Rápido', description: 'execução direta' }, { label: 'Seguro' }],
+          multiSelect: false,
+        }],
+        async answer(payload) { respondidas.push(payload); },
+        async cancel() { canceladas += 1; },
+      },
+      completionUnread: false,
+    },
+  ]]);
+  const ouvintesStatus = new Set();
+  const uiSession = {
+    sessionStatus: {
+      getSnapshot: () => statusSnap,
+      subscribe(fn) { ouvintesStatus.add(fn); return () => ouvintesStatus.delete(fn); },
+    },
+  };
+  const s = surface.extrairSuperficie({ sessions, get: (n) => (n === 'uiSession' ? uiSession : undefined) }, SEM_SONDAGEM);
+  const { eventos, libertar } = eventosDe(s);
+  const evQ = eventos.find((e) => e.type === 'question');
+  assert.ok(evQ, 'emite question a partir de uiSession.sessionStatus');
+  assert.equal(evQ.sessionId, 'a');
+  assert.equal(evQ.id, 'q-modo');
+  assert.equal(evQ.text, 'Qual modo usar?');
+  assert.equal(evQ.header, 'MODO');
+  assert.equal(evQ.questions.length, 1);
+  assert.deepEqual(s.perguntaDe('a').questions[0].options, [
+    { label: 'Rápido', description: 'execução direta' },
+    { label: 'Seguro' },
+  ]);
+
+  await s.responderPergunta('a', [{ id: 'q-modo', selected: ['Rápido'] }]);
+  assert.deepEqual(respondidas, [{ answers: [{ id: 'q-modo', selected: ['Rápido'] }] }]);
+  assert.ok(eventos.some((e) => e.type === 'question/answered' && e.sessionId === 'a'), 'emite question/answered ao responder');
+  assert.equal(s.perguntaDe('a'), null);
+
+  // Nova pergunta e cancelamento:
+  statusSnap = new Map([[
+    'a',
+    {
+      running: true,
+      pendingInteraction: {
+        key: 'question:2',
+        kind: 'question',
+        sessionId: 'a',
+        questions: [{ id: 'q2', question: 'Confirmar?' }],
+        async answer() {},
+        async cancel() { canceladas += 1; },
+      },
+      completionUnread: false,
+    },
+  ]]);
+  for (const fn of ouvintesStatus) fn();
+  assert.equal(s.perguntaDe('a').id, 'q2');
+  await s.cancelarPergunta('a');
+  assert.equal(canceladas, 1);
+  assert.equal(s.perguntaDe('a'), null);
+  libertar();
+  assert.equal(ouvintesStatus.size, 0);
+});
+
 /* ---------- paridade: o bundle embutido tem de se comportar como a fonte ---------- */
 
 test('paridade: extrairSuperficie do bundle == extrairSuperficie de surface.js', () => {

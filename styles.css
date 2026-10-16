@@ -61,7 +61,7 @@
 .question-flag{cursor:pointer}
 .question-flag-dot{fill:#e8a33d;stroke:#fffdf6;stroke-width:3}
 .question-flag-glyph{fill:#5c3f0c;font-size:21px;font-weight:800;pointer-events:none}
-.question-flag-pulse{fill:none;stroke:#e8a33d;stroke-width:2.5;opacity:.7;transform-origin:center;transform-box:fill-box;animation:flag-pulse 1.7s ease-out infinite}.question-flag-pulse.fora-de-vista{animation:none}
+.question-flag-pulse{fill:none;stroke:#e8a33d;stroke-width:2.5;opacity:.7;transform-origin:center;transform-box:fill-box;animation:flag-pulse 1.7s ease-out infinite}.question-flag-pulse.fora-de-vista{animation:none}.desk-module.fora-de-vista *{animation:none}.world.camara-ativa .question-flag-pulse,.world.camara-ativa .speech-bubble,.world.camara-ativa .laptop-arriving{animation-play-state:paused}
 @keyframes flag-pulse{0%{transform:scale(1);opacity:.7}70%{transform:scale(1.75);opacity:0}100%{transform:scale(1.75);opacity:0}}
 /* Performance (regras Motion): nada anima com a aba escondida — não se vê nada. */
 html.oculto *{animation-play-state:paused!important}

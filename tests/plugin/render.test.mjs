@@ -1797,3 +1797,62 @@ test('config: a chave da API OpenAI faz round-trip no localStorage (dsh-work-gam
     globalThis.window.localStorage = antes;
   }
 });
+
+/* ---------- viewport culling e agente com questionamento ---------- */
+
+test('viewport culling: renderOffice com camera+tela só renderiza as mesas mostradas em tela (+ selecionada) e chavesAVista filtra o sprite', () => {
+  const pessoas = Array.from({ length: 66 }, (_, i) => pessoa(`p${i}`, {
+    name: `Agente${i}`,
+    avatar: ['rui', 'bia', 'lia', 'pesquisa', 'codigo', 'testes', 'alex', 'maya'][i % 8],
+    running: true,
+    status: 'working',
+  }));
+  const wsItens = Array.from({ length: 33 }, (_, i) => w(`w${i}`, `ws-${i}`, [`p${i * 2}`, `p${i * 2 + 1}`]));
+  const layout = B.__montarEscritorio(pessoas, wsDsh(wsItens), BASE_TESTE);
+  assert.equal(layout.modules.length, 33, '33 mesas na grelha (11 filas)');
+  const mapaPessoas = Object.fromEntries(pessoas.map((p) => [p.id, p]));
+  const tela = { w: 1160, h: 805 };
+  const cameraTopo = { zoom: 0.4, x: 0, y: 0 };
+  const aVista = B.__mesasAVista(layout.modules.length, cameraTopo, tela);
+  // Só as 12 primeiras mesas (filas 0..3) estão na vista + margem:
+  assert.equal(aVista.filter(Boolean).length, 12);
+
+  const svgCull = B.__renderOffice({ people: mapaPessoas, layout, visiveis: aVista });
+  const indicesRenderizados = [...svgCull.matchAll(/data-module-index="(\d+)"/g)].map((m) => Number(m[1]));
+  assert.deepEqual(indicesRenderizados, [...Array(12).keys()], 'só as 12 mesas em tela são renderizadas no DOM SVG');
+
+  // Se uma pessoa fora da vista estiver selecionada, a mesa dela mantém-se no DOM para foco/enquadramento:
+  const svgComSel = B.__renderOffice({ people: mapaPessoas, layout, visiveis: aVista, selecionada: 'p64' });
+  const indicesComSel = [...svgComSel.matchAll(/data-module-index="(\d+)"/g)].map((m) => Number(m[1]));
+  assert.deepEqual(indicesComSel, [...Array(12).keys(), 32], 'inclui a mesa da selecionada (32) mesmo fora de vista');
+
+  // E chavesAVista devolve apenas as chaves de corpo das mesas visíveis:
+  const chavesCull = B.__chavesAVista(layout, mapaPessoas, aVista);
+  assert.equal(chavesCull.length, 24, '24 pessoas nas 12 mesas visíveis (em vez das 66 da sala inteira)');
+});
+
+test('questionamento: agente com pergunta continua no filtro Trabalhando e aparece com a mão levantada', () => {
+  let e = B.__createOfficeState({});
+  e = B.__applyEvent(e, { type: 'session/added', sessionId: 'ask1', title: 'Dúvida na arquitetura' });
+  e = B.__applyEvent(e, { type: 'session/added', sessionId: 'parado', title: 'Sessão ociosa' });
+  e = B.__applyEvent(e, {
+    type: 'question',
+    sessionId: 'ask1',
+    id: 'q1',
+    header: 'DECISÃO',
+    text: 'Qual banco de dados usar?',
+    options: [{ label: 'SQLite' }, { label: 'PostgreSQL' }],
+    at: 1000,
+  });
+  const view = B.__officeView(e);
+  // Mesmo com o filtro padrão (soTrabalhando: true, mostrarSemWorkspace: false),
+  // quem tem questionamento permanece visível na sala:
+  const layout = B.__montarEscritorio(Object.values(view.people), wsDsh([w('w1', 'app', ['ask1', 'parado'])]), B.__FILTROS_PADRAO);
+  const sentados = layout.modules.flatMap((m) => m.seats).filter((s) => typeof s === 'string');
+  assert.deepEqual(sentados, ['ask1'], 'quem tem questionamento continua no filtro Trabalhando; quem está parado sai');
+
+  const svg = B.__renderOffice({ people: view.people, layout });
+  assert.match(svg, /data-mao-levantada="true"/, 'lugar e sinalizador marcados com mão levantada');
+  assert.match(svg, /class="question-hand-raised"/, 'desenha o badge da mão levantada junto à cabeça');
+  assert.match(svg, /href="#wg-icon-hand"/, 'usa o ícone de mão levantada do sprite');
+});

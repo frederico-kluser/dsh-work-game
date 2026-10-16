@@ -390,6 +390,95 @@ window.__ModuleLoader__.load({
         return wsList !== null;
       };
 
+      /* ── uiSession.sessionStatus: perguntas pendentes (PendingQuestion) ─── */
+      let statusFonte = null;
+      let statusSoltar = null;
+      let ultimoEmitir = null;
+      const perguntasAtivas = new Map(); // sessionId -> { key, id, interacao, questions }
+
+      const normalizarPerguntas = (interacao) => {
+        const brutas = interacao && Array.isArray(interacao.questions) ? interacao.questions : null;
+        if (!brutas || brutas.length === 0) return null;
+        return brutas.filter(Boolean).map((q, idx) => {
+          const id = String(q.id ?? `q${idx + 1}`);
+          const texto = typeof q.question === 'string' && q.question.trim()
+            ? q.question.trim()
+            : (typeof q.text === 'string' && q.text.trim() ? q.text.trim() : 'Pergunta');
+          const item = { id, question: texto, multiSelect: q.multiSelect === true };
+          if (typeof q.header === 'string' && q.header.trim()) item.header = q.header.trim();
+          if (typeof q.detail === 'string' && q.detail.trim()) item.detail = q.detail.trim();
+          if (Array.isArray(q.options)) {
+            item.options = q.options.filter(Boolean).map((o) => (typeof o === 'string'
+              ? { label: o }
+              : {
+                label: String(o.label ?? ''),
+                ...(typeof o.description === 'string' && o.description.trim() ? { description: o.description.trim() } : {}),
+              }));
+          }
+          return item;
+        });
+      };
+
+      const emitirInteracoes = (emitir) => {
+        if (!statusFonte) return;
+        let snap = null;
+        try { snap = statusFonte.getSnapshot(); } catch { snap = null; }
+        if (!snap) return;
+        const entradas = snap instanceof Map ? [...snap.entries()] : Object.entries(snap);
+        const vistas = new Set();
+        for (const [idBruto, st] of entradas) {
+          const id = String(idBruto);
+          const interacao = st && typeof st === 'object' ? st.pendingInteraction : null;
+          const questions = normalizarPerguntas(interacao);
+          if (!questions) continue;
+          vistas.add(id);
+          const chave = String((interacao && interacao.key) ?? questions.map((q) => `${q.id}:${q.question}`).join('|'));
+          const antes = perguntasAtivas.get(id);
+          if (antes && antes.key === chave) {
+            antes.interacao = interacao;
+            continue;
+          }
+          const q0 = questions[0];
+          perguntasAtivas.set(id, { key: chave, id: q0.id, interacao, questions });
+          emitir({
+            type: 'question',
+            sessionId: id,
+            id: q0.id,
+            key: chave,
+            text: q0.question,
+            ...(q0.header ? { header: q0.header } : {}),
+            ...(q0.detail ? { detail: q0.detail } : {}),
+            ...(q0.options ? { options: q0.options } : {}),
+            multiSelect: q0.multiSelect,
+            questions,
+          });
+        }
+        for (const [id, reg] of [...perguntasAtivas.entries()]) {
+          if (vistas.has(id)) continue;
+          perguntasAtivas.delete(id);
+          emitir({ type: 'question/answered', sessionId: id, id: reg.id });
+        }
+      };
+
+      const ligarInteracoes = (emitir) => {
+        const servicoUi = servicoDe(ctx, 'uiSession');
+        const novo = servicoUi && servicoUi.sessionStatus && typeof servicoUi.sessionStatus.getSnapshot === 'function'
+          ? servicoUi.sessionStatus : null;
+        if (novo !== statusFonte) {
+          if (statusSoltar) { try { statusSoltar(); } catch { /* já solto */ } }
+          statusSoltar = null;
+          statusFonte = novo;
+          if (statusFonte && typeof statusFonte.subscribe === 'function') {
+            try {
+              const soltar = statusFonte.subscribe(() => emitirInteracoes(emitir));
+              statusSoltar = typeof soltar === 'function' ? soltar : null;
+            } catch { statusSoltar = null; }
+          }
+        }
+        emitirInteracoes(emitir);
+        return statusFonte !== null;
+      };
+
       /* estado anterior por sessão para diff (só muda o que mudou) */
       const anterior = new Map();      // id -> { running, usage, modelo, janela, usado, meta, paiAtivo }
       const velocidades = new Map();   // id -> { inicio, saida, v } — só do turno EM CURSO
@@ -426,6 +515,7 @@ window.__ModuleLoader__.load({
           if (atuais.has(id)) continue;
           anterior.delete(id);
           velocidades.delete(id);
+          perguntasAtivas.delete(id);
           if (antes.paiAtivo) {
             emitir({ type: 'subagent/end', sessionId: antes.paiAtivo, childId: id, runId: id });
           }
@@ -518,28 +608,33 @@ window.__ModuleLoader__.load({
 
       return {
         catalogo,
-        /** Subscreve sessões e workspaces; devolve SEMPRE a função de libertação. */
+        /** Subscreve sessões, workspaces e uiSession; devolve SEMPRE a função de libertação. */
         assinar(emitir) {
           if (typeof emitir !== 'function') return null;
+          ultimoEmitir = emitir;
           const soltas = [];
           difs(emitir); /* vislumbre imediato do que já existe */
           ligarWorkspaces(emitir);
+          ligarInteracoes(emitir);
           if (typeof list.subscribe === 'function') {
             try {
               const soltar = list.subscribe(() => {
                 difs(emitir);
                 ligarWorkspaces(emitir); /* religa se o serviço de workspaces apareceu/mudou */
+                ligarInteracoes(emitir);
               });
               if (typeof soltar === 'function') soltas.push(soltar);
             } catch { /* sem subscrição: fica o vislumbre inicial */ }
           }
-          /* ligação tardia: o serviço de workspaces pode ativar depois do plugin */
+          /* ligação tardia: o serviço de workspaces/uiSession pode ativar depois do plugin */
           let relogio = null;
-          if (wsList === null && intervaloWs > 0 && typeof setInterval === 'function') {
+          if ((wsList === null || statusFonte === null) && intervaloWs > 0 && typeof setInterval === 'function') {
             let tentativas = 0;
             relogio = setInterval(() => {
               tentativas += 1;
-              if (ligarWorkspaces(emitir) || tentativas >= 60) {
+              const wsOk = ligarWorkspaces(emitir);
+              const uiOk = ligarInteracoes(emitir);
+              if ((wsOk && uiOk) || tentativas >= 60) {
                 clearInterval(relogio);
                 relogio = null;
               }
@@ -547,17 +642,52 @@ window.__ModuleLoader__.load({
             relogio?.unref?.(); /* Node: não segura o processo (no browser é um número) */
           }
           return () => {
+            if (ultimoEmitir === emitir) ultimoEmitir = null;
             for (const soltar of soltas.splice(0)) { try { soltar(); } catch { /* já solto */ } }
             if (relogio !== null) { clearInterval(relogio); relogio = null; }
             if (wsSoltar) { try { wsSoltar(); } catch { /* já solto */ } }
+            if (statusSoltar) { try { statusSoltar(); } catch { /* já solto */ } }
             wsSoltar = null;
             wsList = null;
+            statusSoltar = null;
+            statusFonte = null;
           };
         },
         /** tok/s do turno em curso (só enquanto corre); null fora do turno ou sem produção. */
         velocidadeDe(id) {
           const reg = velocidades.get(String(id));
           return reg && reg.v !== null && reg.v >= 1 ? Math.round(reg.v) : null;
+        },
+        /** Questionário pendente de uma sessão (lido de uiSession.sessionStatus). */
+        perguntaDe(id) {
+          const reg = perguntasAtivas.get(String(id));
+          return reg ? { key: reg.key, id: reg.id, questions: reg.questions } : null;
+        },
+        /** Responde ao PendingQuestion real do DSH e limpa a pendência local. */
+        async responderPergunta(id, respostas) {
+          const chaveId = String(id);
+          const reg = perguntasAtivas.get(chaveId);
+          if (reg && reg.interacao && typeof reg.interacao.answer === 'function') {
+            await reg.interacao.answer({ answers: Array.isArray(respostas) ? respostas : [] });
+          }
+          if (perguntasAtivas.has(chaveId)) {
+            perguntasAtivas.delete(chaveId);
+            if (ultimoEmitir) ultimoEmitir({ type: 'question/answered', sessionId: chaveId, id: reg ? reg.id : undefined });
+          }
+          return { ok: true };
+        },
+        /** Cancela o PendingQuestion real do DSH e limpa a pendência local. */
+        async cancelarPergunta(id) {
+          const chaveId = String(id);
+          const reg = perguntasAtivas.get(chaveId);
+          if (reg && reg.interacao && typeof reg.interacao.cancel === 'function') {
+            await reg.interacao.cancel();
+          }
+          if (perguntasAtivas.has(chaveId)) {
+            perguntasAtivas.delete(chaveId);
+            if (ultimoEmitir) ultimoEmitir({ type: 'question/answered', sessionId: chaveId, id: reg ? reg.id : undefined });
+          }
+          return { ok: true };
         },
       };
     }
@@ -2201,6 +2331,7 @@ function mascararChave(chave) {
         activity: [],
         statusVisto: false, // já chegou algum `status`? (o 1.º não é transição)
         question: null, // persistente até question/answered
+        questionario: null, // questionário estruturado { key, questions: [{id, question, header, detail, options, multiSelect}] }
         approvals: [],
         subagents: 0, // subagentes A CORRER (delegação em curso) = subagentAtivos.size
         subagentAtivos: new Set(), // ids dos filhos ativos (dedupe entre ponte e adaptador)
@@ -2254,6 +2385,65 @@ function mascararChave(chave) {
       p.emoji = r.e;
       p.status = r.status;
       p.expression = EXPRESSAO[r.status];
+    }
+
+    // Normaliza um questionário (evento `question`, PendingQuestion de uiSession
+    // ou string simples) para { key, questions: [{id, question, header, detail,
+    // options: [{label, description}], multiSelect}] }.
+    function normalizarQuestionario(bruto, textoFallback = null) {
+      if (!bruto && !textoFallback) return null;
+      if (typeof bruto === 'string') {
+        const t = bruto.trim() || (typeof textoFallback === 'string' && textoFallback.trim() ? textoFallback.trim() : 'Pergunta');
+        return {
+          key: `q:${t}`,
+          questions: [{ id: 'q1', question: t, header: null, detail: null, options: [], multiSelect: false }],
+        };
+      }
+      if (typeof bruto !== 'object') return null;
+      if (Array.isArray(bruto.questions) && bruto.questions.length > 0) {
+        const questions = bruto.questions.filter(Boolean).map((q, i) => {
+          const id = String(q.id ?? `q${i + 1}`);
+          const question = (typeof q.question === 'string' && q.question.trim())
+            ? q.question.trim()
+            : ((typeof q.text === 'string' && q.text.trim())
+              ? q.text.trim()
+              : (typeof textoFallback === 'string' && textoFallback.trim() ? textoFallback.trim() : 'Pergunta'));
+          const header = typeof q.header === 'string' && q.header.trim() ? q.header.trim() : null;
+          const detail = typeof q.detail === 'string' && q.detail.trim() ? q.detail.trim() : null;
+          const options = Array.isArray(q.options)
+            ? q.options.filter(Boolean).map((o) => (typeof o === 'string'
+              ? { label: o, description: null }
+              : {
+                label: String(o.label ?? ''),
+                description: typeof o.description === 'string' && o.description.trim() ? o.description.trim() : null,
+              }))
+            : [];
+          return { id, question, header, detail, options, multiSelect: q.multiSelect === true };
+        });
+        const key = String(bruto.key ?? bruto.id ?? questions.map((q) => `${q.id}:${q.question}`).join('|'));
+        return { key, questions };
+      }
+      const id = String(bruto.id ?? 'q1');
+      const question = (typeof bruto.text === 'string' && bruto.text.trim())
+        ? bruto.text.trim()
+        : ((typeof bruto.question === 'string' && bruto.question.trim())
+          ? bruto.question.trim()
+          : (typeof textoFallback === 'string' && textoFallback.trim() ? textoFallback.trim() : 'Pergunta'));
+      const header = typeof bruto.header === 'string' && bruto.header.trim() ? bruto.header.trim() : null;
+      const detail = typeof bruto.detail === 'string' && bruto.detail.trim() ? bruto.detail.trim() : null;
+      const options = Array.isArray(bruto.options)
+        ? bruto.options.filter(Boolean).map((o) => (typeof o === 'string'
+          ? { label: o, description: null }
+          : {
+            label: String(o.label ?? ''),
+            description: typeof o.description === 'string' && o.description.trim() ? o.description.trim() : null,
+          }))
+        : [];
+      const multiSelect = bruto.multiSelect === true;
+      return {
+        key: String(bruto.key ?? `${id}:${question}`),
+        questions: [{ id, question, header, detail, options, multiSelect }],
+      };
     }
 
     // Outputs expiram em ~1s na UI (contrato §2); histórico limitado a 6.
@@ -2459,7 +2649,11 @@ function mascararChave(chave) {
           // Texto vazio/nulo NÃO pode ficar em `question` (falsy): a pergunta
           // ficaria invisível e o bot caía em "Disponível/dormindo" à espera de
           // resposta. Sem texto legível, usa-se o marcador 'Pergunta'.
-          pessoa.question = (typeof evento.text === 'string' && evento.text.trim()) ? evento.text : 'Pergunta';
+          const qNorm = normalizarQuestionario(evento);
+          pessoa.question = (typeof evento.text === 'string' && evento.text.trim())
+            ? evento.text
+            : (qNorm && qNorm.questions[0] ? qNorm.questions[0].question : 'Pergunta');
+          pessoa.questionario = qNorm;
           pessoa.flags.concluido = false;
           pessoa.flags.retry = false;
           registar(pessoa, evento, 'pergunta', `Fez uma pergunta: ${pessoa.question}`);
@@ -2470,6 +2664,7 @@ function mascararChave(chave) {
           if (pessoa) {
             if (pessoa.question) registar(pessoa, evento, 'pergunta-respondida', 'Pergunta respondida');
             pessoa.question = null;
+            pessoa.questionario = null;
           }
           break;
         }
@@ -2630,7 +2825,11 @@ function mascararChave(chave) {
           break;
       }
 
-      for (const pessoa of pessoas.values()) recalcular(pessoa);
+      if (evento.sessionId && pessoas.has(evento.sessionId)) {
+        recalcular(pessoas.get(evento.sessionId));
+      } else {
+        for (const pessoa of pessoas.values()) recalcular(pessoa);
+      }
       return { ...estado, ...extra, people: pessoas };
     }
 
@@ -2641,7 +2840,9 @@ function mascararChave(chave) {
       return {
         id: p.id, name: p.name, avatar: p.avatar, style: p.style, status: p.status,
         emoji: p.emoji, expression: p.expression, ctx: p.ctx, model: p.model,
-        cost: p.cost, question: p.question, approvals: p.approvals,
+        cost: p.cost, question: p.question,
+        questionario: p.questionario ?? (p.question ? normalizarQuestionario(p.question) : null),
+        approvals: p.approvals,
         subagents: p.subagents, outputs: p.outputs,
         title: p.title, cwd: p.cwd, parentId: p.parentId, subagent: p.subagent,
         blank: p.blank, running: p.running,
@@ -3580,8 +3781,11 @@ function mascararChave(chave) {
     // "A trabalhar" = turno a correr (ou sinal de trabalho/ferramenta) OU a
     // precisar de ti (pergunta/aprovação) OU com resultado pronto por validar —
     // quem tem trabalho pendente para o utilizador nunca é "parado".
-    const aTrabalhar = (p) => p.running === true || p.status === 'working' || p.status === 'tool'
-      || p.status === 'waiting' || p.status === 'done';
+    const aTrabalhar = (p) => Boolean(p && (
+      p.running === true || p.status === 'working' || p.status === 'tool'
+      || p.status === 'waiting' || p.status === 'done'
+      || p.question || p.questionario || (Array.isArray(p.approvals) && p.approvals.length > 0)
+    ));
 
     /**
      * Mesas e lugares a partir das pessoas, dos workspaces do DSH e dos filtros.
@@ -3667,8 +3871,9 @@ function mascararChave(chave) {
       const motivoOculta = (p) => {
         if (arquivadas.has(p.id) && !f.mostrarArquivadas) return 'arquivadas';
         const mantido = f.mostrarAbertos && abertas.has(equipaDe(p));
-        if (p.blank && !p.running && !f.mostrarEmBranco && !mantido) return 'emBranco';
-        if (!f.mostrarSemWorkspace && equipaDe(p) === EQUIPA_SEM_WORKSPACE) return 'semWorkspace';
+        const temPerguntaOuAprovacao = Boolean(p.question || p.questionario || (Array.isArray(p.approvals) && p.approvals.length > 0));
+        if (p.blank && !p.running && !temPerguntaOuAprovacao && !f.mostrarEmBranco && !mantido) return 'emBranco';
+        if (!f.mostrarSemWorkspace && equipaDe(p) === EQUIPA_SEM_WORKSPACE && !temPerguntaOuAprovacao) return 'semWorkspace';
         if (f.soTrabalhando && !aTrabalhar(p) && !mantido) return 'paradas';
         return null;
       };
@@ -3808,9 +4013,11 @@ function mascararChave(chave) {
       error: { label: 'Precisa de atenção', color: '#bd7961', icon: 'alert', preset: 'error' },
       done: { label: 'Concluído', color: '#299875', icon: 'check', preset: 'success' },
     };
-    const estadoDemo = (p) => ESTADOS_DEMO[
-      { idle: 'available', working: 'working', tool: 'tool', waiting: 'waiting', error: 'error', done: 'done' }[p.status] ?? 'available'
-    ];
+    const estadoDemo = (p) => (p && (p.question || p.questionario || (Array.isArray(p.approvals) && p.approvals.length > 0))
+      ? ESTADOS_DEMO.waiting
+      : ESTADOS_DEMO[
+        { idle: 'available', working: 'working', tool: 'tool', waiting: 'waiting', error: 'error', done: 'done' }[p && p.status] ?? 'available'
+      ]);
 
     // EXPRESSÕES durante o trabalho (MOTOR DE EXPRESSÕES — expressoes.js
     // embutido, espelho de state.js): cada evento real mapeia-se num CENÁRIO
@@ -3920,7 +4127,7 @@ function mascararChave(chave) {
     // reserva) e quem está Disponível dorme (Modo jogo). Espelho da
     // deriveExpression de state.js, com o vocabulário ESTADOS_DEMO.
     function presetDe(p) {
-      if (p.question || (p.approvals && p.approvals.length > 0)) {
+      if (p.question || p.questionario || (p.approvals && p.approvals.length > 0)) {
         return p.varianteEspera || ESTADOS_DEMO.waiting.preset;
       }
       const info = estadoDemo(p);
@@ -3978,12 +4185,13 @@ function mascararChave(chave) {
     }
 
     function questionFlagSvg(p, cx) {
-      if (!p.question) return '';
-      return `<g class="question-flag" role="img" aria-label="${esc(p.name)} fez uma pergunta">
-        <title>❓ ${esc(p.name)} fez uma pergunta</title>
+      if (!p || (!p.question && !p.questionario)) return '';
+      return `<g class="question-flag" data-mao-levantada="true" role="img" aria-label="${esc(p.name)} fez uma pergunta">
+        <title>✋❓ ${esc(p.name)} fez uma pergunta</title>
         <circle class="question-flag-dot" cx="${cx - 72}" cy="205" r="17"/>
         <circle class="question-flag-pulse" cx="${cx - 72}" cy="205" r="17"/>
-        <text class="question-flag-glyph" x="${cx - 72}" y="212" text-anchor="middle">?</text></g>`;
+        <text class="question-flag-glyph" x="${cx - 72}" y="212" text-anchor="middle">?</text>
+        <g class="question-hand-raised" transform="translate(${cx + 55} 152)"><circle class="question-hand-dot" cx="17" cy="17" r="17" fill="#e8a33d" stroke="#fffdf6" stroke-width="3"/>${glyph('hand', 6, 6, 22, '#5c3f0c')}</g></g>`;
     }
 
     function contextWarnSvg(p, cx) {
@@ -4450,7 +4658,10 @@ function mascararChave(chave) {
       const arquivada = !!(arquivadas && arquivadas.has(person.id));
       const rotuloEstado = arquivada ? 'Arquivada' : info.label;
       const corEstado = arquivada ? '#919ea4' : info.color;
-      return `<g class="seat${sel}${excedeuCtx(person) ? ' context-over' : ''}${arquivada ? ' arquivada' : ''}" role="button" tabindex="0"
+      const textoPergunta = person.question
+        || (person.questionario && Array.isArray(person.questionario.questions) && person.questionario.questions[0] && person.questionario.questions[0].question)
+        || null;
+      return `<g class="seat${sel}${excedeuCtx(person) ? ' context-over' : ''}${arquivada ? ' arquivada' : ''}" role="button" tabindex="0"${textoPergunta ? ' data-mao-levantada="true"' : ''}
         aria-label="Abrir ${esc(person.name)}${esc(conversa)}, ${esc(info.label)}${arquivada ? ', arquivada' : ''}" data-session-id="${esc(person.id)}">
         <title>${esc(person.name)}${esc(conversa)} · ${esc(info.label)}${arquivada ? ' · arquivada' : ''} · clique para inspecionar</title>${hit}${laptop}
         <rect class="seat-card" x="${cx - 99}" y="426" width="198" height="77" rx="9"/>
@@ -4464,7 +4675,7 @@ function mascararChave(chave) {
         ${porVerBadgeSvg(person, cx)}
         ${finishRibbonSvg(person, cx)}
         ${person.status === 'error' ? `<circle class="attention-marker" cx="${cx + 72}" cy="205" r="15"/>${glyph('alert', cx + 63, 195, 18, '#795d33')}` : ''}
-        ${person.question ? balao(cx, person.question) : ''}
+        ${textoPergunta ? balao(cx, textoPergunta) : ''}
         </g>`;
     }
 
@@ -4473,8 +4684,23 @@ function mascararChave(chave) {
       return `<g class="scene-action" role="button" tabindex="0" aria-label="${esc(rotulo)}" ${atributos} transform="translate(${x} ${y})"><rect width="${largura}" height="37" rx="9" fill="#faf8f0" stroke="#d8dbcf"/>${glyph(glifo, 12, 10, 16, '#85939b')}<text x="36" y="24">${esc(rotulo)}</text></g>`;
     }
 
+    const cacheModulosSvg = new Map();
     function renderModulo(mod, indice, pessoas, equipas, selecionada, recrutar, arquivadas) {
       const equipa = equipas.get(mod.teamId) || { name: 'Equipa', path: '', theme: 'blue' };
+      const chaveAssento = (s) => {
+        if (!s) return '_';
+        if (typeof s === 'object' && s.reservado) {
+          const d = pessoas[s.reservado];
+          return `R:${s.reservado}:${d ? d.name : ''}`;
+        }
+        const p = pessoas[s];
+        if (!p) return '_';
+        const qTxt = p.question || (p.questionario && Array.isArray(p.questionario.questions) && p.questionario.questions[0] && p.questionario.questions[0].question) || '';
+        return `${p.id}|${p.name}|${p.title || ''}|${p.avatar}|${p.status}|${presetDe(p)}|${p.emoji || ''}|${qTxt}|${p.porVer ? 1 : 0}|${ctxPct(p)}|${excedeuCtx(p) ? 1 : 0}|${formatoCusto(p.cost)}|${speedDe(p)}|${s === selecionada ? 1 : 0}|${arquivadas && arquivadas.has(s) ? 1 : 0}`;
+      };
+      const chaveCache = `${indice}|${mod.id}|${mod.teamId}|${mod.workspaceId || ''}|${mod.kind}|${mod.coordenacao ? 1 : 0}|${mod.lider || ''}|${equipa.name}|${equipa.path}|${equipa.theme}|${recrutar ? 1 : 0}|${mod.seats.map(chaveAssento).join(';')}`;
+      const guardado = cacheModulosSvg.get(chaveCache);
+      if (guardado) return guardado;
       const pos = posicaoGrelha(indice);
       const ocupados = mod.seats.filter((s) => typeof s === 'string' && pessoas[s]).length;
       const chairs = mod.seats.map((_, i) => useMob('chair', 112.5 + i * 225 - 81, 212, 162, 184)).join('');
@@ -4490,7 +4716,7 @@ function mascararChave(chave) {
       const controlo = recrutar && mod.workspaceId && !delegacao
         ? botaoCena(721, 111, 140, 'Nova sessão', `data-action="nova-sessao" data-workspace-id="${esc(mod.workspaceId)}"`, 'plus')
         : '';
-      return `<g class="desk-module" data-module-id="${esc(mod.id)}" data-team-id="${esc(mod.teamId)}" data-kind="${mod.kind}" data-seats="4" transform="translate(${pos.x} ${pos.y})" style="${estiloTema(delegacao ? 'violet' : equipa.theme)}">
+      const html = `<g class="desk-module" data-module-id="${esc(mod.id)}" data-module-index="${indice}" data-team-id="${esc(mod.teamId)}" data-kind="${mod.kind}" data-seats="4" transform="translate(${pos.x} ${pos.y})" style="${estiloTema(delegacao ? 'violet' : equipa.theme)}">
         ${controlo}${chairs}${characters}${useMob('desk', 0, 365, LARGURA_MESA, 288)}
         ${mod.seats.map((s, i) => renderSeat(s, i, pessoas, selecionada, mod, recrutar, arquivadas)).join('')}
         ${glyph(delegacao ? 'team' : 'browser', 64, 548, 48, '#f7f9f3')}
@@ -4498,6 +4724,9 @@ function mascararChave(chave) {
         <text class="desk-subtitle" x="141" y="609">${esc(cortarInicio(subtitulo, 52))}</text>
         <text class="desk-counter" x="840" y="610" text-anchor="end">${ocupados}/4 lugares · ${esc(formatoCusto(custoMesa))} gasto</text>
       </g>`;
+      if (cacheModulosSvg.size >= 256) cacheModulosSvg.delete(cacheModulosSvg.keys().next().value);
+      cacheModulosSvg.set(chaveCache, html);
+      return html;
     }
 
     // Quanto a sala se prolonga para fora do mundo, em unidades do mundo — o
@@ -4540,8 +4769,37 @@ function mascararChave(chave) {
         + '</g>';
     }
 
+    // Chaves de corpo (avatar|preset) APENAS das mesas visíveis em tela (mais a
+    // mesa da pessoa selecionada, se houver) — evita gerar <symbol>s no sprite
+    // para quem está fora de vista. Sem filtro `visiveis`, devolve todas.
+    function chavesAVista(layout, pessoas, visiveis = null, selecionada = null) {
+      if (!layout || !Array.isArray(layout.modules)) return [];
+      if (!Array.isArray(visiveis)) return Array.isArray(layout.chaves) ? layout.chaves : [];
+      const lerPessoa = pessoas instanceof Map
+        ? (id) => pessoas.get(id)
+        : (id) => (pessoas && typeof pessoas === 'object' ? pessoas[id] : null);
+      const chaves = [];
+      layout.modules.forEach((mod, i) => {
+        const temSel = selecionada != null && Array.isArray(mod.seats) && mod.seats.some(
+          (s) => s === selecionada || (s && typeof s === 'object' && s.reservado === selecionada),
+        );
+        if (!visiveis[i] && !temSel) return;
+        for (const lugar of mod.seats || []) {
+          if (typeof lugar !== 'string') continue;
+          const p = lerPessoa(lugar);
+          if (!p) continue;
+          chaves.push(chaveCorpo(p.avatar, presetDe(p)));
+        }
+      });
+      return chaves;
+    }
+
     // renderOffice(state) -> markup SVG da cena (estética da demo). Aceita o
     // layout já montado (state.layout) ou monta-o a partir de people/workspaces.
+    // Quando `state.visiveis` (ou `state.camera` + `state.tela`) é fornecido,
+    // aplica viewport culling: só renderiza as mesas mostradas em tela (+ a mesa
+    // da pessoa selecionada, para foco/enquadramento), mantendo a geometria do
+    // mundo intocada.
     function renderOffice(state = {}) {
       const bruto = state.people instanceof Map
         ? [...state.people.values()]
@@ -4563,6 +4821,15 @@ function mascararChave(chave) {
           + `<text x="${largura / 2}" y="${altura / 2}" text-anchor="middle" font-size="22" fill="#8b958e">`
           + `${vazio}</text></svg>`;
       }
+
+      const aVista = Array.isArray(state.visiveis)
+        ? state.visiveis
+        : (state.camera && state.tela && state.tela.w > 0 && state.tela.h > 0
+          ? mesasAVista(layout.modules.length, state.camera, state.tela)
+          : null);
+      const mesaTemSelecionada = (mod) => selecionada != null && Array.isArray(mod.seats) && mod.seats.some(
+        (s) => s === selecionada || (s && typeof s === 'object' && s.reservado === selecionada),
+      );
 
       // Grelha só no chão: a parede (opaca, 0–360) tapa o resto e a linha de
       // cima (originY − 20) cai no ripado — não se desenha.
@@ -4591,7 +4858,10 @@ function mascararChave(chave) {
         + `<rect x="0" y="0" width="${largura}" height="${altura}" fill="url(#wg-floor)"/>`
         + grelha.join('')
         + FUNDO_ESCRITORIO
-        + layout.modules.map((mod, i) => renderModulo(mod, i, pessoas, layout.equipas, selecionada, recrutar, arquivadas)).join('')
+        + layout.modules.map((mod, i) => {
+          if (aVista && !aVista[i] && !mesaTemSelecionada(mod)) return '';
+          return renderModulo(mod, i, pessoas, layout.equipas, selecionada, recrutar, arquivadas);
+        }).join('')
         + '</svg>';
     }
 
@@ -4617,13 +4887,22 @@ function mascararChave(chave) {
       // Da conversa (histórico lido do alvo 'chat' quando o celular a abre):
       pedido: 'file', resposta: 'check', 'ferramenta-a-correr': 'code',
     };
-    const fmtNumero = (n, casas = 0) => new Intl.NumberFormat('pt-BR', {
-      minimumFractionDigits: casas, maximumFractionDigits: casas,
-    }).format(n);
+    // Formatadores reutilizáveis (evita instanciar Intl.NumberFormat a cada chamada).
+    const formatadoresNumero = new Map();
+    const fmtNumero = (n, casas = 0) => {
+      let f = formatadoresNumero.get(casas);
+      if (!f) {
+        f = new Intl.NumberFormat('pt-BR', { minimumFractionDigits: casas, maximumFractionDigits: casas });
+        formatadoresNumero.set(casas, f);
+      }
+      return f.format(n);
+    };
+    const fmtK1 = new Intl.NumberFormat('pt-BR', { maximumFractionDigits: 1 });
+    const fmtK2 = new Intl.NumberFormat('pt-BR', { maximumFractionDigits: 2 });
     // 53300 → "53,3k"; 128000 → "128k" (como a demo); janelas de 1M+ → "1,05M".
     const formatoK = (n) => (num(n) >= 1e6
-      ? `${new Intl.NumberFormat('pt-BR', { maximumFractionDigits: 2 }).format(num(n) / 1e6)}M`
-      : `${new Intl.NumberFormat('pt-BR', { maximumFractionDigits: 1 }).format(num(n) / 1000)}k`);
+      ? `${fmtK2.format(num(n) / 1e6)}M`
+      : `${fmtK1.format(num(n) / 1000)}k`);
     // Custo com cêntimos; abaixo de 1 dólar, 4 casas (os buckets de uma conversa
     // custam frações de cêntimo — "US$ 0,00" esconderia o gasto real).
     const formatoUSD = (v) => `US$ ${fmtNumero(v, 2)}`;
@@ -4760,7 +5039,8 @@ function mascararChave(chave) {
           emDelegacao: reservado,
           texto: `${reservado ? 'Em delegação · ' : ''}${info.label}`,
         },
-        pergunta: p.question ?? null,
+        pergunta: p.question ?? (p.questionario && Array.isArray(p.questionario.questions) && p.questionario.questions[0] ? p.questionario.questions[0].question : null),
+        questionario: normalizarQuestionario(p.questionario || p.question, p.question),
         subagentes: num(p.subagents),
         paragem,
         contexto,
@@ -6406,6 +6686,38 @@ function mascararChave(chave) {
       // não se anima (ver lugaresTapados): não se vê e não obriga a refazer o
       // desfoque do cabeçalho do celular a cada degrau.
       '.wg-svg .character-hit.wg-tapado .wg-z,.wg-svg .character-hit.wg-tapado .character.wg-balanca,.wg-svg .character-hit.wg-tapado .character.wg-balanca-lateral{animation:none}',
+      '.wg-svg .seat.wg-tapado .question-flag-pulse{animation:none}',
+      // Durante o gesto de pan/zoom (wg-camara-ativa), pausar as animações SVG
+      // internas deixa o compositor GPU deslizar uma única textura estática a
+      // 60/120 fps sem re-rasterizar o SVG a cada frame.
+      '.wg-mundo.wg-camara-ativa .wg-z,.wg-mundo.wg-camara-ativa .character.wg-balanca,.wg-mundo.wg-camara-ativa .character.wg-balanca-lateral,.wg-mundo.wg-camara-ativa .question-flag-pulse{animation-play-state:paused}',
+      // Questionário interativo no celular (quando o agente está com a mão levantada).
+      '.wg-tel-questionario{position:relative;z-index:5;flex:none;display:flex;flex-direction:column;gap:8px;max-height:58%;overflow-y:auto;margin:4px 10px 2px;padding:11px 12px;border:1.5px solid #e8c88a;border-radius:16px;background:#fffdf6;box-shadow:0 6px 18px rgba(36,59,80,.1);color:#243b50}',
+      '.wg-tel-q-topo{display:flex;align-items:center;justify-content:space-between;gap:8px}',
+      '.wg-tel-q-badge{display:inline-flex;align-items:center;gap:5px;padding:2px 8px;border-radius:999px;background:#fdf1da;border:1px solid #e8c88a;color:#8a6a24;font-size:10px;font-weight:700;letter-spacing:.4px;text-transform:uppercase}',
+      '.wg-tel-q-badge svg{width:12px;height:12px;flex:none}',
+      '.wg-tel-q-passo{font-size:10.5px;font-weight:600;color:#8e8e93;font-variant-numeric:tabular-nums}',
+      '.wg-tel-q-titulo{margin:0;font-size:13.5px;font-weight:700;line-height:1.32;color:#1d1d1f}',
+      '.wg-tel-q-detalhe{margin:0;font-size:11.5px;line-height:1.4;color:#5d6a62;white-space:pre-wrap}',
+      '.wg-tel-q-opcoes{display:flex;flex-direction:column;gap:6px}',
+      '.wg-tel-q-opcao{display:flex;align-items:flex-start;gap:8px;width:100%;min-height:36px;padding:8px 10px;border:1px solid #d8dbcf;border-radius:11px;background:#fff;color:#1d1d1f;text-align:left;font:inherit;cursor:pointer;transition:background .15s,border-color .15s}',
+      '.wg-tel-q-opcao:hover:not(:disabled){background:#f5f6ee;border-color:#b7c0a8}',
+      '.wg-tel-q-opcao.wg-tel-q-selecionada{background:#eef5fc;border-color:#0b84fe}',
+      '.wg-tel-q-marca{flex:none;display:grid;place-items:center;width:18px;height:18px;margin-top:1px;border:1.5px solid #b5bcc2;border-radius:50%;font-size:11px;font-weight:700;color:#fff;background:#fff}',
+      '.wg-tel-q-opcao[role="checkbox"] .wg-tel-q-marca{border-radius:5px}',
+      '.wg-tel-q-opcao.wg-tel-q-selecionada .wg-tel-q-marca{background:#0b84fe;border-color:#0b84fe}',
+      '.wg-tel-q-opcao-texto{flex:1;min-width:0;display:flex;flex-direction:column;gap:1px}',
+      '.wg-tel-q-opcao-rotulo{font-size:12.5px;font-weight:600;line-height:1.3;color:#1d1d1f}',
+      '.wg-tel-q-opcao-desc{font-size:11px;line-height:1.35;color:#68746c}',
+      '.wg-tel-q-custom{width:100%;height:32px;padding:6px 10px;border:1px solid #d8dbcf;border-radius:10px;background:#fff;color:#1d1d1f;font:inherit;font-size:12.5px}',
+      '.wg-tel-q-custom:focus{outline:2px solid #0b84fe;outline-offset:1px}',
+      '.wg-tel-q-erro{margin:0;font-size:11px;font-weight:600;color:#ff3b30}',
+      '.wg-tel-q-acoes{display:flex;align-items:center;justify-content:flex-end;gap:6px}',
+      '.wg-tel-q-enviar{padding:5px 13px;border:0;border-radius:12px;background:#0b84fe;color:#fff;font:600 12px/1.4 -apple-system,system-ui,sans-serif;cursor:pointer}',
+      '.wg-tel-q-enviar:hover:not(:disabled){background:#0a78e8}',
+      '.wg-tel-q-enviar:disabled{opacity:.5;cursor:default}',
+      '.wg-tel-q-secundario{padding:5px 10px;border:0;border-radius:10px;background:#e9e9eb;color:#3c3c43;font:600 11.5px/1.4 -apple-system,system-ui,sans-serif;cursor:pointer}',
+      '.wg-tel-q-secundario:hover:not(:disabled){background:#dcdce1}',
       keyframesBalanco(),
       keyframesBalancoLateral(),
       keyframesZzz(),
@@ -6908,6 +7220,12 @@ function mascararChave(chave) {
           d: 'M10 1.7v3.1M10 15.2v3.1M1.7 10h3.1M15.2 10h3.1M4.1 4.1l2.2 2.2M13.7 13.7l2.2 2.2M15.9 4.1l-2.2 2.2M6.3 13.7l-2.2 2.2',
           fill: 'none', stroke: 'currentColor', strokeWidth: 2.1, strokeLinecap: 'round',
         })),
+      // Mão levantada do questionário no celular (SVG inline, sem innerHTML).
+      mao: () => svgTel({ viewBox: '0 0 24 24', width: 13, height: 13 },
+        h('path', {
+          d: 'M8 13V5q0-3 3-1v7-8q3-2 3 1v7-6q3-2 3 1v7-4q3-1 3 2v6q0 6-7 6h-1q-3 0-5-3l-4-5q-1-3 2-3Z',
+          fill: 'none', stroke: 'currentColor', strokeWidth: 1.8, strokeLinecap: 'round', strokeLinejoin: 'round',
+        })),
     };
 
     // Segmentos de uma bolha → nós React (texto, `código`, bloco ``` em mono,
@@ -6987,6 +7305,14 @@ function mascararChave(chave) {
       const [limite, setLimite] = react.useState(MAX_ITENS_TELEFONE);
       const [abertos, setAbertos] = react.useState(() => new Set()); // ferramentas / textos longos expandidos
       const [agora, setAgora] = react.useState(() => Date.now());
+      const questionario = normalizarQuestionario(props.questionario ?? conv.questionario ?? null);
+      const [qEstado, setQEstado] = react.useState(() => ({
+        key: questionario ? questionario.key : null,
+        indice: 0,
+        rascunhos: questionario ? questionario.questions.map(() => ({ selected: [], custom: '' })) : [],
+        erro: null,
+        enviando: false,
+      }));
       react.useEffect(() => {
         const relogio = setInterval(() => setAgora(Date.now()), 20000); // hora da barra de estado
         return () => clearInterval(relogio);
@@ -7321,6 +7647,170 @@ function mascararChave(chave) {
         })
         : h('div', { className: 'wg-tel-avatar wg-tel-iniciais', 'aria-hidden': 'true' }, (String(nome).trim()[0] ?? '?').toUpperCase());
       const subtitulo = conv.removida ? 'Conversa apagada no DSH' : (m && m.titulo) || (m ? m.estado.rotulo : '');
+      const qPerguntas = questionario && Array.isArray(questionario.questions) && questionario.questions.length > 0
+        ? questionario.questions
+        : null;
+      const qAtivo = qPerguntas
+        ? (qEstado && qEstado.key === questionario.key && Array.isArray(qEstado.rascunhos) && qEstado.rascunhos.length === qPerguntas.length
+          ? qEstado
+          : {
+            key: questionario.key,
+            indice: 0,
+            rascunhos: qPerguntas.map(() => ({ selected: [], custom: '' })),
+            erro: null,
+            enviando: false,
+          })
+        : null;
+      const qIndice = qAtivo ? Math.min(qPerguntas.length - 1, Math.max(0, qAtivo.indice || 0)) : 0;
+      const qAtual = qPerguntas ? qPerguntas[qIndice] : null;
+      const qRascunho = qAtivo && qAtivo.rascunhos[qIndice] ? qAtivo.rascunhos[qIndice] : { selected: [], custom: '' };
+      const qTemResposta = (r) => Boolean(r && ((Array.isArray(r.selected) && r.selected.length > 0) || (typeof r.custom === 'string' && r.custom.trim() !== '')));
+      const qMudarRascunho = (fn, proxIndice = qIndice) => {
+        if (!qAtivo || !qPerguntas) return;
+        const novos = qAtivo.rascunhos.map((item, idx) => (idx === qIndice ? fn(item) : item));
+        setQEstado({ ...qAtivo, indice: proxIndice, rascunhos: novos, erro: null });
+      };
+      const qEscolherOpcao = (rotulo) => {
+        if (!qAtual || (qAtivo && qAtivo.enviando)) return;
+        qMudarRascunho((atual) => {
+          const lista = Array.isArray(atual.selected) ? atual.selected : [];
+          if (qAtual.multiSelect === true) {
+            const proximo = lista.includes(rotulo) ? lista.filter((x) => x !== rotulo) : [...lista, rotulo];
+            return { ...atual, selected: proximo };
+          }
+          return { selected: [rotulo], custom: '' };
+        });
+      };
+      const qEscreverCustom = (valor) => {
+        if (!qAtual || (qAtivo && qAtivo.enviando)) return;
+        qMudarRascunho((atual) => ({
+          selected: qAtual.multiSelect === true ? (atual.selected || []) : (String(valor ?? '').trim() ? [] : (atual.selected || [])),
+          custom: String(valor ?? ''),
+        }));
+      };
+      const qSubmeter = () => {
+        if (!qAtivo || !qPerguntas || qAtivo.enviando) return;
+        if (!qTemResposta(qRascunho)) {
+          setQEstado({ ...qAtivo, erro: 'Escolha uma opção ou escreva uma resposta.' });
+          return;
+        }
+        if (qIndice < qPerguntas.length - 1) {
+          setQEstado({ ...qAtivo, indice: qIndice + 1, erro: null });
+          return;
+        }
+        const falta = qAtivo.rascunhos.findIndex((r) => !qTemResposta(r));
+        if (falta >= 0) {
+          setQEstado({ ...qAtivo, indice: falta, erro: 'Escolha uma opção ou escreva uma resposta.' });
+          return;
+        }
+        const respostas = qPerguntas.map((q, idx) => {
+          const r = qAtivo.rascunhos[idx] || { selected: [], custom: '' };
+          const custom = String(r.custom ?? '').trim();
+          const selected = Array.isArray(r.selected) ? r.selected : [];
+          return {
+            id: q.id,
+            selected: custom === '' || q.multiSelect === true ? selected : [],
+            ...(custom ? { custom } : {}),
+          };
+        });
+        setQEstado({ ...qAtivo, enviando: true, erro: null });
+        const acao = typeof props.responderQuestionario === 'function'
+          ? Promise.resolve(props.responderQuestionario(respostas))
+          : (conversa && typeof conversa.enviar === 'function'
+            ? Promise.resolve(conversa.enviar(respostas.map((r) => r.custom || r.selected.join(', ')).filter(Boolean).join('\n')))
+            : Promise.resolve());
+        acao.then(() => {
+          setQEstado((atual) => (atual ? { ...atual, enviando: false } : atual));
+        }, (erro) => {
+          setQEstado((atual) => (atual ? { ...atual, enviando: false, erro: mensagemDeErro(erro) } : atual));
+        });
+      };
+      const qCancelar = () => {
+        if (!qAtivo || qAtivo.enviando) return;
+        if (typeof props.cancelarQuestionario === 'function') {
+          setQEstado({ ...qAtivo, enviando: true, erro: null });
+          Promise.resolve(props.cancelarQuestionario()).then(() => {
+            setQEstado((atual) => (atual ? { ...atual, enviando: false } : atual));
+          }, (erro) => {
+            setQEstado((atual) => (atual ? { ...atual, enviando: false, erro: mensagemDeErro(erro) } : atual));
+          });
+        }
+      };
+      const qCartao = qAtual
+        ? h('div', {
+          className: 'wg-tel-questionario', role: 'region',
+          'aria-label': `Questionário de ${nome}`, 'data-questionario-key': questionario.key,
+        },
+          h('div', { className: 'wg-tel-q-topo' },
+            h('span', { className: 'wg-tel-q-badge' }, ICONES_TELEFONE.mao(), qAtual.header || 'Questionamento'),
+            qPerguntas.length > 1
+              ? h('span', { className: 'wg-tel-q-passo' }, `${qIndice + 1} / ${qPerguntas.length}`)
+              : null),
+          h('strong', { className: 'wg-tel-q-titulo' }, qAtual.question),
+          qAtual.detail ? h('p', { className: 'wg-tel-q-detalhe' }, qAtual.detail) : null,
+          Array.isArray(qAtual.options) && qAtual.options.length > 0
+            ? h('div', {
+              className: 'wg-tel-q-opcoes',
+              role: qAtual.multiSelect ? 'group' : 'radiogroup',
+              'aria-label': qAtual.question,
+            },
+              ...qAtual.options.map((op, idx) => {
+                const selecionadaOp = Array.isArray(qRascunho.selected) && qRascunho.selected.includes(op.label);
+                return h('button', {
+                  type: 'button',
+                  key: `${op.label}-${idx}`,
+                  className: `wg-tel-q-opcao${selecionadaOp ? ' wg-tel-q-selecionada' : ''}`,
+                  role: qAtual.multiSelect ? 'checkbox' : 'radio',
+                  'aria-checked': selecionadaOp ? 'true' : 'false',
+                  'data-opcao': op.label,
+                  disabled: qAtivo.enviando,
+                  onClick: () => qEscolherOpcao(op.label),
+                },
+                  h('span', { className: 'wg-tel-q-marca', 'aria-hidden': 'true' }, selecionadaOp ? '✓' : String(idx + 1)),
+                  h('span', { className: 'wg-tel-q-opcao-texto' },
+                    h('span', { className: 'wg-tel-q-opcao-rotulo' }, op.label),
+                    op.description ? h('small', { className: 'wg-tel-q-opcao-desc' }, op.description) : null));
+              }))
+            : null,
+          h('input', {
+            type: 'text',
+            className: 'wg-tel-q-custom',
+            value: qRascunho.custom || '',
+            disabled: qAtivo.enviando,
+            placeholder: Array.isArray(qAtual.options) && qAtual.options.length > 0
+              ? 'Outra resposta (opcional)…'
+              : 'Escreva a sua resposta…',
+            'aria-label': 'Resposta personalizada',
+            onChange: (e) => qEscreverCustom(e.target.value),
+            onKeyDown: (e) => {
+              if (e.key === 'Enter' && !e.shiftKey) {
+                e.preventDefault();
+                qSubmeter();
+              }
+            },
+          }),
+          qAtivo.erro ? h('p', { className: 'wg-tel-q-erro', role: 'alert' }, qAtivo.erro) : null,
+          h('div', { className: 'wg-tel-q-acoes' },
+            qPerguntas.length > 1 && qIndice > 0
+              ? h('button', {
+                type: 'button', className: 'wg-tel-q-secundario',
+                disabled: qAtivo.enviando,
+                onClick: () => setQEstado({ ...qAtivo, indice: qIndice - 1, erro: null }),
+              }, 'Anterior')
+              : null,
+            typeof props.cancelarQuestionario === 'function'
+              ? h('button', {
+                type: 'button', className: 'wg-tel-q-secundario wg-tel-q-cancelar',
+                disabled: qAtivo.enviando,
+                onClick: qCancelar,
+              }, 'Cancelar')
+              : null,
+            h('button', {
+              type: 'button', className: 'wg-tel-q-enviar',
+              disabled: qAtivo.enviando,
+              onClick: qSubmeter,
+            }, qAtivo.enviando ? 'A enviar…' : (qIndice < qPerguntas.length - 1 ? 'Seguinte' : 'Responder'))))
+        : null;
 
       return h('section', {
         className: `wg-telefone${props.entrada === false ? ' wg-tel-sem-entrada' : ''}`, role: 'dialog', 'aria-label': `Conversa com ${nome}`,
@@ -7354,6 +7844,7 @@ function mascararChave(chave) {
               : null,
             vazio ? h('div', { className: 'wg-tel-vazio' }, vazio) : null,
             ...linhas.map(linha)),
+          qCartao,
           h('div', { className: 'wg-tel-entrada' },
             // Microfone ao lado do campo (era o "+" dos anexos): grava a
             // mensagem de voz, mostra o nível enquanto se fala e transcreve-a
@@ -7975,13 +8466,48 @@ function mascararChave(chave) {
       const [partilhaAberta, setPartilhaAberta] = react.useState(false);
       const painelRef = react.useRef(null);
       const telaRef = react.useRef(null);
+      const mundoRef = react.useRef(null);
+      const zoomValorRef = react.useRef(null);
+      const telaDimRef = react.useRef({ w: 1160, h: 805 });
+      const camaraRafRef = react.useRef(null);
       const botaoFiltrosRef = react.useRef(null);
       const botaoPartilhaRef = react.useRef(null);
       const cameraRef = react.useRef(camera);
       cameraRef.current = camera;
+      const aplicarCamaraDOM = (c) => {
+        if (mundoRef.current && mundoRef.current.style) {
+          mundoRef.current.style.transform = `translate(${c.x}px, ${c.y}px) scale(${c.zoom})`;
+        }
+        if (zoomValorRef.current) {
+          zoomValorRef.current.textContent = `${Math.round(c.zoom * 100)}%`;
+        }
+        camaraEmMovimento(mundoRef.current);
+      };
+      const agendarCamera = (produtor) => {
+        const proxima = typeof produtor === 'function' ? produtor(cameraRef.current) : produtor;
+        if (!proxima) return;
+        cameraRef.current = proxima;
+        aplicarCamaraDOM(proxima);
+        if (typeof requestAnimationFrame === 'function') {
+          if (camaraRafRef.current === null) {
+            camaraRafRef.current = requestAnimationFrame(() => {
+              camaraRafRef.current = null;
+              setCamera(cameraRef.current);
+            });
+          }
+        } else {
+          setCamera(proxima);
+        }
+      };
       // `will-change` do mundo só durante o gesto da câmara (regra Motion:
       // nada de camada GPU permanente) — ver camaraEmMovimento.
-      react.useEffect(() => { camaraEmMovimento(); }, [camera]);
+      react.useEffect(() => { camaraEmMovimento(mundoRef.current); }, [camera]);
+      react.useEffect(() => () => {
+        if (camaraRafRef.current !== null && typeof cancelAnimationFrame === 'function') {
+          cancelAnimationFrame(camaraRafRef.current);
+          camaraRafRef.current = null;
+        }
+      }, []);
       const filtrosAbertosRef = react.useRef(false);
       filtrosAbertosRef.current = filtrosAbertos;
       const interagiuRef = react.useRef(false); // o utilizador explorou: sem enquadramento automático
@@ -8023,14 +8549,14 @@ function mascararChave(chave) {
             const px = e.clientX - rect.left;
             const py = e.clientY - rect.top;
             const fator = e.deltaY < 0 ? 1.15 : 1 / 1.15;
-            setCamera((c) => {
+            agendarCamera((c) => {
               const zoom = Math.min(1.5, Math.max(0.15, c.zoom * fator));
               const wx = (px - c.x) / c.zoom;
               const wy = (py - c.y) / c.zoom;
               return { zoom, x: px - wx * zoom, y: py - wy * zoom };
             });
           } else {
-            setCamera((c) => ({ ...c, x: c.x - e.deltaX, y: c.y - e.deltaY }));
+            agendarCamera((c) => ({ ...c, x: c.x - e.deltaX, y: c.y - e.deltaY }));
           }
         };
         tela.addEventListener('wheel', onWheel, { passive: false });
@@ -8172,26 +8698,43 @@ function mascararChave(chave) {
       const atualizarVistaAnimada = () => {
         const tela = telaRef.current;
         if (!tela) return;
+        if (tela.clientWidth > 0 && tela.clientHeight > 0) {
+          telaDimRef.current = { w: tela.clientWidth, h: tela.clientHeight };
+        }
         const cena = tela.querySelector('.wg-svg > svg');
         const mesas = cena ? cena.querySelectorAll('.desk-module') : [];
-        const aVista = mesasAVista(mesas.length, cameraRef.current, { w: tela.clientWidth, h: tela.clientHeight });
+        const layAtual = getView().layout;
+        const totalMesas = layAtual && Array.isArray(layAtual.modules) ? layAtual.modules.length : mesas.length;
+        const wTela = tela.clientWidth || telaDimRef.current.w;
+        const hTela = tela.clientHeight || telaDimRef.current.h;
+        const aVista = mesasAVista(totalMesas, cameraRef.current, { w: wTela, h: hTela });
         // O que tapa a sala (o celular; a barra quando está por cima dela): só
         // conta o que cruza a tela. Quem fica debaixo não se anima.
         const painel = painelRef.current;
-        const r = tela.getBoundingClientRect();
-        const tapas = painel
+        const elTel = painel ? painel.querySelector('.wg-telefone') : null;
+        const elSb = painel ? painel.querySelector('.wg-sidebar') : null;
+        const r = (elTel || elSb) ? tela.getBoundingClientRect() : { left: 0, top: 0, width: wTela, height: hTela };
+        const tapas = (elTel || elSb)
           ? [painel.querySelector('.wg-telefone'), painel.querySelector('.wg-sidebar')]
             .map((el) => caixaNaTela(el, r))
             .filter((c) => c && c.dir > 0 && c.esq < r.width && c.fundo > 0 && c.topo < r.height)
           : [];
-        const tapados = lugaresTapados(getView().layout, cameraRef.current, tapas);
+        const tapados = lugaresTapados(layAtual, cameraRef.current, tapas);
         const chave = `${aVista.map((v) => (v ? 1 : 0)).join('')}|${[...tapados].sort().join(',')}`;
         if (cena === vistaAnimadaRef.current.cena && chave === vistaAnimadaRef.current.chave) return;
         vistaAnimadaRef.current = { cena, chave };
         const elementos = [];
         mesas.forEach((m, i) => {
-          if (m.classList.contains('wg-fora') === aVista[i]) m.classList.toggle('wg-fora', !aVista[i]);
-          if (!aVista[i]) return;
+          const idx = m.hasAttribute && m.hasAttribute('data-module-index')
+            ? Number(m.getAttribute('data-module-index'))
+            : i;
+          const visivel = Boolean(aVista[idx]);
+          if (m.classList.contains('wg-fora') === visivel) m.classList.toggle('wg-fora', !visivel);
+          if (!visivel) return;
+          for (const s of m.querySelectorAll('.seat[role="button"][data-session-id]')) {
+            const tapadoSeat = tapados.has(s.getAttribute('data-session-id'));
+            if (s.classList.contains('wg-tapado') !== tapadoSeat) s.classList.toggle('wg-tapado', tapadoSeat);
+          }
           for (const g of m.querySelectorAll('.character-hit')) {
             const tapado = tapados.has(g.getAttribute('data-session-id'));
             if (g.classList.contains('wg-tapado') !== tapado) g.classList.toggle('wg-tapado', tapado);
@@ -8285,7 +8828,7 @@ function mascararChave(chave) {
             inicio.moveu = true;
             interagiuRef.current = true;
           }
-          setCamera((c) => ({ ...c, x: ev.clientX - inicio.x, y: ev.clientY - inicio.y }));
+          agendarCamera((c) => ({ ...c, x: ev.clientX - inicio.x, y: ev.clientY - inicio.y }));
         };
         const soltar = () => {
           window.removeEventListener('pointermove', mover);
@@ -8319,8 +8862,35 @@ function mascararChave(chave) {
         if (g && g.moveu) return; // fim de um arrastar, não é clique
         agirSobre(e.target);
       };
-      // Teclado: Enter/Espaço num lugar ou pessoa com foco (role="button").
+      // Teclado: Enter/Espaço num lugar ou pessoa com foco (role="button"), e
+      // setas / + / - / 0 na tela para movimentação lateral e horizontal fluida.
       const teclar = (e) => {
+        const passos = { ArrowLeft: [48, 0], ArrowRight: [-48, 0], ArrowUp: [0, 48], ArrowDown: [0, -48] }[e.key];
+        if (passos) {
+          e.preventDefault();
+          interagiuRef.current = true;
+          agendarCamera((c) => ({ ...c, x: c.x + passos[0], y: c.y + passos[1] }));
+          return;
+        }
+        if (e.key === '+' || e.key === '=') {
+          e.preventDefault();
+          interagiuRef.current = true;
+          agendarCamera((c) => ({ ...c, zoom: Math.min(1.5, c.zoom * 1.2) }));
+          return;
+        }
+        if (e.key === '-') {
+          e.preventDefault();
+          interagiuRef.current = true;
+          agendarCamera((c) => ({ ...c, zoom: Math.max(0.15, c.zoom / 1.2) }));
+          return;
+        }
+        if (e.key === '0') {
+          e.preventDefault();
+          interagiuRef.current = false;
+          tudoRef.current = true;
+          caber(true);
+          return;
+        }
         if (e.key !== 'Enter' && e.key !== ' ') return;
         const el = e.target;
         if (!el || !el.getAttribute || (!el.getAttribute('data-action') && !el.getAttribute('data-session-id'))) return;
@@ -8328,13 +8898,19 @@ function mascararChave(chave) {
         agirSobre(el);
       };
 
-      // A cena só se RECONSTRÓI quando o ESTADO muda (pessoas, layout, seleção,
-      // permissões) — nunca a cada frame da câmara. Arrastar/zoom mexe apenas no
-      // `transform: translate(...) scale(...)` do .wg-mundo (compositor, sem
-      // repaint); o React nem reavalia o markup do SVG quando nada mudou.
+      // Viewport culling: determina que mesas estão à vista na tela atual
+      // (+ 1 mesa de margem) para SÓ renderizar os itens mostrados em tela e
+      // SÓ incluir no sprite os avatares visíveis. `chaveVista` só muda quando
+      // uma mesa entra ou sai da janela visível — arrastar dentro da janela
+      // move apenas o transform na GPU, com zero reconstruções do SVG.
+      if (telaRef.current && telaRef.current.clientWidth > 0 && telaRef.current.clientHeight > 0) {
+        telaDimRef.current = { w: telaRef.current.clientWidth, h: telaRef.current.clientHeight };
+      }
+      const aVista = mesasAVista(layout.modules.length, camera, telaDimRef.current);
+      const chaveVista = aVista.map((v) => (v ? '1' : '0')).join('');
       const svg = (react.useMemo || ((f) => f()))(
-        () => renderOffice({ people: view.people, layout, selecionada, recrutar: podeAgir }),
-        [view, selecionada, podeAgir],
+        () => renderOffice({ people: view.people, layout, selecionada, recrutar: podeAgir, visiveis: aVista }),
+        [view, selecionada, podeAgir, chaveVista],
       );
       const sel = selecionada && view.people[selecionada] ? view.people[selecionada] : null;
       const modelo = sel
@@ -8345,13 +8921,14 @@ function mascararChave(chave) {
         })
         : null;
       // Bustos do preview do "Adicionar contacto": o sprite da sala só traz os
-      // corpos das pessoas (com a expressão que têm AGORA) e o recruta pode
-      // querer qualquer identidade — com a tela aberta, entram os 8 bustos em
-      // 'idle'; sem ela, o sprite fica como sempre.
+      // corpos das pessoas visíveis em tela (com a expressão que têm AGORA) e
+      // o recruta pode querer qualquer identidade — com a tela aberta, entram
+      // os 8 bustos em 'idle'; sem ela, o sprite fica só com quem está em tela.
       const chavesContacto = telefone.aberto && telefone.vista === 'adicionar-contacto'
         ? identidades().map((a) => chaveCorpo(a, 'idle'))
         : [];
-      const sprite = spriteDoPainel([...layout.chaves, modelo ? modelo.avatarChave : null, ...chavesContacto]);
+      const chavesVisiveis = chavesAVista(layout, view.people, aVista, selecionada);
+      const sprite = spriteDoPainel([...chavesVisiveis, modelo ? modelo.avatarChave : null, ...chavesContacto]);
       // GRUPOS = os workspaces da sala (o mesmo recorte das mesas): cada grupo
       // mostra as pessoas daquele workspace; o feed conjunto é do Grupo. As
       // arquivadas não entram quando o filtro as oculta (semArquivadas).
@@ -8528,13 +9105,13 @@ function mascararChave(chave) {
             h('button', {
               type: 'button', className: 'wg-botao', title: 'Aproximar',
               'aria-label': 'Aproximar (zoom in)', disabled: camera.zoom >= 1.49,
-              onClick: () => { interagiuRef.current = true; setCamera((c) => ({ ...c, zoom: Math.min(1.5, c.zoom * 1.2) })); },
+              onClick: () => { interagiuRef.current = true; agendarCamera((c) => ({ ...c, zoom: Math.min(1.5, c.zoom * 1.2) })); },
             }, '＋ Zoom'),
-            h('span', { className: 'wg-zoom-valor', 'aria-live': 'polite' }, `${Math.round(camera.zoom * 100)}%`),
+            h('span', { className: 'wg-zoom-valor', ref: zoomValorRef, 'aria-live': 'polite' }, `${Math.round(camera.zoom * 100)}%`),
             h('button', {
               type: 'button', className: 'wg-botao', title: 'Afastar',
               'aria-label': 'Afastar (zoom out)', disabled: camera.zoom <= 0.151,
-              onClick: () => { interagiuRef.current = true; setCamera((c) => ({ ...c, zoom: Math.max(0.15, c.zoom / 1.2) })); },
+              onClick: () => { interagiuRef.current = true; agendarCamera((c) => ({ ...c, zoom: Math.max(0.15, c.zoom / 1.2) })); },
             }, '－ Zoom'),
             h('button', {
               type: 'button', className: 'wg-botao', title: 'Enquadrar toda a sala',
@@ -8601,7 +9178,7 @@ function mascararChave(chave) {
             },
               banner ? h('div', { className: 'wg-banner' }, banner) : null,
               h('div', {
-                className: 'wg-mundo',
+                className: 'wg-mundo', ref: mundoRef,
                 style: { transform: `translate(${camera.x}px, ${camera.y}px) scale(${camera.zoom})` },
               },
                 h('div', { className: 'wg-svg', dangerouslySetInnerHTML: { __html: svg } }),
@@ -8663,6 +9240,13 @@ function mascararChave(chave) {
                   key: sel.id, entrada, conversa: typeof props.getConversa === 'function' ? props.getConversa() : null,
                   sessionId: modelo.id, nome: modelo.nome, avatarChave: modelo.avatarChave,
                   titulo: modelo.titulo, estadoRotulo: modelo.estado.rotulo, fechar: fecharTelefone,
+                  questionario: modelo.questionario,
+                  responderQuestionario: typeof props.responderQuestionario === 'function'
+                    ? (respostas) => props.responderQuestionario(modelo.id, respostas)
+                    : undefined,
+                  cancelarQuestionario: typeof props.cancelarQuestionario === 'function'
+                    ? () => props.cancelarQuestionario(modelo.id)
+                    : undefined,
                   voltar: () => { if (typeof props.voltarTelefone === 'function') props.voltarTelefone(); },
                   // Sem chave da API, o microfone abre as Definições.
                   abrirConfig: () => { if (typeof props.abrirConfig === 'function') props.abrirConfig(); },
@@ -9085,6 +9669,7 @@ function mascararChave(chave) {
       let timerExpressao = null;
       const EXPRESSAO_PULSO_MS = 3000;
       const pulsoExpressao = () => {
+        try { if (typeof document !== 'undefined' && document.hidden) return; } catch { /* sem document */ }
         const agora = Date.now();
         let mudou = false;
         for (const pessoa of estado.people.values()) {
@@ -9204,6 +9789,37 @@ function mascararChave(chave) {
           return r;
         },
         abrirTelefone: (id, origem = 'cena') => abrirConversaNoTelefone(id, origem),
+        // Responde ou cancela o questionário pendente de uma pessoa no celular:
+        // delega ao PendingQuestion real do DSH (superficieDSH) quando ligado e
+        // emite question/answered para baixar a mão e fechar o cartão.
+        responderQuestionario: async (id, respostas = []) => {
+          if (!id) return { ok: false };
+          const chaveId = String(id);
+          const transporte = opcoes.surface || superficieDSH;
+          if (transporte && typeof transporte.responderPergunta === 'function') {
+            await transporte.responderPergunta(chaveId, respostas);
+          }
+          const pessoa = estado.people.get(chaveId);
+          if (pessoa && (pessoa.question || pessoa.questionario)) {
+            estado = applyEvent(estado, { type: 'question/answered', sessionId: chaveId, at: Date.now() });
+            notificar();
+          }
+          return { ok: true };
+        },
+        cancelarQuestionario: async (id) => {
+          if (!id) return { ok: false };
+          const chaveId = String(id);
+          const transporte = opcoes.surface || superficieDSH;
+          if (transporte && typeof transporte.cancelarPergunta === 'function') {
+            await transporte.cancelarPergunta(chaveId);
+          }
+          const pessoa = estado.people.get(chaveId);
+          if (pessoa && (pessoa.question || pessoa.questionario)) {
+            estado = applyEvent(estado, { type: 'question/answered', sessionId: chaveId, at: Date.now() });
+            notificar();
+          }
+          return { ok: true };
+        },
         // Vista "Grupos" — a lista de workspaces (o "Messages" do nosso iMessage).
         abrirGrupos: () => {
           soltarConversa();
@@ -9538,15 +10154,15 @@ function mascararChave(chave) {
     // compositing para nada (regra MotionScore: `will-change` é gerido, nunca
     // fixo). Qualquer mudança de câmara liga-a; 220 ms de quietude desligam-na.
     let camaraTimer = null;
-    function camaraEmMovimento() {
+    function camaraEmMovimento(mundoEl = null) {
       try {
-        const mundo = document.querySelector('.wg-painel .wg-mundo');
+        const mundo = mundoEl || (typeof document !== 'undefined' ? document.querySelector('.wg-painel .wg-mundo') : null);
         if (!mundo) return;
-        mundo.classList.add('wg-camara-ativa');
+        if (!mundo.classList.contains('wg-camara-ativa')) mundo.classList.add('wg-camara-ativa');
         if (camaraTimer !== null) clearTimeout(camaraTimer);
         camaraTimer = setTimeout(() => {
           camaraTimer = null;
-          const m = document.querySelector('.wg-painel .wg-mundo');
+          const m = mundoEl || (typeof document !== 'undefined' ? document.querySelector('.wg-painel .wg-mundo') : null);
           if (m) m.classList.remove('wg-camara-ativa');
         }, 220);
       } catch { /* sem document (testes Node) */ }
@@ -9807,6 +10423,8 @@ function mascararChave(chave) {
     exports.__identidadeDeNome = identidadeDeNome;
     exports.__comporPromptContacto = comporPromptContacto;
     exports.__TelefoneAdicionarContacto = TelefoneAdicionarContacto; // render sem browser
+    exports.__normalizarQuestionario = normalizarQuestionario;
+    exports.__chavesAVista = chavesAVista;
 
     try { window.__wgDiag = (window.__wgDiag || '') + '|factory:fim'; } catch { /* sem window */ }
     return module.exports;
