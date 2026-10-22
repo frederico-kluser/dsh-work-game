@@ -218,3 +218,69 @@ test('ordem: o cliente pede os commits ao host e o layout usa-os', () => {
   assert.ok(BUNDLE.includes('definirCommits'), 'o núcleo aceita o mapa do host');
   assert.equal(typeof B.__montarEscritorio, 'function');
 });
+
+/* ---------- ecrã "Adicionar projeto" (vista nova do celular) ---------- */
+
+const nosDe = (no, pred, fora = []) => {
+  if (!no || typeof no !== 'object') return fora;
+  if (pred(no)) fora.push(no);
+  for (const f of no.filhos || []) nosDe(f, pred, fora);
+  return fora;
+};
+const textoDe = (no) => (no.filhos || []).map((f) => (typeof f === 'string' ? f : textoDe(f))).join('');
+
+test('adicionar projeto: um campo de caminho, um botão e o erro colado ao campo', () => {
+  const chamadas = { mudou: [], criou: 0, voltou: 0 };
+  const arvore = B.__TelefoneAdicionarProjeto({
+    projeto: { caminho: '~/Projects/alfa', erro: '', solucao: '', nota: '', aCriar: false },
+    aoMudar: (t) => chamadas.mudou.push(t),
+    aoCriar: () => { chamadas.criou += 1; },
+    voltar: () => { chamadas.voltou += 1; },
+  });
+  const campos = nosDe(arvore, (n) => n.tipo === 'input');
+  assert.equal(campos.length, 1, 'um só campo (o caminho)');
+  assert.equal(campos[0].props.value, '~/Projects/alfa');
+  assert.equal(campos[0].props.placeholder, '~/Projects/meu-projeto');
+  campos[0].props.onChange({ target: { value: '~/Projects/beta' } });
+  assert.deepEqual(chamadas.mudou, ['~/Projects/beta'], 'escrever avisa o núcleo');
+
+  const submeter = nosDe(arvore, (n) => n.tipo === 'button' && n.props.type === 'submit')[0];
+  assert.ok(submeter, 'há um botão de submissão');
+  assert.equal(textoDe(submeter), 'Adicionar projeto');
+  nosDe(arvore, (n) => n.tipo === 'form')[0].props.onSubmit({ preventDefault() {} });
+  assert.equal(chamadas.criou, 1, 'submeter pede a criação');
+
+  const cancelar = nosDe(arvore, (n) => n.tipo === 'button' && textoDe(n) === 'Cancelar')[0];
+  cancelar.props.onClick();
+  assert.equal(chamadas.voltou, 1, 'cancelar volta aos grupos');
+});
+
+test('adicionar projeto: erro e solução aparecem em role=alert, e a criar desativa o botão', () => {
+  const arvore = B.__TelefoneAdicionarProjeto({
+    projeto: { caminho: '/nada', erro: 'não encontrei a pasta /nada', solucao: 'confira o caminho', aCriar: false },
+    aoMudar: () => {}, aoCriar: () => {}, voltar: () => {},
+  });
+  const alerta = nosDe(arvore, (n) => n.props && n.props.role === 'alert')[0];
+  assert.ok(alerta, 'o erro é anunciado (role=alert)');
+  assert.match(textoDe(alerta), /não encontrei a pasta \/nada/);
+  assert.match(textoDe(alerta), /confira o caminho/);
+
+  const aCriar = B.__TelefoneAdicionarProjeto({
+    projeto: { caminho: '~/x', aCriar: true }, aoMudar: () => {}, aoCriar: () => {}, voltar: () => {},
+  });
+  const botao = nosDe(aCriar, (n) => n.tipo === 'button' && n.props.type === 'submit')[0];
+  assert.equal(botao.props.disabled, true, 'enquanto cria, não se submete duas vezes');
+  assert.equal(textoDe(botao), 'A adicionar…');
+  const campo = nosDe(aCriar, (n) => n.tipo === 'input')[0];
+  assert.equal(campo.props.disabled, true);
+});
+
+test('adicionar projeto: a lista de Grupos tem a entrada e o fluxo usa o workspaces.create', () => {
+  assert.ok(BUNDLE.includes("'data-vista': 'adicionar-projeto'"), 'há um ecrã próprio na pilha do celular');
+  assert.ok(BUNDLE.includes("'Adicionar projeto'"), 'a entrada "Adicionar projeto" existe');
+  assert.ok(BUNDLE.includes('servico.create({ path: caminho })'), 'cria pelo workspaces.create do DSH');
+  assert.ok(BUNDLE.includes("acao: 'resolver'"), 'resolve o caminho (~ → absoluto) no host antes de criar');
+  assert.ok(BUNDLE.includes('definirCaminhoProjeto') && BUNDLE.includes('criarProjeto'), 'núcleo expõe o fluxo');
+  assert.ok(BUNDLE.includes('.wg-tel-projeto-erro{'), 'o erro tem estilo próprio');
+  assert.equal(typeof B.__TelefoneAdicionarProjeto, 'function');
+});

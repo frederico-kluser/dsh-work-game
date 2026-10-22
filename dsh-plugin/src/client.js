@@ -7093,6 +7093,8 @@ function mascararChave(chave) {
       '.wg-tel-config-limpar{padding:7px 13px;border:0;border-radius:15px;background:#e9e9eb;color:#ff3b30;font:600 13px/1.5 -apple-system,system-ui,sans-serif;cursor:pointer}',
       '.wg-tel-config-limpar:hover{background:#dcdce1}',
       '.wg-tel-config-nota{flex:none;min-height:16px;margin:10px 0 0;font-size:11px;color:#3c3c43}',
+      '.wg-tel-projeto-erro{color:#ff3b30;font-weight:600}',
+      '.wg-tel-config-chave[aria-invalid="true"]{border-color:#ff3b30}',
       '.wg-tel-config-aviso{flex:none;margin:14px 0 0;font-size:11px;line-height:1.55;color:#8e8e93}',
       '.wg-tel-config-icone{flex:none;display:grid;place-items:center;width:34px;height:34px;border-radius:50%;background:#e9e9eb;color:#8e8e93}',
       '.wg-tel-config-icone svg{width:17px;height:17px}',
@@ -8554,7 +8556,7 @@ function mascararChave(chave) {
 
     // Tela "Grupos": a lista de workspaces (o "Messages" do nosso iMessage) —
     function TelefoneGrupos(props) {
-      const { grupos, abrirGrupo, fechar, podeFechar, abrirConfig } = props;
+      const { grupos, abrirGrupo, fechar, podeFechar, abrirConfig, abrirAdicionarProjeto } = props;
       const [, setTick] = react.useState(0);
       const [agora, setAgora] = react.useState(() => Date.now());
       react.useEffect(() => {
@@ -8603,6 +8605,20 @@ function mascararChave(chave) {
                   h('span', { className: 'wg-tel-online-texto' }, `${g.aTrabalhar} online`))
                   : null,
                 h('span', { className: 'wg-tel-grupo-seta', 'aria-hidden': 'true' }, ICONES_TELEFONE.chevron()))),
+            // Adicionar projeto: registrar no DSH uma pasta que já existe
+            // (workspaces.create) — o projeto aparece na lista já ordenado
+            // pelo último commit.
+            h('button', {
+              type: 'button', className: 'wg-tel-grupo-linha', role: 'listitem',
+              title: 'Adicionar projeto — registrar uma pasta que já existe',
+              'aria-label': 'Adicionar projeto',
+              onClick: () => { if (typeof abrirAdicionarProjeto === 'function') abrirAdicionarProjeto(); },
+            },
+              h('span', { className: 'wg-tel-config-icone', 'aria-hidden': 'true' }, ICONES_TELEFONE.mais()),
+              h('div', { className: 'wg-tel-grupo-texto' },
+                h('div', { className: 'wg-tel-grupo-nome' }, 'Adicionar projeto'),
+                h('div', { className: 'wg-tel-grupo-sub' }, 'Registrar uma pasta do computador')),
+              h('span', { className: 'wg-tel-grupo-seta', 'aria-hidden': 'true' }, ICONES_TELEFONE.chevron())),
             // Definições (a engrenagem do fim da lista): a chave da API
             // OpenAI para a voz e a transcrição das mensagens.
             h('button', {
@@ -8835,6 +8851,64 @@ function mascararChave(chave) {
     }
 
     const TelefoneConfigMemo = typeof react.memo === 'function' ? react.memo(TelefoneConfig) : TelefoneConfig;
+
+    // Tela "Adicionar projeto" (vista 'adicionar-projeto'): registra no DSH uma
+    // pasta que JÁ existe — é o `workspaces.create({ path })` da API real, não
+    // uma cópia nem um mkdir. Pede-se só o CAMINHO (o título é o nome da pasta
+    // e o DSH renomeia depois): um campo, um botão, o erro colado ao campo.
+    function TelefoneAdicionarProjeto(props) {
+      const projeto = props.projeto || {};
+      const [agora, setAgora] = react.useState(() => Date.now());
+      react.useEffect(() => {
+        const relogio = setInterval(() => setAgora(Date.now()), 20000);
+        return () => clearInterval(relogio);
+      }, []);
+      const aCriar = projeto.aCriar === true;
+      const enviar = (e) => {
+        if (e && typeof e.preventDefault === 'function') e.preventDefault();
+        if (aCriar) return;
+        if (typeof props.aoCriar === 'function') props.aoCriar();
+      };
+      return h('section', {
+        className: `wg-telefone${props.entrada === false ? ' wg-tel-sem-entrada' : ''}`,
+        role: 'dialog', 'aria-label': 'Adicionar projeto', 'data-vista': 'adicionar-projeto',
+      },
+        h('div', { className: 'wg-tel-ecra' },
+          h('div', { className: 'wg-tel-ilha', 'aria-hidden': 'true' }),
+          topoTel({
+            agora,
+            voltar: 'Grupos', aoVoltar: props.voltar,
+            voltarTitulo: 'Voltar aos grupos',
+            avatar: avatarIniciais('P'),
+            nome: 'Novo projeto',
+            subtitulo: 'Registrar uma pasta no DSH',
+          }),
+          h('form', { className: 'wg-tel-lista wg-tel-config', onSubmit: enviar },
+            h('label', { className: 'wg-tel-config-rotulo', htmlFor: 'wg-tel-projeto-caminho' }, 'Pasta do projeto'),
+            h('input', {
+              id: 'wg-tel-projeto-caminho', className: 'wg-tel-config-chave', type: 'text',
+              value: projeto.caminho || '', placeholder: '~/Projects/meu-projeto',
+              autoComplete: 'off', spellCheck: 'false', disabled: aCriar,
+              'aria-label': 'Pasta do projeto', 'aria-describedby': 'wg-tel-projeto-ajuda',
+              'aria-invalid': projeto.erro ? 'true' : 'false',
+              onChange: (e) => { if (typeof props.aoMudar === 'function') props.aoMudar(e.target.value); },
+            }),
+            h('p', { className: 'wg-tel-config-guardada', id: 'wg-tel-projeto-ajuda' },
+              'O ~ é a sua pasta pessoal. O projeto entra nos Grupos já na ordem do último commit.'),
+            h('div', { className: 'wg-tel-config-acoes' },
+              h('button', { type: 'submit', className: 'wg-tel-config-guardar', disabled: aCriar },
+                aCriar ? 'A adicionar…' : 'Adicionar projeto'),
+              h('button', { type: 'button', className: 'wg-tel-config-limpar', onClick: props.voltar }, 'Cancelar')),
+            projeto.erro
+              ? h('p', { className: 'wg-tel-config-nota wg-tel-projeto-erro', role: 'alert' },
+                projeto.erro, projeto.solucao ? ` ${projeto.solucao}` : '')
+              : h('p', { className: 'wg-tel-config-nota', role: 'status' }, projeto.nota || ''),
+            h('p', { className: 'wg-tel-config-aviso' },
+              'Só registra pastas que já existem nesta máquina: nada é criado nem apagado no disco.')),
+          h('div', { className: 'wg-tel-home', 'aria-hidden': 'true' })));
+    }
+
+    const TelefoneAdicionarProjetoMemo = typeof react.memo === 'function' ? react.memo(TelefoneAdicionarProjeto) : TelefoneAdicionarProjeto;
 
     const TelefoneMemo = typeof react.memo === 'function' ? react.memo(TelefoneConversa) : TelefoneConversa;
 
@@ -9830,7 +9904,22 @@ function mascararChave(chave) {
                     if (typeof props.abrirGrupo === 'function') props.abrirGrupo(id, g ? g.membros : []);
                   },
                   abrirConfig: () => { if (typeof props.abrirConfig === 'function') props.abrirConfig(); },
+                  abrirAdicionarProjeto: () => {
+                    if (typeof props.abrirAdicionarProjeto === 'function') props.abrirAdicionarProjeto();
+                  },
                   fechar: celular ? fecharModoJogo : fecharTelefone, podeFechar: !celular,
+                });
+              }
+              if (vistaTel === 'adicionar-projeto') {
+                // A pasta que já existe: caminho → host resolve → workspaces.create.
+                return h(TelefoneAdicionarProjetoMemo, {
+                  key: 'adicionar-projeto', entrada,
+                  projeto: typeof props.getProjeto === 'function' ? (props.getProjeto() || {}) : {},
+                  aoMudar: (texto) => {
+                    if (typeof props.definirCaminhoProjeto === 'function') props.definirCaminhoProjeto(texto);
+                  },
+                  aoCriar: () => { if (typeof props.criarProjeto === 'function') props.criarProjeto(); },
+                  voltar: () => { if (typeof props.voltarTelefone === 'function') props.voltarTelefone(); },
                 });
               }
               if (vistaTel === 'config') {
@@ -10172,6 +10261,9 @@ function mascararChave(chave) {
       // o workspace onde o contacto entra. Fica FORA do `telefone` de
       // propósito — a forma de getTelefone() é contrato de teste (5 campos).
       let recruta = null;
+      // "Adicionar projeto" (a pasta que já existe): estado próprio, fora de
+      // getTelefone() — a forma de 5 campos é contrato. Lê-se com getProjeto().
+      let projeto = null;
       const soltarGrupo = () => {
         for (const c of grupoConv.membros.values()) { try { c.libertar(); } catch { /* já libertada */ } }
         grupoConv = { workspaceId: null, membros: new Map() };
@@ -10525,6 +10617,73 @@ function mascararChave(chave) {
           notificar();
         },
         getRecruta: () => recruta,
+        // ── Adicionar projeto: registrar no DSH uma pasta que JÁ existe ──
+        // O caminho é resolvido pelo HOST (expande ~ e confirma que é pasta) e
+        // a criação é a API real: workspaces.create({ path }). Nada é criado no
+        // disco; o projeto nasce já na ordem do último commit.
+        abrirAdicionarProjeto: () => {
+          soltarConversa();
+          soltarGrupo();
+          projeto = { caminho: '', erro: '', solucao: '', nota: '', aCriar: false };
+          telefone = { aberto: true, sessionId: null, vista: 'adicionar-projeto', grupoId: null, origem: 'cena' };
+          trace('telefone-adicionar-projeto', null);
+          notificar();
+        },
+        getProjeto: () => projeto,
+        definirCaminhoProjeto: (texto) => {
+          projeto = {
+            ...(projeto || { caminho: '', erro: '', solucao: '', nota: '', aCriar: false }),
+            caminho: String(texto ?? ''), erro: '', solucao: '', nota: '',
+          };
+          notificar();
+        },
+        criarProjeto: async () => {
+          if (!projeto || projeto.aCriar) return { ok: false };
+          const bruto = String(projeto.caminho || '').trim();
+          if (!bruto) {
+            projeto = { ...projeto, erro: 'Diga a pasta do projeto.', solucao: 'ex.: ~/Projects/meu-projeto' };
+            notificar();
+            return { ok: false };
+          }
+          projeto = { ...projeto, aCriar: true, erro: '', solucao: '', nota: '' };
+          notificar();
+          let caminho = bruto;
+          let recusa = null;
+          try {
+            const r = await pedirProjetos({ acao: 'resolver', path: bruto });
+            if (r && r.ok === true && r.path) caminho = r.path;
+            else if (r && r.ok === false) recusa = r;
+          } catch { /* sem a rota (host anterior): tenta o caminho como veio */ }
+          if (recusa) {
+            projeto = { ...projeto, aCriar: false, erro: recusa.erro || 'caminho inválido', solucao: recusa.solucao || '' };
+            notificar();
+            return { ok: false, erro: recusa.erro };
+          }
+          let servico = null;
+          try { servico = servicoDe(ctxDoPlugin, 'workspaces'); } catch { servico = null; }
+          if (!servico || typeof servico.create !== 'function') {
+            projeto = { ...projeto, aCriar: false, erro: 'o DSH não está a aceitar projetos agora', solucao: 'tente de novo quando a barra de workspaces carregar' };
+            notificar();
+            return { ok: false };
+          }
+          try {
+            const criado = await servico.create({ path: caminho });
+            projeto = null;
+            telefone = { aberto: true, sessionId: null, vista: 'grupos', grupoId: null, origem: 'cena' };
+            trace('telefone-projeto-criado', criado && criado.workspaceId);
+            notificar();
+            return { ok: true, path: caminho };
+          } catch (erro) {
+            const detalhe = String((erro && erro.message) || erro || 'falhou');
+            projeto = {
+              ...projeto, aCriar: false,
+              erro: `não deu para adicionar: ${detalhe}`,
+              solucao: 'confira o caminho e as permissões da pasta',
+            };
+            notificar();
+            return { ok: false, erro: detalhe };
+          }
+        },
         // Catálogo do "Adicionar contacto": skills do projeto da sessão de
         // referência (cwd + preset — é o que a sessão nova vai herdar) e os
         // modelos que o host serve hoje. Sem canal, as listas vêm vazias e as
@@ -10721,6 +10880,13 @@ function mascararChave(chave) {
           if (telefone.vista === 'config') {
             // As Definições abrem-se dos Grupos: o "‹" volta lá (nunca fecha).
             soltarConversa();
+            telefone = { aberto: true, sessionId: null, vista: 'grupos', grupoId: null, origem: 'cena' };
+            notificar();
+            return;
+          }
+          if (telefone.vista === 'adicionar-projeto') {
+            // Desistiu de adicionar: nada foi criado, o estado do formulário sai.
+            projeto = null;
             telefone = { aberto: true, sessionId: null, vista: 'grupos', grupoId: null, origem: 'cena' };
             notificar();
             return;
@@ -11103,6 +11269,7 @@ function mascararChave(chave) {
     exports.__ordenarEquipasPorCommit = ordenarEquipasPorCommit;
     exports.__tempoRelativo = tempoRelativo;
     exports.__ROTA_PROJETOS = ROTA_PROJETOS;
+    exports.__TelefoneAdicionarProjeto = TelefoneAdicionarProjeto; // render sem browser
     exports.__montarEscritorio = montarEscritorio;
 
     try { window.__wgDiag = (window.__wgDiag || '') + '|factory:fim'; } catch { /* sem window */ }
