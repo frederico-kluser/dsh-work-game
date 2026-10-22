@@ -29,7 +29,8 @@ if [ -n "${_local_hooks:-}" ] && [ "$_self_dir" != "$_local_hooks" ]; then
 fi
 
 # --- gate completo da skill quando existe (fonte única da validação) ---
-for _d in "${HOME:-}/.dsh/skills/opensource-project" \
+for _d in "/home/ondokai/.dsh/skills/opensource-project" \
+          "${HOME:-}/.dsh/skills/opensource-project" \
           "${HOME:-}/.agents/skills/opensource-project" \
           "${HOME:-}/.claude/skills/opensource-project" \
           "${HOME:-}/.codex/skills/opensource-project" \

@@ -22,7 +22,8 @@ BRANCH_TYPES='feat|fix|docs|style|refactor|perf|test|build|ci|revert|hotfix|rele
 BRANCH_REGEX="^(${BRANCH_TYPES})/[a-zA-Z0-9][a-zA-Z0-9._/-]*$|^(dependabot|renovate)/[a-zA-Z0-9._/-]+$|^release-please--.*$|^gh-readonly-queue/.*$"
 BRANCH_PROTECTED_REGEX='^(main|master|develop|release/.*)$'
 BRANCH_NAMING_EXEMPT_REGEX='^(main|master|develop|gh-pages)$'
-for _d in "${HOME:-}/.dsh/skills/opensource-project" \
+for _d in "/home/ondokai/.dsh/skills/opensource-project" \
+          "${HOME:-}/.dsh/skills/opensource-project" \
           "${HOME:-}/.agents/skills/opensource-project" \
           "${HOME:-}/.claude/skills/opensource-project" \
           "${HOME:-}/.codex/skills/opensource-project" \
