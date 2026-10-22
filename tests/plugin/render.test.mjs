@@ -1605,7 +1605,7 @@ test('câmara: a zona à vista segue a posição REAL do celular e da barra late
 /* ---------- expressões DURANTE o trabalho (motor de expressões) + vigia ---------- */
 
 test('expressões durante o trabalho: cada evento sorteia a SUA variante e os estados fortes mandam', () => {
-  // O reator de variantes embutido cobre os 14 presets da biblioteca — qualquer
+  // O reator de variantes embutido cobre os 24 presets da biblioteca — qualquer
   // variante pode acontecer durante o trabalho (variantes.js / assets/AVATARS-EXPRESSIONS.md).
   assert.deepEqual(Object.keys(B.__VARIANTES_EVENTOS).sort(), ['error', 'idle', 'success', 'tool', 'waiting', 'working']);
   const todos = new Set(Object.values(B.__VARIANTES_EVENTOS).flatMap((ev) => ev.pool));

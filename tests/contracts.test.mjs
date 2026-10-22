@@ -4,7 +4,7 @@
  *
  * Valida os contratos dos ficheiros estáticos, sem executar a app no browser:
  *   - data.js     → globalThis.window.DSH_DEMO_DATA (nomes, outputs, tasks);
- *   - expressions.js → window.DSH_EXPRESSIONS (14 presets com enums REAIS do
+ *   - expressions.js → window.DSH_EXPRESSIONS (24 presets com enums REAIS do
  *                     Avataaars, identidades e resolve() com fallback);
  *   - index.html  → sem sidebar/cabeçalho de sala, ids essenciais e ordem
  *                   exata dos scripts;
@@ -221,7 +221,7 @@ test('todos os mouthType dos presets pertencem ao enum real do Avataaars', () =>
   );
 });
 
-test('DSH_EXPRESSIONS.variantes: o reator cobre os 14 presets e respeita a identidade', () => {
+test('DSH_EXPRESSIONS.variantes: o reator cobre os 24 presets e respeita a identidade', () => {
   const v = EXPR?.variantes;
   assert.ok(v && typeof v.criarReator === 'function' && typeof v.sortear === 'function'
     && typeof v.pool === 'function' && v.eventos && typeof v.hash === 'function',
@@ -251,7 +251,7 @@ test('DSH_EXPRESSIONS.variantes: o reator cobre os 14 presets e respeita a ident
   }
 });
 
-test('DSH_EXPRESSIONS.expressoes: o motor de expressões está exposto e cobre os 14 presets', () => {
+test('DSH_EXPRESSIONS.expressoes: o motor de expressões está exposto e cobre os 24 presets', () => {
   const x = EXPR?.expressoes;
   assert.ok(x && typeof x.criarMotor === 'function' && typeof x.sortear === 'function'
     && typeof x.cenarioDeEvento === 'function' && typeof x.aplicavel === 'function'

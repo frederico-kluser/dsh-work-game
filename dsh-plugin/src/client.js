@@ -966,10 +966,10 @@ window.__ModuleLoader__.load({
  *   dsh-plugin/src/client.js  — bundle do browser (não importa irmãos)
  */
 
-/* Pools por evento. TODOS os 14 presets da biblioteca pertencem pelo menos a
+/* Pools por evento. TODOS os 24 presets da biblioteca pertencem pelo menos a
  * um pool — as variantes TUDO o que a biblioteca desenha pode acontecer durante
  * o trabalho. `base` é o fallback quando a identidade não tem nenhum preset do
- * pool (ex.: identidades aleatórias só têm idle/working/success/error).
+ * pool (inalcançável hoje: as 20 identidades têm os 24 presets renderizados).
  * `prob` é a probabilidade-base do disparo (0..1); cada pessoa ainda a modula. */
 const VARIANTES_EVENTOS = {
   tool:    { pool: ['tool', 'searching', 'focused', 'thinking', 'determined', 'curious', 'snacking'], base: 'working', prob: 0.85 },
@@ -1197,12 +1197,12 @@ const EXPRESSOES_LIMIARES = {
 
 /*
  * Cada cenário tem:
- *   pool       variantes que podem ser sorteadas (os 14 presets da biblioteca
- *              pertencem todos a pelo menos um pool; 'sleeping' é o 15.º, do
+ *   pool       variantes que podem ser sorteadas (os 24 presets da biblioteca
+ *              pertencem todos a pelo menos um pool; 'sleeping' é o 25.º, do
  *              Modo jogo);
  *   base       preset de reserva — fallback quando a identidade NENHUM preset
- *              do pool tem (ex.: identidades aleatórias só têm
- *              idle/working/success/error);
+ *              do pool tem (inalcançável com a biblioteca atual: as 20
+ *              identidades têm os 24 presets);
  *   prob       probabilidade-base do disparo (0..1); cada pessoa ainda a modula
  *              com o seu fator (0.85..1.15);
  *   prioridade arbitragem em rajadas: erro/pergunta/aprovação (95-90) acima de

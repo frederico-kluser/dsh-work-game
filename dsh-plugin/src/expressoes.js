@@ -74,12 +74,12 @@ export const EXPRESSOES_LIMIARES = {
 
 /*
  * Cada cenário tem:
- *   pool       variantes que podem ser sorteadas (os 14 presets da biblioteca
- *              pertencem todos a pelo menos um pool; 'sleeping' é o 15.º, do
+ *   pool       variantes que podem ser sorteadas (os 24 presets da biblioteca
+ *              pertencem todos a pelo menos um pool; 'sleeping' é o 25.º, do
  *              Modo jogo);
  *   base       preset de reserva — fallback quando a identidade NENHUM preset
- *              do pool tem (ex.: identidades aleatórias só têm
- *              idle/working/success/error);
+ *              do pool tem (inalcançável com a biblioteca atual: as 20
+ *              identidades têm os 24 presets);
  *   prob       probabilidade-base do disparo (0..1); cada pessoa ainda a modula
  *              com o seu fator (0.85..1.15);
  *   prioridade arbitragem em rajadas: erro/pergunta/aprovação (95-90) acima de

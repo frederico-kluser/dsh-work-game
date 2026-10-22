@@ -6,7 +6,7 @@
  *   expressions.js            (script puro da demo)
  *   dsh-plugin/src/client.js  (bundle do browser)
  * e state.js importa a fonte diretamente. Este ficheiro impõe a PARIDADE
- * fonte↔cópias e testa o algoritmo: pools por evento (os 14 presets TODOS),
+ * fonte↔cópias e testa o algoritmo: pools por evento (os 24 presets TODOS),
  * disparo aleatório por pessoa, anti-repetição, fallback para identidades
  * com presets reduzidos e determinismo do sorteio puro.
  *
@@ -60,7 +60,7 @@ test('paridade: os marcadores de embutimento existem exatamente uma vez em cada 
 /* Pools por evento — TODAS as variantes da biblioteca                 */
 /* ------------------------------------------------------------------ */
 
-test('pools: os 14 presets da biblioteca pertencem pelo menos a um pool', () => {
+test('pools: os 24 presets da biblioteca pertencem pelo menos a um pool', () => {
   assert.deepEqual(Object.keys(VARIANTES_EVENTOS).sort(), ['error', 'idle', 'success', 'tool', 'waiting', 'working']);
   const todos = new Set(Object.values(VARIANTES_EVENTOS).flatMap((ev) => ev.pool));
   assert.deepEqual([...todos].sort(), TODOS_OS_PRESETS, 'qualquer variante da biblioteca pode acontecer durante o trabalho');
@@ -72,7 +72,7 @@ test('pools: os 14 presets da biblioteca pertencem pelo menos a um pool', () => 
 });
 
 test('poolDeVariante: identidade com presets reduzidos cai no base do evento', () => {
-  // Identidades aleatórias da demo (r01..r12) só têm idle/working/success/error.
+  // Identidade hipotética com presets reduzidos (as aleatórias r01..r12 já têm os 24 desde 2026-10-16).
   const reduzidos = ['idle', 'working', 'success', 'error'];
   assert.deepEqual(poolDeVariante('working', reduzidos), ['working'], 'só o que a identidade tem');
   assert.deepEqual(poolDeVariante('tool', reduzidos), ['working'], 'sem ferramenta: o base do evento');

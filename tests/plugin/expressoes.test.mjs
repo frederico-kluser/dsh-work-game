@@ -7,7 +7,7 @@
  * no seguimento da integração (quando os marcadores lá estiverem, este ficheiro
  * passa a exigir a paridade também lá).
  *
- * Cobre: taxonomia de cenários (14 presets + sleeping em pools), mapeamento
+ * Cobre: taxonomia de cenários (24 presets + sleeping em pools), mapeamento
  * evento→cenário (incl. limiares de contexto com histerese e gatilho absoluto
  * de 200k), arbitragem por prioridade (pergunta/erro acima de mensagem/
  * ferramenta), min-dwell por deltas de `at`, stickiness terminal, garantias do
@@ -107,7 +107,7 @@ test('cada cenário tem pool/base/prob/prioridade válidos', () => {
   }
 });
 
-test('os 14 presets da biblioteca pertencem a pelo menos um pool (mais o sleeping do Modo jogo)', () => {
+test('os 24 presets da biblioteca pertencem a pelo menos um pool (mais o sleeping do Modo jogo)', () => {
   const todos = new Set(Object.values(EXPRESSOES_CENARIOS).flatMap((c) => c.pool));
   for (const p of TODOS_OS_PRESETS) assert.ok(todos.has(p), `preset ${p} coberto por algum cenário`);
   assert.ok(todos.has('sleeping'), "'sleeping' coberto pelo cenário 'dormir' (Modo jogo)");

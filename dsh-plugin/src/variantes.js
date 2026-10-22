@@ -25,10 +25,10 @@
  *   dsh-plugin/src/client.js  — bundle do browser (não importa irmãos)
  */
 
-/* Pools por evento. TODOS os 14 presets da biblioteca pertencem pelo menos a
+/* Pools por evento. TODOS os 24 presets da biblioteca pertencem pelo menos a
  * um pool — as variantes TUDO o que a biblioteca desenha pode acontecer durante
  * o trabalho. `base` é o fallback quando a identidade não tem nenhum preset do
- * pool (ex.: identidades aleatórias só têm idle/working/success/error).
+ * pool (inalcançável hoje: as 20 identidades têm os 24 presets renderizados).
  * `prob` é a probabilidade-base do disparo (0..1); cada pessoa ainda a modula. */
 export const VARIANTES_EVENTOS = {
   tool:    { pool: ['tool', 'searching', 'focused', 'thinking', 'determined', 'curious', 'snacking'], base: 'working', prob: 0.85 },
