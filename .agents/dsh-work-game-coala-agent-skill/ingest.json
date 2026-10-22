@@ -19,6 +19,28 @@
       "tags": "conhecimento,sessao,{stem}"
     },
     {
+      "name": "docs-tecnicos",
+      "include": [
+        "docs/*.md"
+      ],
+      "mode": "markdown",
+      "type": "semantic",
+      "origin": "agent",
+      "tags": "docs,tecnico,{stem}"
+    },
+    {
+      "name": "governanca",
+      "include": [
+        "CONTRIBUTING.md",
+        "SECURITY.md",
+        "CODE_OF_CONDUCT.md"
+      ],
+      "mode": "markdown",
+      "type": "semantic",
+      "origin": "agent",
+      "tags": "governanca,{stem}"
+    },
+    {
       "name": "readme",
       "include": [
         "README.md"
