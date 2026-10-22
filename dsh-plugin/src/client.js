@@ -2636,9 +2636,12 @@ function mascararChave(chave) {
           pessoa.running = emExecucao;
           pessoa.flags.ocioso = !emExecucao;
           if (emExecucao) desempatarAtivo(pessoa, pessoas);
-          // Nova execução supera as marcas transitórias; arranque de turno
-          // também limpa o erro anterior.
-          pessoa.flags.concluido = false;
+          // A CONCLUSÃO não se apaga no repouso que se segue ao turno: quem
+          // acabou de terminar mantém a sinalização na mesa ("Concluído ·
+          // resultado pronto") até alguém ver o resultado (session/seen). Só um
+          // NOVO turno a supera — antes, o `status idle` logo a seguir ao
+          // `turn/end completed` apagava o sinal e a mesa não dizia nada.
+          if (emExecucao) pessoa.flags.concluido = false;
           pessoa.flags.ferramenta = false;
           pessoa.flags.retry = false;
           pessoa.retries = 0; // mudança de estado: retentativas zeram
@@ -4286,15 +4289,51 @@ function mascararChave(chave) {
     ));
 
     /**
+     * ORDEM DOS PROJETOS: o que commitou por último aparece primeiro.
+     *
+     * `commits` é o mapa { caminho → ISO } que o HOST lê do git (`git log -1`);
+     * o browser não vê o disco. Regras, por esta ordem:
+     *   1. quem tem commit vem antes de quem não tem (repositório ausente,
+     *      pasta nova, git instalado sem commits);
+     *   2. entre quem tem, o commit mais RECENTE primeiro;
+     *   3. empate (ou tudo sem commit) mantém a ordem do DSH — a função devolve
+     *      as entradas tal como estavam, sem inventar ordem nenhuma;
+     *   4. "Sem workspace" fica sempre no fim (é o Ungrouped do DSH).
+     * Puro de propósito: sem relógio e sem fetch, testável isolado.
+     * @param {Map} equipas id → { id, name, path, caminho, theme }
+     * @param {object|null} commits caminho absoluto → ISO do último commit
+     * @returns {Array<[string, object]>} entradas na ordem final
+     */
+    function ordenarEquipasPorCommit(equipas, commits) {
+      const entradas = [...equipas.entries()];
+      if (!commits || typeof commits !== 'object') return entradas;
+      const quandoDe = (equipa) => {
+        const iso = equipa && equipa.caminho ? commits[equipa.caminho] : null;
+        const t = iso ? Date.parse(iso) : NaN;
+        return Number.isFinite(t) ? t : null;
+      };
+      if (!entradas.some(([, eq]) => quandoDe(eq) !== null)) return entradas;
+      return entradas
+        .map((entrada, i) => ({ entrada, i, quando: quandoDe(entrada[1]), sem: entrada[0] === EQUIPA_SEM_WORKSPACE }))
+        .sort((a, b) => (
+          (Number(a.sem) - Number(b.sem))
+          || ((b.quando ?? -Infinity) - (a.quando ?? -Infinity))
+          || (a.i - b.i)
+        ))
+        .map((x) => x.entrada);
+    }
+
+    /**
      * Mesas e lugares a partir das pessoas, dos workspaces do DSH e dos filtros.
      * @param {Array} pessoas vistas (officeView.people), na ordem do catálogo do host
      * @param {{fonte, items, arquivoConhecido, archived}|null} workspaces
      * @param {object} [filtros] ver FILTROS_PADRAO (campos em falta = padrão)
+     * @param {object} [commits] caminho → ISO do último commit (ordem dos projetos)
      * @returns {{ equipas: Map, modules: Array, visiveis: number, chaves: string[],
      *   arquivadas: Set, escondidas: {total, arquivadas, emBranco, semWorkspace, paradas,
      *   fechados, arquivoDesconhecido}, filtros: object }}
      */
-    function montarEscritorio(pessoas, workspaces, filtros) {
+    function montarEscritorio(pessoas, workspaces, filtros, commits) {
       const f = normalizarFiltros(filtros);
       const porId = new Map(pessoas.map((p) => [p.id, p]));
       const doDsh = !!(workspaces && workspaces.fonte === 'dsh');
@@ -4322,9 +4361,15 @@ function mascararChave(chave) {
 
       // 1) equipas = workspaces do DSH (ordem do DSH) e dono de cada conversa
       const equipas = new Map();
-      const juntarEquipa = (id, name, path) => {
+      const juntarEquipa = (id, name, path, caminho) => {
         if (!equipas.has(id)) {
-          equipas.set(id, { id, name, path, theme: TEMAS_DE_EQUIPA[equipas.size % TEMAS_DE_EQUIPA.length] });
+          equipas.set(id, {
+            id, name, path,
+            // Caminho ABSOLUTO do workspace (o `path` acima é o rótulo curto):
+            // é a chave do mapa de commits — o que ordena os projetos.
+            caminho: caminho != null ? String(caminho) : null,
+            theme: TEMAS_DE_EQUIPA[equipas.size % TEMAS_DE_EQUIPA.length],
+          });
         }
         return equipas.get(id);
       };
@@ -4332,7 +4377,7 @@ function mascararChave(chave) {
       const ordemNoWorkspace = new Map();
       if (doDsh) {
         for (const w of workspaces.items) {
-          const equipa = juntarEquipa(`ws:${w.id}`, w.title, caminhoCurto(w.path));
+          const equipa = juntarEquipa(`ws:${w.id}`, w.title, caminhoCurto(w.path), w.path);
           w.sessionIds.forEach((sid, i) => {
             if (dono.has(sid)) return; // como o owningGroupKey: vale o primeiro
             dono.set(sid, equipa.id);
@@ -4430,6 +4475,14 @@ function mascararChave(chave) {
         for (const id of filhos) if (emDelegacao(id)) mesas.push(...mesasDeDelegacao(id, equipaId, true));
         return mesas;
       };
+
+      // ORDEM DOS PROJETOS (pedido do utilizador): quem commitou por último
+      // aparece primeiro — nunca a ordem alfabética nem outra qualquer. O Map é
+      // reordenado no lugar: as mesas da sala E os grupos do celular seguem a
+      // mesma lista, e uma equipa criada depois entra no fim.
+      const ordemProjetos = ordenarEquipasPorCommit(equipas, commits);
+      equipas.clear();
+      for (const [id, eq] of ordemProjetos) equipas.set(id, eq);
 
       for (const [equipaId] of [...equipas]) {
         const lista = casa.get(equipaId) || [];
@@ -7004,6 +7057,9 @@ function mascararChave(chave) {
       '.wg-tel-grupo-nome{font-size:15px;font-weight:600;color:#000;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
       '.wg-tel-grupo-sub{margin-top:2px;font-size:12px;color:#8e8e93;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
       '.wg-tel-grupo-seta{flex:none;display:flex;color:#c7c7cc}',
+      // ONLINE: quem está a trabalhar agora no grupo (verde do iMessage).
+      '.wg-tel-online{flex:none;display:flex;align-items:center;gap:4px;margin-right:2px;font-size:11px;font-weight:600;color:#34a853;white-space:nowrap}',
+      '.wg-tel-online-ponto{width:7px;height:7px;border-radius:50%;background:#34c759;box-shadow:0 0 0 2px rgba(52,199,89,.16)}',
       '.wg-tel-remetente{margin:9px 0 1px 46px;font-size:11px;font-weight:600;color:#8e8e93}',
       '.wg-tel-clicavel{cursor:pointer}',
       '.wg-tel-grupo-linha:focus-visible{outline:2px solid #0b84fe;outline-offset:-2px}',
@@ -7494,6 +7550,26 @@ function mascararChave(chave) {
        (canal autenticado do DSH); o alvo publicado é construído no host, nunca aqui. */
 
     const ROTA_PARTILHA = '/api/dsh-work-game/partilha';
+
+    /* ── Projetos: último commit por workspace (ordem dos grupos e mesas) ──
+       O browser não vê o disco; quem sabe quando cada projeto commitou por
+       último é o HOST (rota /api/dsh-work-game/projetos, `git log -1`). A
+       resposta é um mapa caminho → ISO que o núcleo guarda (definirCommits) e
+       o layout usa para ordenar. Sem a rota (outras composições, testes), a
+       ordem do DSH mantém-se — nada rebenta. */
+    const ROTA_PROJETOS = '/api/dsh-work-game/projetos';
+
+    /** Um pedido à rota dos projetos — devolve o JSON ou um erro legível. */
+    async function pedirProjetos(corpo) {
+      const resposta = await fetch(ROTA_PROJETOS, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(corpo),
+      });
+      let dados = null;
+      try { dados = await resposta.json(); } catch { /* sem corpo JSON */ }
+      return dados || { ok: false, erro: `resposta inválida do host (HTTP ${resposta.status})` };
+    }
 
     const PARTILHA_INICIAL = {
       fase: 'parado', // parado | a-gerar | online | a-fechar | a-encerrar | erro
@@ -8463,7 +8539,20 @@ function mascararChave(chave) {
       })
       : h('div', { className: 'wg-tel-contacto-boneco wg-tel-iniciais', 'aria-hidden': 'true' }, '+'));
 
-    // Tela "Grupos": a lista de workspaces (o "Messages" do nosso iMessage).
+    /** "há 5 min" a partir de um ISO (vazio quando não há data válida). */
+    function tempoRelativo(iso) {
+      const t = typeof iso === 'string' ? Date.parse(iso) : NaN;
+      if (!Number.isFinite(t)) return '';
+      const seg = Math.max(0, Math.round((Date.now() - t) / 1000));
+      if (seg < 60) return 'agora mesmo';
+      const min = Math.round(seg / 60);
+      if (min < 60) return `há ${min} min`;
+      const horas = Math.round(min / 60);
+      if (horas < 48) return `há ${horas} h`;
+      return `há ${Math.round(horas / 24)} d`;
+    }
+
+    // Tela "Grupos": a lista de workspaces (o "Messages" do nosso iMessage) —
     function TelefoneGrupos(props) {
       const { grupos, abrirGrupo, fechar, podeFechar, abrirConfig } = props;
       const [, setTick] = react.useState(0);
@@ -8498,13 +8587,21 @@ function mascararChave(chave) {
               ? h('div', { className: 'wg-tel-vazio' }, 'Sem workspaces na sala.')
               : grupos.map((g) => h('button', {
                 key: g.id, type: 'button', className: 'wg-tel-grupo-linha', role: 'listitem',
-                title: `${g.nome} — abrir o grupo`, 'aria-label': `Abrir o grupo ${g.nome}`,
+                title: `${g.nome} — abrir o grupo${g.commit ? ` · último commit ${tempoRelativo(g.commit)}` : ''}`,
+                'aria-label': `Abrir o grupo ${g.nome}${g.aTrabalhar ? `, ${g.aTrabalhar} online` : ''}`,
                 onClick: () => abrirGrupo(g.id),
               },
                 avatarIniciais(String(g.nome || '?').trim().slice(0, 1).toUpperCase()),
                 h('div', { className: 'wg-tel-grupo-texto' },
                   h('div', { className: 'wg-tel-grupo-nome' }, g.nome),
                   h('div', { className: 'wg-tel-grupo-sub' }, g.subtitulo)),
+                // ONLINE = quem está a trabalhar agora (label verde do grupo).
+                g.aTrabalhar
+                  ? h('span', {
+                    className: 'wg-tel-online', title: `${g.online.join(', ')} a trabalhar agora`,
+                  }, h('span', { className: 'wg-tel-online-ponto', 'aria-hidden': 'true' }),
+                  h('span', { className: 'wg-tel-online-texto' }, `${g.aTrabalhar} online`))
+                  : null,
                 h('span', { className: 'wg-tel-grupo-seta', 'aria-hidden': 'true' }, ICONES_TELEFONE.chevron()))),
             // Definições (a engrenagem do fim da lista): a chave da API
             // OpenAI para a voz e a transcrição das mensagens.
@@ -9435,6 +9532,32 @@ function mascararChave(chave) {
       // GRUPOS = os workspaces da sala (o mesmo recorte das mesas): cada grupo
       // mostra as pessoas daquele workspace; o feed conjunto é do Grupo. As
       // arquivadas não entram quando o filtro as oculta (semArquivadas).
+      // Último commit de cada projeto (caminho absoluto → ISO): vem do HOST
+      // (a rota lê o git), ordena grupos e mesas e assina o tooltip.
+      const commitsProjetos = (typeof props.getCommits === 'function' ? props.getCommits() : null) || null;
+      const caminhosProjetos = (react.useMemo || ((f) => f()))(() => {
+        const itens = view.workspaces && view.workspaces.fonte === 'dsh' && Array.isArray(view.workspaces.items)
+          ? view.workspaces.items : [];
+        const vistos = new Set();
+        for (const w of itens) if (w && typeof w.path === 'string' && w.path) vistos.add(w.path);
+        return [...vistos].sort();
+      }, [view.workspaces]);
+      const chaveCaminhos = caminhosProjetos.join('\n');
+      react.useEffect(() => {
+        if (!caminhosProjetos.length) return undefined;
+        let vivo = true;
+        const ler = () => {
+          pedirProjetos({ acao: 'commits', paths: caminhosProjetos })
+            .then((r) => {
+              if (!vivo || !r || r.ok !== true || !r.commits) return;
+              if (typeof props.definirCommits === 'function') props.definirCommits(r.commits);
+            })
+            .catch(() => { /* sem rota: a ordem do DSH mantém-se */ });
+        };
+        ler();
+        const relogio = setInterval(ler, 60000);
+        return () => { vivo = false; clearInterval(relogio); };
+      }, [chaveCaminhos]);
       const grupos = (react.useMemo || ((f) => f()))(() => {
         const lista = [];
         for (const eq of layout.equipas.values()) {
@@ -9449,8 +9572,13 @@ function mascararChave(chave) {
           const pessoas = ids.map((id) => view.people[id]);
           const aEscrever = pessoas.find((p) => p && p.running);
           const nomes = pessoas.slice(0, 3).map((p) => p.name);
+          // ONLINE = quem está a trabalhar AGORA neste grupo (running real do
+          // DSH). É a label verde da linha e do cabeçalho do grupo.
+          const online = pessoas.filter((p) => p && p.running).map((p) => p.name);
+          const commit = eq.caminho && commitsProjetos ? (commitsProjetos[eq.caminho] ?? null) : null;
           lista.push({
             id: eq.id, nome: eq.name, membros: ids,
+            online, aTrabalhar: online.length, commit,
             subtitulo: aEscrever
               ? `${aEscrever.name} está a escrever…`
               : pessoas.length
@@ -9459,7 +9587,7 @@ function mascararChave(chave) {
           });
         }
         return lista;
-      }, [view, layout]);
+      }, [view, layout, commitsProjetos]);
       // Grupo aberto: junta os controladores retidos pelo núcleo com os nomes e
       // avatares da sala.
       const grupoAtual = telefone.vista === 'grupo' && telefone.grupoId
@@ -9475,7 +9603,7 @@ function mascararChave(chave) {
           const ativos = membros.filter((m) => view.people[m.id] && view.people[m.id].running).length;
           return {
             id: telefone.grupoId, nome: g ? g.nome : 'Grupo',
-            subtitulo: `${membros.length} ${membros.length === 1 ? 'pessoa' : 'pessoas'}${ativos ? ` · ${ativos} a trabalhar` : ''}`,
+            subtitulo: `${membros.length} ${membros.length === 1 ? 'pessoa' : 'pessoas'}${ativos ? ` · ${ativos} online` : ''}`,
             membros,
           };
         })()
@@ -10025,6 +10153,10 @@ function mascararChave(chave) {
       let timerPurga = null;
       let vistaMemo = null; // vista + layout memorizados por versão do estado
       let filtros = lerFiltros(); // filtros da sala (localStorage 'dsh-work-game:filtros')
+      // Último commit de cada projeto (caminho absoluto → ISO), lido pelo HOST
+      // na rota /api/dsh-work-game/projetos. Ordena os grupos do celular e as
+      // mesas: o que commitou por último primeiro. {} = sem dados (ordem do DSH).
+      let commitsPorCaminho = {};
       // Celular da conversa (estilo iMessage): abre com o clique numa pessoa e
       // com "Conversa" da barra lateral. `conversa` é o controlador com a
       // referência viva (retain) — há no máximo UM, e é libertado ao fechar,
@@ -10282,7 +10414,7 @@ function mascararChave(chave) {
               ? superficieDSH.velocidadeDe(p.id)
               : null;
           }
-          vista.layout = montarEscritorio(Object.values(vista.people), vista.workspaces, filtros);
+          vista.layout = montarEscritorio(Object.values(vista.people), vista.workspaces, filtros, commitsPorCaminho);
           vistaMemo = vista;
           return vista;
         },
@@ -10297,6 +10429,25 @@ function mascararChave(chave) {
           trace('filtros', filtros);
           notificar();
         },
+        // O HOST respondeu com o último commit de cada projeto (rota
+        // /api/dsh-work-game/projetos): a ordem das mesas e dos grupos passa a
+        // ser a dele — mais recente primeiro. Mapa vazio/inválido = ordem do
+        // DSH (nunca se inventa ordem a partir de lixo).
+        definirCommits: (mapa) => {
+          const limpo = {};
+          if (mapa && typeof mapa === 'object') {
+            for (const [caminho, iso] of Object.entries(mapa)) {
+              if (typeof caminho === 'string' && caminho && typeof iso === 'string'
+                && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/.test(iso)) limpo[caminho] = iso;
+            }
+          }
+          if (JSON.stringify(limpo) === JSON.stringify(commitsPorCaminho)) return false;
+          commitsPorCaminho = limpo;
+          vistaMemo = null;
+          notificar();
+          return true;
+        },
+        getCommits: () => commitsPorCaminho,
         getTelefone: () => telefone,
         getConversa: () => conversa,
         // Grupo aberto: { workspaceId, membros: [{ id, conv }] } — a ordem é a
@@ -10947,6 +11098,12 @@ function mascararChave(chave) {
     exports.__TelefoneAdicionarContacto = TelefoneAdicionarContacto; // render sem browser
     exports.__normalizarQuestionario = normalizarQuestionario;
     exports.__chavesAVista = chavesAVista;
+    // Ordem dos projetos (último commit primeiro) e a idade relativa que a
+    // explica — puros, testáveis sem browser nem git.
+    exports.__ordenarEquipasPorCommit = ordenarEquipasPorCommit;
+    exports.__tempoRelativo = tempoRelativo;
+    exports.__ROTA_PROJETOS = ROTA_PROJETOS;
+    exports.__montarEscritorio = montarEscritorio;
 
     try { window.__wgDiag = (window.__wgDiag || '') + '|factory:fim'; } catch { /* sem window */ }
     return module.exports;

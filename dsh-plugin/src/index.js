@@ -29,7 +29,7 @@
  * COM o plugin, sem depender de nenhuma skill instalada na máquina.
  */
 import { execFile } from 'node:child_process';
-import { existsSync } from 'node:fs';
+import { existsSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -273,6 +273,124 @@ export function criarServicoPartilha(opcoes = {}) {
   return { abrir, fechar, estado, encerrar };
 }
 
+/* ── Projetos: caminho resolvido + último commit de cada workspace ────
+ *
+ * O browser não vê o disco: quem sabe qual projeto commitou por último é o
+ * HOST. Duas perguntas, uma rota (nenhum segredo, nenhuma escrita):
+ *   - `resolver`  um caminho digitado pelo utilizador (~/Projects/x) existe e é
+ *                 pasta? Devolve o caminho ABSOLUTO — o que `workspaces.create`
+ *                 espera do outro lado do transporte;
+ *   - `commits`   o instante do último commit (`git log -1 --format=%cI`) de
+ *                 cada caminho, para o jogo ordenar os projetos do mais recente
+ *                 para o mais antigo. Caminho que não é repositório git (ou sem
+ *                 git instalado) devolve `null` e a ordem do DSH mantém-se.
+ * O resultado fica em cache curta (padrão 30 s): o painel pergunta a cada
+ * minuto e um log por caminho não se paga em cada pintura.
+ */
+
+export const ROTA_PROJETOS = '/api/dsh-work-game/projetos';
+
+/** Expande `~` e normaliza um caminho digitado (nunca toca no disco). */
+export function expandirCaminho(texto, home = homedir()) {
+  const bruto = String(texto ?? '').trim();
+  if (!bruto) return '';
+  if (bruto === '~') return home;
+  if (bruto.startsWith('~/') || bruto.startsWith('~' + path.sep)) {
+    return path.join(home, bruto.slice(2));
+  }
+  return path.resolve(bruto);
+}
+
+/**
+ * Instante do último commit de um diretório (ISO 8601) ou null.
+ * @param {string} dir caminho absoluto
+ * @param {Function} [correr] executor injetável (testes)
+ */
+export async function ultimoCommit(dir, correr = correrComando) {
+  const r = await correr(['git', '-C', dir, 'log', '-1', '--format=%cI'], { timeoutMs: 5000 });
+  const iso = String(r.stdout ?? '').trim();
+  if (r.code !== 0 || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/.test(iso)) return null;
+  return iso;
+}
+
+/**
+ * O serviço dos projetos do jogo.
+ * @param {{ correr?: Function, existe?: Function, pasta?: Function, agora?: () => number,
+ *   ttlMs?: number, home?: string }} opcoes
+ *   `existe(caminho)` e `pasta(caminho)` permitem testes sem disco.
+ */
+export function criarServicoProjetos(opcoes = {}) {
+  const correr = typeof opcoes.correr === 'function' ? opcoes.correr : correrComando;
+  const existe = typeof opcoes.existe === 'function' ? opcoes.existe : existsSync;
+  const pasta = typeof opcoes.pasta === 'function'
+    ? opcoes.pasta
+    : (caminho) => { try { return statSync(caminho).isDirectory(); } catch { return false; } };
+  const agora = typeof opcoes.agora === 'function' ? opcoes.agora : Date.now;
+  const ttlMs = Number.isFinite(opcoes.ttlMs) ? Number(opcoes.ttlMs) : 30000;
+  const home = opcoes.home ?? homedir();
+  const cache = new Map(); // caminho -> { iso, em }
+
+  /** Caminho absoluto válido, ou o erro que o utilizador tem de ler. */
+  function resolver(texto) {
+    const absoluto = expandirCaminho(texto, home);
+    if (!absoluto) return { ok: false, erro: 'diga o caminho da pasta do projeto', solucao: 'ex.: ~/Projects/meu-projeto' };
+    if (!existe(absoluto)) {
+      return { ok: false, erro: `não encontrei a pasta ${absoluto}`, solucao: 'confira o caminho (o ~ é a sua pasta pessoal)' };
+    }
+    if (!pasta(absoluto)) {
+      return { ok: false, erro: `${absoluto} não é uma pasta`, solucao: 'escolha a pasta do projeto, não um arquivo' };
+    }
+    return { ok: true, path: absoluto };
+  }
+
+  /** { caminho: ISO|null } do último commit de cada caminho (ordem preservada). */
+  async function commits(caminhos) {
+    const lista = [...new Set((Array.isArray(caminhos) ? caminhos : []).map((c) => expandirCaminho(c, home)).filter(Boolean))];
+    const mapa = {};
+    for (const caminho of lista) {
+      const guardado = cache.get(caminho);
+      if (guardado && agora() - guardado.em < ttlMs) { mapa[caminho] = guardado.iso; continue; }
+      let iso = null;
+      if (existe(caminho) && pasta(caminho)) iso = await ultimoCommit(caminho, correr);
+      cache.set(caminho, { iso, em: agora() });
+      mapa[caminho] = iso;
+    }
+    return { ok: true, commits: mapa };
+  }
+
+  return { resolver, commits };
+}
+
+export function criarRotaProjetos(servico) {
+  const json = (status, corpo) => new Response(JSON.stringify(corpo), {
+    status,
+    headers: { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' },
+  });
+  return {
+    path: ROTA_PROJETOS,
+    methods: ['GET', 'POST'],
+    requestBody: 'buffered',
+    async fetch(request) {
+      try {
+        if (request.method === 'GET') {
+          const caminhos = new URL(request.url).searchParams.getAll('path');
+          return json(200, await servico.commits(caminhos));
+        }
+        const tipo = String(request.headers.get('content-type') || '').split(';')[0].trim().toLowerCase();
+        if (tipo !== 'application/json') return json(415, { ok: false, erro: 'content type deve ser application/json' });
+        let corpo = null;
+        try { corpo = await request.json(); } catch { /* corpo inválido abaixo */ }
+        const acao = corpo && typeof corpo === 'object' ? corpo.acao : null;
+        if (acao === 'commits') return json(200, await servico.commits(corpo.paths));
+        if (acao === 'resolver') return json(200, servico.resolver(corpo.path));
+        return json(400, { ok: false, erro: `ação desconhecida: ${String(acao)}` });
+      } catch (erro) {
+        return json(500, { ok: false, erro: String(erro && erro.message || erro) });
+      }
+    },
+  };
+}
+
 /* ── Rota exacta no canal /api (auth já aplicada pelo transport) ────── */
 
 export const ROTA_PARTILHA = '/api/dsh-work-game/partilha';
@@ -350,8 +468,14 @@ export default {
           domainPy: resolverDomainPy(candidatosDomainPy()),
         });
         const disposar = cctx.connection.fetch.register(criarRotaPartilha(servico));
+        // Projetos: último commit por workspace (ordem dos grupos/mesas) e o
+        // caminho absoluto que o "Adicionar projeto" manda ao workspaces.create.
+        const disposarProjetos = cctx.connection.fetch.register(criarRotaProjetos(criarServicoProjetos()));
         if (typeof cctx.effect === 'function') {
-          cctx.effect(() => () => { Promise.resolve(disposar).catch(() => {}); }, 'dsh-work-game: partilha');
+          cctx.effect(() => () => {
+            Promise.resolve(disposar).catch(() => {});
+            Promise.resolve(disposarProjetos).catch(() => {});
+          }, 'dsh-work-game: partilha e projetos');
         }
       };
       if (typeof ctx.inject === 'function') {
