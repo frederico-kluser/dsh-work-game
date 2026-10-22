@@ -227,7 +227,7 @@ const nosDe = (no, pred, fora = []) => {
   for (const f of no.filhos || []) nosDe(f, pred, fora);
   return fora;
 };
-const textoDe = (no) => (no.filhos || []).map((f) => (typeof f === 'string' ? f : textoDe(f))).join('');
+const textoDe = (no) => (no && no.filhos ? no.filhos.map((f) => (typeof f === 'string' ? f : textoDe(f))).join('') : '');
 
 test('adicionar projeto: um campo de caminho, um botão e o erro colado ao campo', () => {
   const chamadas = { mudou: [], criou: 0, voltou: 0 };
@@ -318,4 +318,43 @@ test('label online: diz QUEM trabalha (até dois nomes) e passa a número a part
   assert.equal(B.__rotuloOnline([]), '');
   assert.equal(B.__rotuloOnline(null), '');
   assert.equal(B.__rotuloOnline(['Ana Maria Silva']), 'Ana online', 'só o primeiro nome, cortado a 10');
+});
+
+test('grupos (render real): lista com "Adicionar projeto", label com quem trabalha e commit no tooltip', () => {
+  const chamadas = { abriu: [], config: 0, adicionar: 0 };
+  const grupos = [
+    {
+      id: 'ws:1', nome: 'dsh-work-game', subtitulo: 'Rui, Bia', membros: ['a', 'b'],
+      online: ['Rui', 'Bia'], aTrabalhar: 2, commit: new Date().toISOString(),
+    },
+    {
+      id: 'ws:2', nome: 'website', subtitulo: 'Sem pessoas', membros: [],
+      online: [], aTrabalhar: 0, commit: null,
+    },
+  ];
+  const arvore = B.__TelefoneGrupos({
+    grupos, podeFechar: true, fechar: () => {},
+    abrirGrupo: (id) => chamadas.abriu.push(id),
+    abrirConfig: () => { chamadas.config += 1; },
+    abrirAdicionarProjeto: () => { chamadas.adicionar += 1; },
+  });
+  const linhas = nosDe(arvore, (n) => n.tipo === 'button' && String(n.props.className || '').includes('wg-tel-grupo-linha'));
+  const textos = linhas.map(textoDe);
+  assert.equal(linhas.length, 4, '2 grupos + "Adicionar projeto" + "Configurações"');
+  assert.ok(textos.some((t) => /Adicionar projeto/.test(t)), 'a entrada de adicionar projeto está na lista');
+  assert.ok(textos.some((t) => /Configurações/.test(t)), 'e as Configurações continuam lá');
+
+  const online = nosDe(arvore, (n) => String(n.props && n.props.className || '') === 'wg-tel-online');
+  assert.equal(online.length, 1, 'só o grupo com gente a trabalhar tem label');
+  assert.equal(textoDe(online[0]), 'Rui, Bia online');
+  assert.match(online[0].props.title, /Rui, Bia — a trabalhar agora/);
+  assert.match(online[0].props['aria-label'], /online: Rui, Bia/);
+
+  const linhaProjeto = linhas.find((n) => /dsh-work-game/.test(textoDe(n)));
+  assert.match(linhaProjeto.props.title, /último commit agora mesmo/, 'o tooltip explica a ordem');
+
+  linhas.find((n) => /Adicionar projeto/.test(textoDe(n))).props.onClick();
+  linhas.find((n) => /Configurações/.test(textoDe(n))).props.onClick();
+  assert.equal(chamadas.adicionar, 1);
+  assert.equal(chamadas.config, 1);
 });

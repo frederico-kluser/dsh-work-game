@@ -470,7 +470,12 @@ export default {
         const disposar = cctx.connection.fetch.register(criarRotaPartilha(servico));
         // Projetos: último commit por workspace (ordem dos grupos/mesas) e o
         // caminho absoluto que o "Adicionar projeto" manda ao workspaces.create.
-        const disposarProjetos = cctx.connection.fetch.register(criarRotaProjetos(criarServicoProjetos()));
+        // Rota própria, protegida: se o transporte recusar este caminho, a
+        // partilha continua a funcionar — nada do host rebenta por causa dela.
+        let disposarProjetos = null;
+        try {
+          disposarProjetos = cctx.connection.fetch.register(criarRotaProjetos(criarServicoProjetos()));
+        } catch { disposarProjetos = null; }
         if (typeof cctx.effect === 'function') {
           cctx.effect(() => () => {
             Promise.resolve(disposar).catch(() => {});

@@ -11285,6 +11285,7 @@ function mascararChave(chave) {
     exports.__rotuloOnline = rotuloOnline;
     exports.__ROTA_PROJETOS = ROTA_PROJETOS;
     exports.__TelefoneAdicionarProjeto = TelefoneAdicionarProjeto; // render sem browser
+    exports.__TelefoneGrupos = TelefoneGrupos; // render sem browser (lista de grupos)
     exports.__montarEscritorio = montarEscritorio;
 
     try { window.__wgDiag = (window.__wgDiag || '') + '|factory:fim'; } catch { /* sem window */ }
