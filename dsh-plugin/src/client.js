@@ -8541,6 +8541,16 @@ function mascararChave(chave) {
       })
       : h('div', { className: 'wg-tel-contacto-boneco wg-tel-iniciais', 'aria-hidden': 'true' }, '+'));
 
+    /** Label verde do grupo: QUEM trabalha agora (até 2 nomes) ou o número. */
+    function rotuloOnline(nomes) {
+      const lista = (Array.isArray(nomes) ? nomes : []).filter(Boolean);
+      if (lista.length === 0) return '';
+      if (lista.length <= 2) {
+        return `${lista.map((n) => cortar(String(n).split(' ')[0], 10)).join(', ')} online`;
+      }
+      return `${lista.length} online`;
+    }
+
     /** "há 5 min" a partir de um ISO (vazio quando não há data válida). */
     function tempoRelativo(iso) {
       const t = typeof iso === 'string' ? Date.parse(iso) : NaN;
@@ -8597,12 +8607,16 @@ function mascararChave(chave) {
                 h('div', { className: 'wg-tel-grupo-texto' },
                   h('div', { className: 'wg-tel-grupo-nome' }, g.nome),
                   h('div', { className: 'wg-tel-grupo-sub' }, g.subtitulo)),
-                // ONLINE = quem está a trabalhar agora (label verde do grupo).
+                // ONLINE = QUEM está a trabalhar agora (não só quantos): até dois
+                // nomes na label, e a partir de três o número — o tooltip e o
+                // aria-label levam sempre a lista completa.
                 g.aTrabalhar
                   ? h('span', {
-                    className: 'wg-tel-online', title: `${g.online.join(', ')} a trabalhar agora`,
+                    className: 'wg-tel-online',
+                    title: `${g.online.join(', ')} — a trabalhar agora`,
+                    'aria-label': `online: ${g.online.join(', ')}`,
                   }, h('span', { className: 'wg-tel-online-ponto', 'aria-hidden': 'true' }),
-                  h('span', { className: 'wg-tel-online-texto' }, `${g.aTrabalhar} online`))
+                  h('span', { className: 'wg-tel-online-texto' }, rotuloOnline(g.online)))
                   : null,
                 h('span', { className: 'wg-tel-grupo-seta', 'aria-hidden': 'true' }, ICONES_TELEFONE.chevron()))),
             // Adicionar projeto: registrar no DSH uma pasta que já existe
@@ -11268,6 +11282,7 @@ function mascararChave(chave) {
     // explica — puros, testáveis sem browser nem git.
     exports.__ordenarEquipasPorCommit = ordenarEquipasPorCommit;
     exports.__tempoRelativo = tempoRelativo;
+    exports.__rotuloOnline = rotuloOnline;
     exports.__ROTA_PROJETOS = ROTA_PROJETOS;
     exports.__TelefoneAdicionarProjeto = TelefoneAdicionarProjeto; // render sem browser
     exports.__montarEscritorio = montarEscritorio;

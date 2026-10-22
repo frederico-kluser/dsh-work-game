@@ -284,3 +284,38 @@ test('adicionar projeto: a lista de Grupos tem a entrada e o fluxo usa o workspa
   assert.ok(BUNDLE.includes('.wg-tel-projeto-erro{'), 'o erro tem estilo próprio');
   assert.equal(typeof B.__TelefoneAdicionarProjeto, 'function');
 });
+
+test('ordem: a PRIMEIRA mesa é a do projeto que commitou por último (sala + grupos)', () => {
+  const workspaces = {
+    fonte: 'dsh',
+    arquivoConhecido: true,
+    archived: [],
+    items: [
+      { id: 'w1', title: 'antigo', path: '/p/antigo', sessionIds: ['s1'] },
+      { id: 'w2', title: 'recente', path: '/p/recente', sessionIds: ['s2'] },
+      { id: 'w3', title: 'sem-git', path: '/p/sem-git', sessionIds: ['s3'] },
+    ],
+  };
+  const pessoas = ['s1', 's2', 's3'].map((id) => ({
+    id, name: id.toUpperCase(), status: 'working', running: true, blank: false, flags: {}, avatar: null,
+  }));
+  const commits = { '/p/antigo': '2026-10-01T10:00:00Z', '/p/recente': '2026-10-20T10:00:00Z' };
+  const filtros = { soTrabalhando: false, mostrarEmBranco: true, mostrarSemWorkspace: true, mostrarAbertos: true };
+  const layout = B.__montarEscritorio(pessoas, workspaces, filtros, commits);
+  const equipas = [...layout.equipas.values()];
+  assert.deepEqual(equipas.map((e) => e.name), ['recente', 'antigo', 'sem-git'], 'grupos pela data do commit');
+  assert.equal(layout.equipas.get('ws:w2').caminho, '/p/recente', 'a equipa guarda o caminho absoluto (chave do mapa)');
+  assert.equal(layout.modules[0].teamId, 'ws:w2', 'a 1.ª mesa da sala é a do commit mais recente');
+
+  const semDados = B.__montarEscritorio(pessoas, workspaces, filtros, {});
+  assert.deepEqual([...semDados.equipas.values()].map((e) => e.name), ['antigo', 'recente', 'sem-git'], 'sem commits: ordem do DSH intacta');
+});
+
+test('label online: diz QUEM trabalha (até dois nomes) e passa a número a partir de três', () => {
+  assert.equal(B.__rotuloOnline(['Rui']), 'Rui online');
+  assert.equal(B.__rotuloOnline(['Rui', 'Bia']), 'Rui, Bia online');
+  assert.equal(B.__rotuloOnline(['Rui', 'Bia', 'Alex']), '3 online');
+  assert.equal(B.__rotuloOnline([]), '');
+  assert.equal(B.__rotuloOnline(null), '');
+  assert.equal(B.__rotuloOnline(['Ana Maria Silva']), 'Ana online', 'só o primeiro nome, cortado a 10');
+});
