@@ -35,7 +35,7 @@ Cheques estáticos leves (sem dependências): `node --check` em `app.js`, `data.
 - **Delegação**: 2 subagentes, 2 cadeiras reservadas, avatares únicos, sem duplicação do
   coordenador.
 - **Balão de output**: apresenta o texto correto.
-- **Expressões**: 14 presets listados e troca real do `href` da imagem (ex.:
+- **Expressões**: 24 presets listados e troca real do `href` da imagem (ex.:
   `assets/avatars/expressions/rui/waiting.svg`).
 - **Mobile 390×844**: sem overflow horizontal, dialog contido dentro do viewport.
 - **Rede**: 0 requisições externas em runtime.
@@ -93,7 +93,7 @@ Cheques estáticos leves (sem dependências): `node --check` em `app.js`, `data.
 4. Encher a API até "Site lotou" e confirmar: nova mesa a seguir à principal, mesa de equipe à
    direita, API de 2 → 4 pessoas.
 5. Delegar: 2 subagentes, 2 cadeiras reservadas, avatares únicos, coordenador não duplicado.
-6. Verificar o balão de output (texto correto) e os 14 presets de expressão com troca real do
+6. Verificar o balão de output (texto correto) e os 24 presets de expressão com troca real do
    `href` da imagem.
 7. Testar clique em cada lugar (hit de 208×234) e o diálogo de recrutamento preservando a cadeira
    clicada.

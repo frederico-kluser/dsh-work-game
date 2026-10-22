@@ -30,7 +30,7 @@ Composição: opções fixas da pessoa (topType, hairColor, accessoriesType, fac
 
 ## Presets e dedupe
 
-14 presets, cada um com o seu triple (`eyeType`/`eyebrowType`/`mouthType`):
+24 presets, cada um com o seu triple (`eyeType`/`eyebrowType`/`mouthType`) — a ordem é a de `expressions.js` (`presets`):
 
 | Preset | Triple |
 | --- | --- |
@@ -41,25 +41,35 @@ Composição: opções fixas da pessoa (topType, hairColor, accessoriesType, fac
 | `searching` | Side / UpDown / Concerned |
 | `thinking` | Squint / UnibrowNatural / Concerned |
 | `waiting` | Default / SadConcerned / Sad |
-| `approval` | Wink / RaisedExcited / Smile |
+| `approval` | Default / RaisedExcitedNatural / Smile |
 | `success` | Happy / RaisedExcitedNatural / Smile |
 | `celebrating` | WinkWacky / RaisedExcited / Tongue |
 | `error` | Cry / AngryNatural / Grimace |
 | `surprised` | Surprised / RaisedExcited / ScreamOpen |
 | `disbelief` | EyeRoll / UpDownNatural / Disbelief |
 | `wink` | Wink / RaisedExcited / Smile |
+| `inspired` | Hearts / RaisedExcitedNatural / Twinkle |
+| `determined` | Squint / Angry / Default |
+| `curious` | Side / RaisedExcited / Default |
+| `calm` | Close / Default / Smile |
+| `snacking` | Happy / UpDown / Eating |
+| `dizzy` | Dizzy / SadConcernedNatural / Concerned |
+| `baffled` | Surprised / UpDownNatural / Disbelief |
+| `frustrated` | EyeRoll / AngryNatural / Serious |
+| `nauseated` | Cry / SadConcerned / Vomit |
+| `cheeky` | Wink / UpDown / Tongue |
 
-**Dedupe:** `wink` e `approval` partilham o mesmo triple (`Wink`/`RaisedExcited`/`Smile`) → mesmo ficheiro copiado, sem novo download. São **13 triples distintos** para 14 presets.
+**Sem dedupe (desde 2026-10-16):** `approval` deixou de partilhar o triple com `wink` (agora `Default`/`RaisedExcitedNatural`/`Smile`) — os **24 presets têm 24 triples distintos**, cada um no seu ficheiro.
 
 ## Estrutura de ficheiros
 
-160 SVGs locais, ~2,4 MiB no total:
+500 SVGs de expressão (192 + 288 + 20), ~7,4 MiB no total — mais os 8 bustos base em `assets/avatars/*.svg`:
 
-- 8 identidades nomeadas (`rui`, `bia`, `lia`, `pesquisa`, `codigo`, `testes`, `alex`, `maya`) × 14 presets = **112** em `assets/avatars/expressions/<id>/<preset>.svg`;
-- 12 identidades totalmente aleatórias (`r01`..`r12`) × 4 presets (`idle`, `working`, `success`, `error`) = **48** em `assets/avatars/random/<id>/<preset>.svg` — re-geradas em **2026-09-29** com `scripts/gerar-avatares-random.py` (gênero coerente; ver secção seguinte).
-- Fora destas contagens e da demo: **8** SVGs em `assets/avatars/sleeping/<id>.svg` (1 por identidade nomeada) — o preset `sleeping` do plugin (quem está Disponível dorme no Modo jogo, embutido no `dsh-plugin/src/client.js`), triple `Close`/`DefaultNatural`/`Serious`; proveniência em `assets/AVATARS-EXPRESSIONS.md`.
+- 8 identidades nomeadas (`rui`, `bia`, `lia`, `pesquisa`, `codigo`, `testes`, `alex`, `maya`) × 24 presets = **192** em `assets/avatars/expressions/<id>/<preset>.svg`;
+- 12 identidades aleatórias (`r01`..`r12`) × 24 presets = **288** em `assets/avatars/random/<id>/<preset>.svg` — re-geradas em **2026-09-29** (gênero coerente; ver secção seguinte) e completadas com os 24 presets em **2026-10-16** (commit `19a8447`) por `scripts/gerar-avatares-random.py`.
+- Fora destas contagens e da demo: **20** SVGs em `assets/avatars/sleeping/<id>.svg` (1 por identidade, nomeadas e aleatórias) — o preset `sleeping` do plugin (quem está Disponível dorme no Modo jogo, embutido no `dsh-plugin/src/client.js`), triple `Close`/`DefaultNatural`/`Serious`; proveniência em `assets/AVATARS-EXPRESSIONS.md`.
 
-Contrato `window.DSH_EXPRESSIONS` (script puro, sem módulos): `presets[{id,label,eyeType,eyebrowType,mouthType,when}]`, `namedIdentityIds`, `randomIdentityIds`, `identities`, `basePreset='idle'` e `resolve(identityId, presetId)` → caminho local com cadeia de fallback: preset pedido → `idle` → `assets/avatars/<id>.svg` (só nomeadas) → `null`. As identidades aleatórias têm só 4 presets renderizados; os restantes estados caem em `idle`. Todas as identidades declaram `gender: 'f' | 'm'`.
+Contrato `window.DSH_EXPRESSIONS` (script puro, sem módulos): `presets[{id,label,eyeType,eyebrowType,mouthType,when}]`, `namedIdentityIds`, `randomIdentityIds`, `identities`, `basePreset='idle'` e `resolve(identityId, presetId)` → caminho local com cadeia de fallback: preset pedido → `idle` → `assets/avatars/<id>.svg` (só nomeadas) → `null`. Todas as identidades têm os 24 presets renderizados (contratos: `tests/static-assets.test.mjs` — 8×24 e 12×24 — e `tests/contracts.test.mjs` — 24 presets). Todas as identidades declaram `gender: 'f' | 'm'`.
 
 ## Piscina aleatória: gênero coerente (2026-09-29)
 

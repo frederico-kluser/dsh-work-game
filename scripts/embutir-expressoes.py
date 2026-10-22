@@ -38,13 +38,19 @@ from pathlib import Path
 RAIZ = Path(__file__).resolve().parent.parent
 CLIENTE = RAIZ / 'dsh-plugin' / 'src' / 'client.js'
 DIR_EXPRESSOES = RAIZ / 'assets' / 'avatars' / 'expressions'
+DIR_RANDOM = RAIZ / 'assets' / 'avatars' / 'random'
 DIR_DORMIR = RAIZ / 'assets' / 'avatars' / 'sleeping'
 
-IDENTIDADES = ['rui', 'bia', 'lia', 'pesquisa', 'codigo', 'testes', 'alex', 'maya']
+IDENTIDADES = [
+    'rui', 'bia', 'lia', 'pesquisa', 'codigo', 'testes', 'alex', 'maya',
+    'r01', 'r02', 'r03', 'r04', 'r05', 'r06', 'r07', 'r08', 'r09', 'r10', 'r11', 'r12',
+]
 PRESETS_CANONICOS = [
     'idle', 'working', 'focused', 'tool', 'searching', 'thinking',
     'waiting', 'error', 'success', 'sleeping', 'wink',
     'approval', 'celebrating', 'surprised', 'disbelief',
+    'inspired', 'determined', 'curious', 'calm', 'snacking',
+    'dizzy', 'baffled', 'frustrated', 'nauseated', 'cheeky',
 ]
 
 INICIO_BLOCO = 'const EXPR_AVATARS = {'
@@ -77,6 +83,8 @@ def extrair(caminho):
 def asset_de(identidade, preset):
     if preset == 'sleeping':
         return DIR_DORMIR / f'{identidade}.svg'
+    if identidade.startswith('r') and identidade[1:].isdigit():
+        return DIR_RANDOM / identidade / f'{preset}.svg'
     return DIR_EXPRESSOES / identidade / f'{preset}.svg'
 
 

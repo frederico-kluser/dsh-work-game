@@ -25,18 +25,18 @@
  *   dsh-plugin/src/client.js  — bundle do browser (não importa irmãos)
  */
 
-/* Pools por evento. TODOS os 14 presets da biblioteca pertencem pelo menos a
+/* Pools por evento. TODOS os 24 presets da biblioteca pertencem pelo menos a
  * um pool — as variantes TUDO o que a biblioteca desenha pode acontecer durante
  * o trabalho. `base` é o fallback quando a identidade não tem nenhum preset do
- * pool (ex.: identidades aleatórias só têm idle/working/success/error).
+ * pool (inalcançável hoje: as 20 identidades têm os 24 presets renderizados).
  * `prob` é a probabilidade-base do disparo (0..1); cada pessoa ainda a modula. */
 export const VARIANTES_EVENTOS = {
-  tool:    { pool: ['tool', 'searching', 'focused', 'thinking'], base: 'working', prob: 0.85 },
-  error:   { pool: ['error', 'surprised', 'disbelief'], base: 'error', prob: 1 },
-  working: { pool: ['working', 'focused', 'thinking', 'searching', 'wink'], base: 'working', prob: 0.5 },
-  success: { pool: ['success', 'celebrating', 'approval', 'wink'], base: 'success', prob: 0.9 },
-  waiting: { pool: ['waiting'], base: 'waiting', prob: 0.7 },
-  idle:    { pool: ['idle'], base: 'idle', prob: 1 }
+  tool:    { pool: ['tool', 'searching', 'focused', 'thinking', 'determined', 'curious', 'snacking'], base: 'working', prob: 0.85 },
+  error:   { pool: ['error', 'surprised', 'disbelief', 'baffled', 'frustrated', 'nauseated', 'dizzy'], base: 'error', prob: 1 },
+  working: { pool: ['working', 'focused', 'thinking', 'searching', 'wink', 'inspired', 'determined', 'curious', 'calm', 'snacking', 'cheeky'], base: 'working', prob: 0.65 },
+  success: { pool: ['success', 'celebrating', 'approval', 'wink', 'inspired', 'cheeky', 'calm'], base: 'success', prob: 0.9 },
+  waiting: { pool: ['waiting', 'curious', 'thinking'], base: 'waiting', prob: 0.7 },
+  idle:    { pool: ['idle', 'calm'], base: 'idle', prob: 1 }
 };
 
 /* FNV-1a → uint32. Personalidade estável por (pessoa, variante) e sementes. */

@@ -68,6 +68,13 @@ function pessoa(id, extra = {}) {
   };
 }
 const wsDsh = (items, archived = []) => ({ fonte: 'dsh', items, archived });
+// Vista de referência dos testes de FEATURE: nada escondido. Os testes não
+// dependem dos padrões de arranque (desde 2026-10-12 o arranque é SEMPRE só
+// "Só quem está a trabalhar" ativo — ver FILTROS_PADRAO).
+const BASE_TESTE = Object.freeze({
+  mostrarArquivadas: false, mostrarSemWorkspace: true, soTrabalhando: false,
+  mostrarEmBranco: false, mostrarAbertos: true,
+});
 const w = (id, title, sessionIds, path = `/Users/u/Projects/${title}`) => ({ id, title, path, sessionIds });
 
 const idsDe = (svg) => [...svg.matchAll(/\sid="([^"]+)"/g)].map((m) => m[1]);
@@ -86,7 +93,7 @@ test('layout: uma mesa por workspace do DSH, na ordem do DSH, com título e cami
     w('w1', 'newsletter-crawler', ['b', 'a']),
     w('w2', 'daf-chat', ['c']),
     w('w3', 'vazio', []),
-  ]));
+  ]), BASE_TESTE);
   assert.deepEqual([...l.equipas.values()].map((e) => [e.name, e.path, e.theme]), [
     ['newsletter-crawler', '~/Projects/newsletter-crawler', 'blue'],
     ['daf-chat', '~/Projects/daf-chat', 'teal'],
@@ -102,7 +109,7 @@ test('layout: uma mesa por workspace do DSH, na ordem do DSH, com título e cami
 
 test('layout: órfãs vão para "Sem workspace" (o Ungrouped do DSH), no fim; 5+ pessoas expandem a mesa', () => {
   const pessoas = ['a', 'b', 'c', 'd', 'e', 'x'].map((id) => pessoa(id));
-  const l = B.__montarEscritorio(pessoas, wsDsh([w('w1', 'site', ['a', 'b', 'c', 'd', 'e'])]));
+  const l = B.__montarEscritorio(pessoas, wsDsh([w('w1', 'site', ['a', 'b', 'c', 'd', 'e'])]), BASE_TESTE);
   assert.deepEqual(l.modules.map((m) => [m.teamId, m.kind]), [
     ['ws:w1', 'main'], ['ws:w1', 'expansion'], ['sem-workspace', 'main'],
   ]);
@@ -124,12 +131,12 @@ test('layout: esconde como a barra do DSH — subagentes, arquivadas e em branco
   ];
   const ws = wsDsh([w('w1', 'site', ['a', 'arq', 'vazia', 'nova'])], ['arq']);
   // As regras da barra do DSH, com "Manter workspaces abertos sem ação" DESLIGADO.
-  const l = B.__montarEscritorio(pessoas, ws, { mostrarAbertos: false });
+  const l = B.__montarEscritorio(pessoas, ws, { ...BASE_TESTE, mostrarAbertos: false });
   const sentadas = l.modules.flatMap((m) => m.seats).filter((s) => typeof s === 'string');
   assert.deepEqual(sentadas, ['a', 'nova']);
   // Por omissão (mostrarAbertos) o workspace aberto mantém as pessoas sem ação:
   // a em branco fica sentada e só a arquivada sai (detalhe em filtros.test.mjs).
-  const abertos = B.__montarEscritorio(pessoas, ws);
+  const abertos = B.__montarEscritorio(pessoas, ws, BASE_TESTE);
   assert.deepEqual(abertos.modules.flatMap((m) => m.seats).filter((s) => typeof s === 'string'), ['a', 'vazia', 'nova']);
 });
 
@@ -141,7 +148,7 @@ test('layout: delegação em curso = mesa violeta "Equipe de …" com o lugar de
     pessoa('s2', { name: 'Código', subagent: true, parentId: 'a', running: true }),
     pessoa('s3', { name: 'Velho', subagent: true, parentId: 'a', running: false }),
   ];
-  const l = B.__montarEscritorio(pessoas, wsDsh([w('w1', 'site', ['a', 'b'])]));
+  const l = B.__montarEscritorio(pessoas, wsDsh([w('w1', 'site', ['a', 'b'])]), BASE_TESTE);
   assert.deepEqual(l.modules.map((m) => [m.kind, m.seats]), [
     ['main', [{ reservado: 'a' }, 'b', null, null]],
     ['delegation', ['a', 's1', 's2', null]],
@@ -173,7 +180,7 @@ test('layout: sem o serviço de workspaces agrupa por pasta (cwd)', () => {
     pessoa('d', { cwd: null }),
   ];
   for (const ws of [null, { fonte: 'nenhuma', items: [], archived: [] }]) {
-    const l = B.__montarEscritorio(pessoas, ws);
+    const l = B.__montarEscritorio(pessoas, ws, BASE_TESTE);
     assert.deepEqual(l.modules.map((m) => m.seats.filter(Boolean)), [['a', 'c'], ['b'], ['d']]);
     assert.deepEqual([...l.equipas.values()].map((e) => e.name), ['site', 'api', 'Sem workspace']);
   }
@@ -190,7 +197,7 @@ const cenario = () => {
     pessoa('e', { name: 'Alex', avatar: 'alex' }),
   ];
   const people = Object.fromEntries(pessoas.map((p) => [p.id, p]));
-  const layout = B.__montarEscritorio(pessoas, wsDsh([w('w1', 'site', ['a', 'b', 'c']), w('w2', 'api', ['d', 'e'])]));
+  const layout = B.__montarEscritorio(pessoas, wsDsh([w('w1', 'site', ['a', 'b', 'c']), w('w2', 'api', ['d', 'e'])]), BASE_TESTE);
   return { people, layout, svg: B.__renderOffice({ people, layout, selecionada: 'a' }), sprite: B.__spriteDoPainel(layout.chaves) };
 };
 
@@ -279,7 +286,7 @@ const estados = () => {
     pessoa('x', { status: 'error' }),
   ];
   const people = Object.fromEntries(pessoas.map((p) => [p.id, p]));
-  const layout = B.__montarEscritorio(pessoas, wsDsh([w('w1', 'site', ['t', 'f', 'w', 'z']), w('w2', 'api', ['ok', 'x'])]));
+  const layout = B.__montarEscritorio(pessoas, wsDsh([w('w1', 'site', ['t', 'f', 'w', 'z']), w('w2', 'api', ['ok', 'x'])]), BASE_TESTE);
   return { people, layout, svg: B.__renderOffice({ people, layout }) };
 };
 
@@ -309,7 +316,7 @@ test('cena viva: quem está Disponível dorme — olhos fechados, "zzz" e balan�
   assert.ok(Number(grupo[1]) > cxZ + 56 && Number(grupo[1]) < cxZ + 112, 'à direita da cabeça, antes do vizinho');
   assert.ok(Number(grupo[2]) > 147 && Number(grupo[2]) < 294, 'à altura da cabeça (entre o topo do busto e o queixo)');
   // Por pessoa: outra identidade tem outra fase; a mesma pessoa, sempre a mesma.
-  const outra = B.__renderOffice({ people: { y3: pessoa('y3') }, layout: B.__montarEscritorio([pessoa('y3')], null) });
+  const outra = B.__renderOffice({ people: { y3: pessoa('y3') }, layout: B.__montarEscritorio([pessoa('y3')], null, BASE_TESTE) });
   const atrasoOutra = Number(outra.match(/class="wg-z"[^>]*animation-delay:(-?[\d.]+)s/)[1]);
   assert.notEqual(atrasoOutra, atrasos[0], 'cada pessoa no seu ritmo');
   assert.equal(estados().svg, svg, 'determinístico: re-render com o mesmo estado = o mesmo markup');
@@ -317,7 +324,7 @@ test('cena viva: quem está Disponível dorme — olhos fechados, "zzz" e balan�
   assert.ok(css.includes('.wg-svg .wg-zzz{pointer-events:none}'), 'o zzz não apanha cliques nem o arraste');
   const regra = css.match(/\.wg-svg \.wg-z\{([^}]*)\}/)[1];
   assert.match(regra, /transform-box:view-box;transform-origin:0 0/, 'origem na própria letra (nada de fill-box: o Safari erra-a)');
-  assert.match(regra, /animation:wg-zzz 3\.60s steps\(1,end\) infinite paused/, 'em degraus, em pausa: o relógio da cena avança-as');
+  assert.match(regra, /animation:wg-zzz 3\.60s linear infinite/, 'interpolação contínua e fluida do zzz');
 });
 
 test('cena viva: o "zzz" sobe (e anda para a direita) a partir da orelha — geometria dos quadros-chave', () => {
@@ -361,11 +368,11 @@ test('cena viva: quem trabalha (Trabalhando/Executando ferramenta) balança — 
   const r = B.__ritmoDe('t');
   assert.ok(Math.abs(r * 100 - Math.round(r * 100)) < 1e-9, `ritmo quantizado a 0,01: ${r}`);
   const css = B.__CSS_PAINEL;
-  assert.ok(css.includes('.wg-svg .character.wg-balanca{transform-box:fill-box;animation:wg-balanco 2.80s steps(1,end) infinite paused}'));
-  assert.ok(css.includes('.wg-svg .character.wg-balanca-lateral{transform-box:fill-box;animation:wg-balanco-lateral 2.80s steps(1,end) infinite paused}'));
+  assert.ok(css.includes('.wg-svg .character.wg-balanca{transform-box:fill-box;transform-origin:50% 100%;animation:wg-balanco 2.80s ease-in-out infinite}'));
+  assert.ok(css.includes('.wg-svg .character.wg-balanca-lateral{transform-box:fill-box;transform-origin:50% 100%;animation:wg-balanco-lateral 2.80s ease-in-out infinite}'));
   const kf = css.match(/@keyframes wg-balanco\{((?:[\d.]+%\{[^}]*\})+)\}/)[1];
-  const ys = [...kf.matchAll(/%\{transform:translateY\((-?[\d.]+)(?:px)?\)\}/g)].map((m) => Number(m[1]));
-  assert.equal(ys.length, 15, '14 degraus de 0,2 s num ciclo de 2,8 s (+ o 100%)');
+  const ys = [...kf.matchAll(/%\{transform:translate\(-?[\d.]+(?:px)?,(-?[\d.]+)(?:px)?\)\s*rotate\(-?[\d.]+deg\)\}/g)].map((m) => Number(m[1]));
+  assert.equal(ys.length, 15, '14 pontos num ciclo de 2,8 s (+ o 100%)');
   assert.ok(ys.every((y) => y <= 0), 'só sobe — nunca desce sobre o portátil');
   assert.equal(Math.min(...ys), -7, `sobe levemente (7 unidades ≈ 2,8 px a 40%): ${Math.min(...ys)}`);
   assert.equal(ys[0], 0);
@@ -381,15 +388,15 @@ test('cena viva: quem dorme balança a cabeça LATERALMENTE — a mesma onda do 
   const css = B.__CSS_PAINEL;
   const kf = css.match(/@keyframes wg-balanco-lateral\{((?:[\d.]+%\{[^}]*\})+)\}/);
   assert.ok(kf, '@keyframes wg-balanco-lateral');
-  const xs = [...kf[1].matchAll(/%\{transform:translateX\(([\d.]+)(?:px)?\)\}/g)].map((m) => Number(m[1]));
-  assert.equal(xs.length, 15, 'os MESMOS 14 degraus do balanço do ativo (+ o 100%)');
-  assert.ok(xs.every((x) => x >= 0), 'só se desloca para o lado e volta');
+  const xs = [...kf[1].matchAll(/%\{transform:translate\(([\d.]+)(?:px)?,-?[\d.]+(?:px)?\)\s*rotate\(-?[\d.]+deg\)\}/g)].map((m) => Number(m[1]));
+  assert.equal(xs.length, 15, 'os MESMOS 14 pontos do balanço do ativo (+ o 100%)');
+  assert.ok(xs.every((x) => x >= 0), 'desloca-se para o lado e volta suavemente');
   assert.equal(Math.max(...xs), 7, 'a MESMA distância do ativo (7 unidades), mas lateral');
   assert.equal(xs[0], 0);
   assert.equal(xs[xs.length - 1], 0, 'volta ao sítio: ciclo sem salto');
   // A geometria bate certo com a do balanço vertical: mesmo cosseno, eixo trocado.
   const ky = css.match(/@keyframes wg-balanco\{((?:[\d.]+%\{[^}]*\})+)\}/)[1];
-  const ys = [...ky.matchAll(/translateY\((-?[\d.]+)(?:px)?\)/g)].map((m) => Number(m[1]));
+  const ys = [...ky.matchAll(/translate\(-?[\d.]+(?:px)?,(-?[\d.]+)(?:px)?\)/g)].map((m) => Number(m[1]));
   assert.deepEqual(xs.map((x) => -x + 0), ys, 'mesma onda, eixo X em vez de Y');
 });
 
@@ -690,6 +697,7 @@ test('só anima o que se vê: quem fica DEBAIXO do celular (ou da barra por cima
   const layout = B.__montarEscritorio(
     ['a', 'b', 'c', 'd', 'e', 'f'].map((id) => pessoa(id)),
     wsDsh([w('w1', 'site', ['a', 'b']), w('w2', 'api', ['c', 'd']), w('w3', 'web', ['e', 'f'])]),
+    BASE_TESTE,
   );
   const camera = { zoom: 0.4, x: 0, y: 0 };
   // Tela 815×805 (barra lateral aberta); celular em 444–795 × 14–774 (px da tela).
@@ -983,9 +991,10 @@ test('REGRA DE OURO: cada corpo embutido é byte a byte o SVG da demo (expressio
       // assets/avatars/sleeping/<id>.svg; os restantes 14 (os presets TODOS da
       // biblioteca, para o reator de variantes disparar qualquer cara) vêm de
       // assets/avatars/expressions/<id>/<preset>.svg.
+      const pasta = /^r\d+$/.test(m[1]) ? 'random' : 'expressions';
       const ficheiro = e[1] === 'sleeping'
         ? new URL(`assets/avatars/sleeping/${m[1]}.svg`, RAIZ)
-        : new URL(`assets/avatars/expressions/${m[1]}/${e[1]}.svg`, RAIZ);
+        : new URL(`assets/avatars/${pasta}/${m[1]}/${e[1]}.svg`, RAIZ);
       assert.ok(existsSync(ficheiro), `${m[1]}/${e[1]}.svg existe`);
       const original = readFileSync(ficheiro, 'utf8');
       assert.ok(original.includes(e[3]) && original.includes(`viewBox="${e[2]}"`), `${m[1]}/${e[1]} igual ao asset`);
@@ -993,8 +1002,8 @@ test('REGRA DE OURO: cada corpo embutido é byte a byte o SVG da demo (expressio
       conferidos += 1;
     }
   }
-  assert.equal(aDormir.length, 8, `todas as identidades dormem: ${aDormir.join(', ')}`);
-  assert.equal(conferidos, 120, '8 identidades × 15 presets embutidos (os 14 da biblioteca + sleeping)');
+  assert.equal(aDormir.length, 20, `todas as 20 identidades dormem: ${aDormir.join(', ')}`);
+  assert.equal(conferidos, 500, '20 identidades × 25 presets embutidos (os 24 da biblioteca + sleeping)');
 });
 
 test('REGRA DE OURO: o mobiliário embutido é o furniture.svg da demo (ids com prefixo wg-)', () => {
@@ -1020,7 +1029,7 @@ test('nomes: nome e boneco DERIVADOS do id — a mesma conversa é a mesma pesso
   const a = B.__identidadeDe(id);
   assert.deepEqual(B.__identidadeDe(id), a, 'determinística');
   assert.ok(B.__NOMES.includes(a.name), `nome da lista da demo (${a.name})`);
-  assert.ok(['rui', 'bia', 'lia', 'pesquisa', 'codigo', 'testes', 'alex', 'maya'].includes(a.avatar), `identidade real (${a.avatar})`);
+  assert.ok(Object.keys(B.__GENERO_AVATAR).includes(a.avatar), `identidade real (${a.avatar})`);
   assert.ok(!BUNDLE.includes('Math.random('), 'nada de sorteio');
   // Dois "browsers" (armazenamentos vazios diferentes): a mesma pessoa.
   const antes = globalThis.window.localStorage;
@@ -1075,20 +1084,22 @@ test('nomes: nome e boneco DERIVADOS do id — a mesma conversa é a mesma pesso
 test('nomes: o gênero do boneco bate SEMPRE com o gênero do nome (regra 2026-09-29)', () => {
   assert.deepEqual({ ...B.__GENERO_AVATAR }, {
     rui: 'm', bia: 'f', lia: 'f', pesquisa: 'm', codigo: 'm', testes: 'f', alex: 'm', maya: 'f',
-  }, 'tabela de gênero dos 8 bonecos nomeados');
+    r01: 'f', r02: 'f', r03: 'f', r04: 'f', r05: 'f', r06: 'f',
+    r07: 'm', r08: 'm', r09: 'm', r10: 'm', r11: 'm', r12: 'm',
+  }, 'tabela de gênero dos 20 bonecos (10f + 10m)');
   for (let i = 0; i < 600; i += 1) {
     const a = B.__identidadeDe(`session-g-${i}`);
     const gAvatar = B.__GENERO_AVATAR[a.avatar];
-    const gNome = B.__GENERO_NOME[a.name] || 'any';
+    const gNome = B.__GENERO_NOME[a.name];
     assert.ok(['f', 'm'].includes(gAvatar), `session-g-${i}: boneco ${a.avatar} sem gênero`);
-    assert.ok(gNome === gAvatar || gNome === 'any',
-      `session-g-${i}: "${a.name}" (${gNome}) com boneco ${a.avatar} (${gAvatar}) — gêneros não batem`);
+    assert.equal(gNome, gAvatar,
+      `session-g-${i}: "${a.name}" (${gNome}) com boneco ${a.avatar} (${gAvatar}) — gêneros batem estritamente`);
   }
-  // Cobertura: cada gênero tem nomes e bonecos de sobra.
+  // Cobertura: cada gênero tem 40 nomes e 10 bonecos distintos.
   for (const g of ['f', 'm']) {
-    const nomes = B.__NOMES.filter((n) => { const gn = B.__GENERO_NOME[n] || 'any'; return gn === g || gn === 'any'; });
-    assert.ok(nomes.length >= 20, `poucos nomes para o gênero ${g}: ${nomes.length}`);
-    assert.ok(Object.values(B.__GENERO_AVATAR).includes(g), `sem bonecos para o gênero ${g}`);
+    const nomes = B.__NOMES.filter((n) => B.__GENERO_NOME[n] === g);
+    assert.ok(nomes.length >= 40, `poucos nomes para o gênero ${g}: ${nomes.length}`);
+    assert.equal(Object.values(B.__GENERO_AVATAR).filter((x) => x === g).length, 10, `10 bonecos para o gênero ${g}`);
   }
 });
 
@@ -1193,10 +1204,14 @@ const salaFiltros = () => ({
 
 test('filtros: por omissão — arquivadas escondidas e contadas; workspaces abertos mantêm as pessoas sem ação', () => {
   assert.deepEqual({ ...B.__FILTROS_PADRAO }, {
-    mostrarArquivadas: false, mostrarSemWorkspace: true, soTrabalhando: false, mostrarEmBranco: false, mostrarAbertos: true,
-  });
+    mostrarArquivadas: false, mostrarSemWorkspace: false, soTrabalhando: true, mostrarEmBranco: false, mostrarAbertos: false,
+  }, 'arranque: apenas "Só quem está a trabalhar" ativo');
   const { pessoas, ws } = salaFiltros();
-  for (const l of [B.__montarEscritorio(pessoas, ws), B.__montarEscritorio(pessoas, ws, {}), B.__montarEscritorio(pessoas, ws, B.__FILTROS_PADRAO)]) {
+  // A equivalência de formas mantém-se (sem filtros == {} == padrão explícito)…
+  assert.deepEqual(B.__montarEscritorio(pessoas, ws, {}), B.__montarEscritorio(pessoas, ws));
+  assert.deepEqual(B.__montarEscritorio(pessoas, ws, { ...B.__FILTROS_PADRAO }), B.__montarEscritorio(pessoas, ws));
+  // …e a vista de feature testa-se com os filtros explícitos.
+  for (const l of [B.__montarEscritorio(pessoas, ws, BASE_TESTE), B.__montarEscritorio(pessoas, ws, { ...BASE_TESTE })]) {
     // w1 está aberto (a, b e vazia presentes e não arquivadas): a em branco
     // fica sentada ("Manter workspaces abertos sem ação"); a arquivada sai.
     assert.deepEqual(sentadas(l), ['a', 'b', 'vazia', 'orfa']);
@@ -1204,7 +1219,7 @@ test('filtros: por omissão — arquivadas escondidas e contadas; workspaces abe
     assert.deepEqual([...l.arquivadas], []);
   }
   // Sem esse filtro: o comportamento antigo exato (a barra do DSH).
-  const antigo = B.__montarEscritorio(pessoas, ws, { mostrarAbertos: false });
+  const antigo = B.__montarEscritorio(pessoas, ws, { ...BASE_TESTE, mostrarAbertos: false });
   assert.deepEqual(sentadas(antigo), ['a', 'b', 'orfa']);
   assert.deepEqual(antigo.escondidas, { total: 3, arquivadas: 2, emBranco: 1, semWorkspace: 0, paradas: 0, fechados: 0, arquivoDesconhecido: 0 });
   assert.equal(B.__textoEscondidas({ total: 3 }), '3 escondidas pelos filtros');
@@ -1215,7 +1230,7 @@ test('filtros: por omissão — arquivadas escondidas e contadas; workspaces abe
 test('filtros: "Mostrar arquivadas" senta-as no seu workspace (ou em "Sem workspace") com a ficha "Arquivada" em cinzento', () => {
   const { pessoas, ws } = salaFiltros();
   // mostrarAbertos desligado para fixar o recorte clássico das mesas.
-  const l = B.__montarEscritorio(pessoas, ws, { mostrarArquivadas: true, mostrarAbertos: false });
+  const l = B.__montarEscritorio(pessoas, ws, { ...BASE_TESTE, mostrarArquivadas: true, mostrarAbertos: false });
   assert.deepEqual(l.modules.map((m) => [m.teamId, m.seats]), [
     ['ws:w1', ['a', 'b', 'arq', null]],
     ['ws:w2', [null, null, null, null]],
@@ -1236,7 +1251,7 @@ test('filtros: "Mostrar arquivadas" senta-as no seu workspace (ou em "Sem worksp
 test('filtros: sem "Sem workspace" a mesa das órfãs sai e elas contam como escondidas', () => {
   const { pessoas, ws } = salaFiltros();
   // mostrarAbertos desligado: o recorte clássico (vazia em branco escondida).
-  const l = B.__montarEscritorio(pessoas, ws, { mostrarSemWorkspace: false, mostrarAbertos: false });
+  const l = B.__montarEscritorio(pessoas, ws, { ...BASE_TESTE, mostrarSemWorkspace: false, mostrarAbertos: false });
   assert.deepEqual(sentadas(l), ['a', 'b']);
   assert.ok(!l.equipas.has('sem-workspace'), 'a mesa "Sem workspace" não se monta');
   assert.deepEqual(l.escondidas, { total: 4, arquivadas: 2, emBranco: 1, semWorkspace: 1, paradas: 0, fechados: 0, arquivoDesconhecido: 0 });
@@ -1245,14 +1260,14 @@ test('filtros: sem "Sem workspace" a mesa das órfãs sai e elas contam como esc
     pessoa('lider', { running: true, subagents: 1 }),
     pessoa('filho', { subagent: true, parentId: 'lider', running: true }),
   ];
-  assert.deepEqual(B.__montarEscritorio(deleg, wsDsh([]), { mostrarSemWorkspace: false }).modules, []);
-  assert.equal(B.__montarEscritorio(deleg, wsDsh([])).modules.filter((m) => m.kind === 'delegation').length, 1);
+  assert.deepEqual(B.__montarEscritorio(deleg, wsDsh([]), { ...BASE_TESTE, mostrarSemWorkspace: false }).modules, []);
+  assert.equal(B.__montarEscritorio(deleg, wsDsh([]), BASE_TESTE).modules.filter((m) => m.kind === 'delegation').length, 1);
 });
 
 test('filtros: "Só quem está a trabalhar" esconde quem está parado e as mesas sem ninguém a trabalhar', () => {
   const { pessoas, ws } = salaFiltros();
   // mostrarAbertos desligado: o recorte clássico (w1 só com quem trabalha).
-  const l = B.__montarEscritorio(pessoas, ws, { soTrabalhando: true, mostrarAbertos: false });
+  const l = B.__montarEscritorio(pessoas, ws, { ...BASE_TESTE, soTrabalhando: true, mostrarAbertos: false });
   assert.deepEqual(l.modules.map((m) => [m.teamId, m.seats]), [['ws:w1', ['a', null, null, null]]],
     'nem o workspace vazio nem "Sem workspace": lugares "livres" de gente escondida convidariam a recrutar');
   assert.deepEqual(l.escondidas, { total: 5, arquivadas: 2, emBranco: 1, semWorkspace: 0, paradas: 2, fechados: 1, arquivoDesconhecido: 0 },
@@ -1263,14 +1278,14 @@ test('filtros: "Só quem está a trabalhar" esconde quem está parado e as mesas
     pessoa('filho', { subagent: true, parentId: 'lider', running: true }),
     pessoa('ferr', { status: 'tool' }),
   ];
-  const d = B.__montarEscritorio(deleg, wsDsh([w('w1', 'site', ['lider', 'ferr'])]), { soTrabalhando: true });
+  const d = B.__montarEscritorio(deleg, wsDsh([w('w1', 'site', ['lider', 'ferr'])]), { ...BASE_TESTE, soTrabalhando: true });
   assert.deepEqual(d.modules.map((m) => [m.kind, m.seats]), [
     ['main', [{ reservado: 'lider' }, 'ferr', null, null]],
     ['delegation', ['lider', 'filho', null, null]],
   ]);
   // Ninguém a trabalhar: a cena diz que são os filtros, não "à espera de telemetria"
   // (com mostrarAbertos — o padrão — o workspace aberto mantinha-se na sala).
-  const vazia = B.__montarEscritorio([pessoa('p')], wsDsh([w('w1', 'site', ['p'])]), { soTrabalhando: true, mostrarAbertos: false });
+  const vazia = B.__montarEscritorio([pessoa('p')], wsDsh([w('w1', 'site', ['p'])]), { ...BASE_TESTE, soTrabalhando: true, mostrarAbertos: false });
   assert.equal(vazia.modules.length, 0);
   const svg = B.__renderOffice({ people: { p: pessoa('p') }, layout: vazia });
   assert.ok(svg.includes('Os filtros escondem todas as conversas') && !svg.includes('à espera de telemetria'));
@@ -1278,19 +1293,19 @@ test('filtros: "Só quem está a trabalhar" esconde quem está parado e as mesas
 
 test('filtros: "Mostrar conversas em branco" senta as conversas novas ainda sem mensagens', () => {
   const { pessoas, ws } = salaFiltros();
-  const l = B.__montarEscritorio(pessoas, ws, { mostrarEmBranco: true });
+  const l = B.__montarEscritorio(pessoas, ws, { ...BASE_TESTE, mostrarEmBranco: true });
   assert.deepEqual(sentadas(l), ['a', 'b', 'vazia', 'orfa']);
   assert.deepEqual(l.escondidas, { total: 2, arquivadas: 2, emBranco: 0, semWorkspace: 0, paradas: 0, fechados: 0, arquivoDesconhecido: 0 });
   // Combinações: tudo à vista.
-  const tudo = B.__montarEscritorio(pessoas, ws, { mostrarEmBranco: true, mostrarArquivadas: true });
+  const tudo = B.__montarEscritorio(pessoas, ws, { ...BASE_TESTE, mostrarEmBranco: true, mostrarArquivadas: true });
   assert.equal(tudo.escondidas.total, 0);
   assert.deepEqual(sentadas(tudo).sort(), ['a', 'arq', 'b', 'orfa', 'orfa-arq', 'vazia']);
 });
 
-test('filtros: normalizar e persistir em localStorage (dsh-work-game:filtros), tolerando falhas', () => {
+test('filtros: normalizar; o ARRANQUE é sempre o padrão (sem reler localStorage), tolerando falhas', () => {
   assert.deepEqual(B.__normalizarFiltros({ mostrarArquivadas: true, soTrabalhando: 'sim', lixo: 1 }), {
-    mostrarArquivadas: true, mostrarSemWorkspace: true, soTrabalhando: false, mostrarEmBranco: false, mostrarAbertos: true,
-  }, 'só booleanos conhecidos; o resto cai no padrão');
+    mostrarArquivadas: true, mostrarSemWorkspace: false, soTrabalhando: true, mostrarEmBranco: false, mostrarAbertos: false,
+  }, 'só booleanos conhecidos; o resto cai no padrão (soTrabalhando arranca ligado)');
   assert.deepEqual(B.__normalizarFiltros(null), { ...B.__FILTROS_PADRAO });
   assert.deepEqual(B.__FILTROS_UI.map((f) => f.rotulo), [
     'Mostrar arquivadas (ocultas por omissão)', 'Mostrar "Sem workspace"', 'Só quem está a trabalhar',
@@ -1301,16 +1316,15 @@ test('filtros: normalizar e persistir em localStorage (dsh-work-game:filtros), t
     const guardado = new Map();
     globalThis.window.localStorage = { getItem: (k) => guardado.get(k) ?? null, setItem: (k, v) => guardado.set(k, String(v)) };
     assert.deepEqual(B.__lerFiltros(), { ...B.__FILTROS_PADRAO }, 'nada guardado: padrão');
-    assert.equal(B.__guardarFiltros({ mostrarArquivadas: true, soTrabalhando: true }), true);
+    assert.equal(B.__guardarFiltros({ mostrarArquivadas: true, soTrabalhando: true }), true, 'guardar regista (normalizado)');
     assert.deepEqual(JSON.parse(guardado.get('dsh-work-game:filtros')), {
-      mostrarArquivadas: true, mostrarSemWorkspace: true, soTrabalhando: true, mostrarEmBranco: false, mostrarAbertos: true,
+      mostrarArquivadas: true, mostrarSemWorkspace: false, soTrabalhando: true, mostrarEmBranco: false, mostrarAbertos: false,
     });
-    assert.equal(B.__lerFiltros().soTrabalhando, true, 'volta igual depois de recarregar');
-    // Payload antigo (sem mostrarAbertos): o campo em falta cai no padrão verdadeiro.
-    guardado.set('dsh-work-game:filtros', JSON.stringify({ mostrarArquivadas: true, soTrabalhando: true }));
-    assert.deepEqual(B.__lerFiltros(), {
-      mostrarArquivadas: true, mostrarSemWorkspace: true, soTrabalhando: true, mostrarEmBranco: false, mostrarAbertos: true,
-    }, 'localStorage antigo (sem mostrarAbertos) aceita-se e completa com o padrão');
+    // O ARRANQUE não relê o localStorage (pedido do utilizador, 2026-10-12:
+    // SEMPRE inicia só com "Só quem está a trabalhar" ativo).
+    guardado.set('dsh-work-game:filtros', JSON.stringify({ mostrarArquivadas: true, soTrabalhando: false }));
+    assert.deepEqual(B.__lerFiltros(), { ...B.__FILTROS_PADRAO },
+      'recarrega SEMPRE no padrão, ignore o que estava guardado');
     guardado.set('dsh-work-game:filtros', '{isto não é json');
     assert.deepEqual(B.__lerFiltros(), { ...B.__FILTROS_PADRAO }, 'JSON estragado: padrão, sem rebentar');
     globalThis.window.localStorage = { getItem: () => { throw new Error('bloqueado'); }, setItem: () => { throw new Error('bloqueado'); } };
@@ -1321,7 +1335,7 @@ test('filtros: normalizar e persistir em localStorage (dsh-work-game:filtros), t
   }
 });
 
-test('núcleo: filtros mudam a sala e persistem; o celular abre e fecha com a pessoa selecionada', () => {
+test('núcleo: filtros mudam a sala (por sessão); o celular abre e fecha com a pessoa selecionada', () => {
   const n = B.__criarNucleo();
   let avisos = 0;
   const soltar = n.subscribe(() => { avisos += 1; });
@@ -1379,7 +1393,7 @@ test('barra lateral: contexto real, os 4 buckets com custo estimado e a linha do
     { type: 'status', sessionId: 'a', status: 'idle', at: Date.UTC(2026, 8, 28, 14, 6, 0) },
   ]);
   const p = { ...vistaDe(e, 'a'), speed: 38 };
-  const layout = B.__montarEscritorio([p], wsDsh([w('w1', 'site', ['a'])]));
+  const layout = B.__montarEscritorio([p], wsDsh([w('w1', 'site', ['a'])]), BASE_TESTE);
   const m = B.__modeloSidebar(p, { layout, precos: e.precos });
 
   assert.equal(m.nome, p.name);
@@ -1420,7 +1434,7 @@ test('barra lateral: contexto real, os 4 buckets com custo estimado e a linha do
 
 test('barra lateral: sem dados mostra "—" (nada inventado) e o aviso >200k só com contexto real acima do limiar', () => {
   const p = { ...pessoa('n'), model: null, ctx: null, cost: null };
-  const m = B.__modeloSidebar(p, { layout: B.__montarEscritorio([p], null), precos: PRECOS_TESTE });
+  const m = B.__modeloSidebar(p, { layout: B.__montarEscritorio([p], null, BASE_TESTE), precos: PRECOS_TESTE });
   assert.equal(m.contexto.usadoTxt, '—');
   assert.equal(m.contexto.janelaTxt, '—');
   assert.equal(m.contexto.pct, null);
@@ -1453,7 +1467,7 @@ test('barra lateral: mesa principal/expandida/de equipe, delegação e arquivada
     pessoa('s1', { subagent: true, parentId: 'a', running: true }),
     pessoa('arq'),
   ];
-  const layout = B.__montarEscritorio(pessoas, wsDsh([w('w1', 'site', ['a', 'b', 'c', 'd', 'e', 'arq'])], ['arq']), { mostrarArquivadas: true });
+  const layout = B.__montarEscritorio(pessoas, wsDsh([w('w1', 'site', ['a', 'b', 'c', 'd', 'e', 'arq'])], ['arq']), { ...BASE_TESTE, mostrarArquivadas: true });
   const m = (id) => B.__modeloSidebar(pessoas.find((p) => p.id === id), { layout });
   assert.equal(m('a').local, 'site · mesa de equipe', 'quem delega senta-se na mesa violeta');
   assert.equal(m('a').estado.texto, 'Em delegação · Trabalhando');
@@ -1491,6 +1505,7 @@ test('câmara: com a barra lateral aberta a sala fica legível (≥ 0,4) e centr
   const layout = B.__montarEscritorio(
     ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i'].map((id) => pessoa(id)),
     wsDsh([w('w1', 'site', ['a', 'b', 'c']), w('w2', 'api', ['d', 'e', 'f']), w('w3', 'web', ['g', 'h', 'i'])]),
+    BASE_TESTE,
   );
   const foco = B.__centroDoLugar(layout, 'e');
   assert.deepEqual(foco, { x: 40 + 940 + 112.5 + 225, y: 310 + 325 }, '2.º lugar da 2.ª mesa');
@@ -1549,6 +1564,7 @@ test('câmara: a zona à vista segue a posição REAL do celular e da barra late
   const layout = B.__montarEscritorio(
     ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i'].map((id) => pessoa(id)),
     wsDsh([w('w1', 'site', ['a', 'b', 'c']), w('w2', 'api', ['d', 'e', 'f']), w('w3', 'web', ['g', 'h', 'i'])]),
+    BASE_TESTE,
   );
   const mundo = B.__tamanhoMundo(3);
   const foco = B.__centroDoLugar(layout, 'e');
@@ -1589,13 +1605,15 @@ test('câmara: a zona à vista segue a posição REAL do celular e da barra late
 /* ---------- expressões DURANTE o trabalho (motor de expressões) + vigia ---------- */
 
 test('expressões durante o trabalho: cada evento sorteia a SUA variante e os estados fortes mandam', () => {
-  // O reator de variantes embutido cobre os 14 presets da biblioteca — qualquer
+  // O reator de variantes embutido cobre os 24 presets da biblioteca — qualquer
   // variante pode acontecer durante o trabalho (variantes.js / assets/AVATARS-EXPRESSIONS.md).
   assert.deepEqual(Object.keys(B.__VARIANTES_EVENTOS).sort(), ['error', 'idle', 'success', 'tool', 'waiting', 'working']);
   const todos = new Set(Object.values(B.__VARIANTES_EVENTOS).flatMap((ev) => ev.pool));
   assert.deepEqual([...todos].sort(),
-    ['approval', 'celebrating', 'disbelief', 'error', 'focused', 'idle', 'searching', 'success',
-      'surprised', 'thinking', 'tool', 'waiting', 'wink', 'working']);
+    ['approval', 'baffled', 'calm', 'celebrating', 'cheeky', 'curious', 'determined',
+      'disbelief', 'dizzy', 'error', 'focused', 'frustrated', 'idle', 'inspired',
+      'nauseated', 'searching', 'snacking', 'success', 'surprised', 'thinking',
+      'tool', 'waiting', 'wink', 'working']);
   let e = escritorio([{ type: 'session/added', sessionId: 'a' }, { type: 'status', sessionId: 'a', status: 'running' }]);
   const cara = () => B.__presetDe(e.people.get('a'));
   assert.equal(cara(), 'working', 'sem eventos de expressão ainda: a cara de trabalho base');
@@ -1609,18 +1627,20 @@ test('expressões durante o trabalho: cada evento sorteia a SUA variante e os es
     e = B.__applyEvent(e, { type: 'message', sessionId: 'a', side: i % 2 ? 'assistant' : 'user', at: 1000 + i * 1200 });
     vistas.push(cara());
   }
+  const poolMsg = ['working', 'focused', 'thinking', 'wink', 'inspired', 'determined', 'curious', 'searching', 'snacking', 'cheeky'];
   for (const v of vistas) {
-    assert.ok(['working', 'focused', 'thinking', 'wink'].includes(v), `variante do cenário 'mensagem' (${v})`);
+    assert.ok(poolMsg.includes(v), `variante do cenário 'mensagem' (${v})`);
   }
   assert.ok(new Set(vistas).size > 1, 'as mensagens mudam de cara — o disparo é aleatório, nunca uma rotação fixa');
   // Os estados fortes mandam por cima das variantes…
   e = B.__applyEvent(e, { type: 'question', sessionId: 'a', id: 'q1', text: 'ok?', at: 10000 });
-  assert.equal(cara(), 'waiting', 'quem pergunta espera');
+  assert.ok(['waiting', 'thinking', 'surprised', 'curious', 'baffled'].includes(cara()),
+    `quem pergunta mostra A SUA cara de espera (própria de cada agente): ${cara()}`);
   e = B.__applyEvent(e, { type: 'question/answered', sessionId: 'a', id: 'q1', at: 10500 });
-  assert.ok(['working', 'focused', 'thinking', 'wink'].includes(cara()), 'de volta às variantes de trabalho');
+  assert.ok(poolMsg.includes(cara()), 'de volta às variantes de trabalho');
   // Executar uma ferramenta → variante do cenário 'ferramenta'.
   e = B.__applyEvent(e, { type: 'tool', sessionId: 'a', phase: 'call', name: 'bash', at: 11500 });
-  assert.ok(['tool', 'searching', 'focused', 'thinking'].includes(cara()), `com ferramenta: pool de ferramenta (${cara()})`);
+  assert.ok(['tool', 'searching', 'focused', 'thinking', 'determined', 'curious'].includes(cara()), `com ferramenta: pool de ferramenta (${cara()})`);
   // Falha da ferramenta → variante transitória 'ferramenta-erro', mas a cara
   // persistente do erro é a do contrato.
   e = B.__applyEvent(e, { type: 'tool', sessionId: 'a', phase: 'result', name: 'bash', ok: false, at: 13000 });
@@ -1628,9 +1648,15 @@ test('expressões durante o trabalho: cada evento sorteia a SUA variante e os es
   // Turno concluído → variante do cenário 'sucesso'.
   e = B.__applyEvent(e, { type: 'status', sessionId: 'a', status: 'running', at: 15000 });
   e = B.__applyEvent(e, { type: 'turn/end', sessionId: 'a', kind: 'completed', at: 16000 });
-  assert.ok(['success', 'celebrating', 'approval', 'wink'].includes(cara()), `concluído: pool de sucesso (${cara()})`);
-  // Disponível dorme sempre.
+  const poolSucesso = ['success', 'celebrating', 'approval', 'wink', 'inspired', 'cheeky'];
+  assert.ok(poolSucesso.includes(cara()), `concluído: pool de sucesso (${cara()})`);
+  // Resultado pronto POR VALIDAR: o status idle seguinte NÃO o tira do
+  // "Concluído" — quem tem trabalho por ver não dorme (fix 2026-10-12).
   e = B.__applyEvent(e, { type: 'status', sessionId: 'a', status: 'idle', at: 18000 });
+  assert.ok(poolSucesso.includes(cara()),
+    `continua com a cara de sucesso enquanto o resultado não é visto (${cara()})`);
+  // Visto/validado (session/seen): aí sim, quem está Disponível dorme.
+  e = B.__applyEvent(e, { type: 'session/seen', sessionId: 'a', at: 19000 });
   assert.equal(cara(), 'sleeping', '…e quem está Disponível dorme');
 });
 
@@ -1776,5 +1802,87 @@ test('config: a chave da API OpenAI faz round-trip no localStorage (dsh-work-gam
       'limpar apaga a chave do navegador');
   } finally {
     globalThis.window.localStorage = antes;
+  }
+});
+
+/* ---------- viewport culling e agente com questionamento ---------- */
+
+test('viewport culling: renderOffice com camera+tela só renderiza as mesas mostradas em tela (+ selecionada) e chavesAVista filtra o sprite', () => {
+  const pessoas = Array.from({ length: 66 }, (_, i) => pessoa(`p${i}`, {
+    name: `Agente${i}`,
+    avatar: ['rui', 'bia', 'lia', 'pesquisa', 'codigo', 'testes', 'alex', 'maya'][i % 8],
+    running: true,
+    status: 'working',
+  }));
+  const wsItens = Array.from({ length: 33 }, (_, i) => w(`w${i}`, `ws-${i}`, [`p${i * 2}`, `p${i * 2 + 1}`]));
+  const layout = B.__montarEscritorio(pessoas, wsDsh(wsItens), BASE_TESTE);
+  assert.equal(layout.modules.length, 33, '33 mesas na grelha (11 filas)');
+  const mapaPessoas = Object.fromEntries(pessoas.map((p) => [p.id, p]));
+  const tela = { w: 1160, h: 805 };
+  const cameraTopo = { zoom: 0.4, x: 0, y: 0 };
+  const aVista = B.__mesasAVista(layout.modules.length, cameraTopo, tela);
+  // Só as 12 primeiras mesas (filas 0..3) estão na vista + margem:
+  assert.equal(aVista.filter(Boolean).length, 12);
+
+  const svgCull = B.__renderOffice({ people: mapaPessoas, layout, visiveis: aVista });
+  const indicesRenderizados = [...svgCull.matchAll(/data-module-index="(\d+)"/g)].map((m) => Number(m[1]));
+  assert.deepEqual(indicesRenderizados, [...Array(12).keys()], 'só as 12 mesas em tela são renderizadas no DOM SVG');
+
+  // Se uma pessoa fora da vista estiver selecionada, a mesa dela mantém-se no DOM para foco/enquadramento:
+  const svgComSel = B.__renderOffice({ people: mapaPessoas, layout, visiveis: aVista, selecionada: 'p64' });
+  const indicesComSel = [...svgComSel.matchAll(/data-module-index="(\d+)"/g)].map((m) => Number(m[1]));
+  assert.deepEqual(indicesComSel, [...Array(12).keys(), 32], 'inclui a mesa da selecionada (32) mesmo fora de vista');
+
+  // E chavesAVista devolve apenas as chaves de corpo das mesas visíveis:
+  const chavesCull = B.__chavesAVista(layout, mapaPessoas, aVista);
+  assert.equal(chavesCull.length, 24, '24 pessoas nas 12 mesas visíveis (em vez das 66 da sala inteira)');
+});
+
+test('questionamento: agente com pergunta continua no filtro Trabalhando e aparece com a mão levantada', () => {
+  let e = B.__createOfficeState({});
+  e = B.__applyEvent(e, { type: 'session/added', sessionId: 'ask1', title: 'Dúvida na arquitetura' });
+  e = B.__applyEvent(e, { type: 'session/added', sessionId: 'parado', title: 'Sessão ociosa' });
+  e = B.__applyEvent(e, {
+    type: 'question',
+    sessionId: 'ask1',
+    id: 'q1',
+    header: 'DECISÃO',
+    text: 'Qual banco de dados usar?',
+    options: [{ label: 'SQLite' }, { label: 'PostgreSQL' }],
+    at: 1000,
+  });
+  const view = B.__officeView(e);
+  // Mesmo com o filtro padrão (soTrabalhando: true, mostrarSemWorkspace: false),
+  // quem tem questionamento permanece visível na sala:
+  const layout = B.__montarEscritorio(Object.values(view.people), wsDsh([w('w1', 'app', ['ask1', 'parado'])]), B.__FILTROS_PADRAO);
+  const sentados = layout.modules.flatMap((m) => m.seats).filter((s) => typeof s === 'string');
+  assert.deepEqual(sentados, ['ask1'], 'quem tem questionamento continua no filtro Trabalhando; quem está parado sai');
+
+  const svg = B.__renderOffice({ people: view.people, layout });
+  assert.match(svg, /data-mao-levantada="true"/, 'lugar e sinalizador marcados com mão levantada');
+  assert.match(svg, /class="question-hand-raised"/, 'desenha o badge da mão levantada junto à cabeça');
+  assert.match(svg, /href="#wg-icon-hand"/, 'usa o ícone de mão levantada do sprite');
+});
+
+test('variedade de personagens: 20 modelos (10f + 10m), sem repetição de boneco nem de nome entre ativos e género estrito', () => {
+  let e = B.__createOfficeState({});
+  for (let i = 0; i < 16; i += 1) {
+    e = B.__applyEvent(e, { type: 'session/added', sessionId: `ativa-${i}` });
+    e = B.__applyEvent(e, { type: 'status', sessionId: `ativa-${i}`, status: 'running', at: 1000 + i });
+  }
+  const ativos = [...e.people.values()];
+  const nomes = ativos.map((p) => p.name);
+  assert.equal(new Set(nomes).size, 16, `16 sessões ativas têm 16 nomes distintos: ${nomes.join(', ')}`);
+  for (const p of ativos) {
+    assert.equal(B.__GENERO_NOME[p.name], B.__GENERO_AVATAR[p.avatar],
+      `género estrito em ${p.id}: ${p.name} (${B.__GENERO_NOME[p.name]}) ↔ ${p.avatar} (${B.__GENERO_AVATAR[p.avatar]})`);
+  }
+  const fAtivos = ativos.filter((p) => B.__GENERO_AVATAR[p.avatar] === 'f');
+  const mAtivos = ativos.filter((p) => B.__GENERO_AVATAR[p.avatar] === 'm');
+  if (fAtivos.length <= 10) {
+    assert.equal(new Set(fAtivos.map((p) => p.avatar)).size, fAtivos.length, 'nenhuma personagem feminina ativa repete boneco até 10');
+  }
+  if (mAtivos.length <= 10) {
+    assert.equal(new Set(mAtivos.map((p) => p.avatar)).size, mAtivos.length, 'nenhum personagem masculino ativo repete boneco até 10');
   }
 });

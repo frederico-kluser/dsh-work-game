@@ -61,7 +61,11 @@
 .question-flag{cursor:pointer}
 .question-flag-dot{fill:#e8a33d;stroke:#fffdf6;stroke-width:3}
 .question-flag-glyph{fill:#5c3f0c;font-size:21px;font-weight:800;pointer-events:none}
-.question-flag-pulse{fill:none;stroke:#e8a33d;stroke-width:2.5;opacity:.7;transform-origin:center;transform-box:fill-box;animation:flag-pulse 1.7s ease-out infinite}.question-flag-pulse.fora-de-vista{animation:none}
+.question-flag-pulse{fill:none;stroke:#e8a33d;stroke-width:2.5;opacity:.7;transform-origin:center;transform-box:fill-box;animation:flag-pulse 1.7s ease-out infinite}.question-flag-pulse.fora-de-vista{animation:none}.desk-module.fora-de-vista *{animation:none}.world.camara-ativa .question-flag-pulse,.world.camara-ativa .speech-bubble,.world.camara-ativa .laptop-arriving,.world.camara-ativa .character.wg-balanca,.world.camara-ativa .character.wg-balanca-lateral{animation-play-state:paused}
+.character.wg-balanca{transform-box:fill-box;transform-origin:50% 100%;animation:wg-balanco 2.8s ease-in-out infinite}
+.character.wg-balanca-lateral{transform-box:fill-box;transform-origin:50% 100%;animation:wg-balanco-lateral 2.8s ease-in-out infinite}
+@keyframes wg-balanco{0%{transform:translate(0,0) rotate(0deg)}25%{transform:translate(2.2px,-3.5px) rotate(.9deg)}50%{transform:translate(0,-7px) rotate(0deg)}75%{transform:translate(-2.2px,-3.5px) rotate(-.9deg)}100%{transform:translate(0,0) rotate(0deg)}}
+@keyframes wg-balanco-lateral{0%{transform:translate(0,0) rotate(0deg)}25%{transform:translate(3.5px,-1.2px) rotate(1.4deg)}50%{transform:translate(7px,-2.4px) rotate(0deg)}75%{transform:translate(3.5px,-1.2px) rotate(-1.4deg)}100%{transform:translate(0,0) rotate(0deg)}}
 @keyframes flag-pulse{0%{transform:scale(1);opacity:.7}70%{transform:scale(1.75);opacity:0}100%{transform:scale(1.75);opacity:0}}
 /* Performance (regras Motion): nada anima com a aba escondida — não se vê nada. */
 html.oculto *{animation-play-state:paused!important}

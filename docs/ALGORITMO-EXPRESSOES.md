@@ -14,8 +14,9 @@ resto do estado.
 ## 1. Taxonomia de cenários
 
 15 cenários, cada um com pool de variantes, base de reserva, probabilidade de disparo e
-prioridade de arbitragem. Os 14 presets da biblioteca Avataaars pertencem todos a pelo
-menos um pool; `sleeping` (Modo jogo) é o 15.º preset.
+prioridade de arbitragem. Os **24 presets** da biblioteca Avataaars pertencem todos a pelo
+menos um pool; `sleeping` (Modo jogo) é o 25.º desenho — e as 20 identidades (8 nomeadas +
+12 aleatórias) têm os 24 renderizados.
 
 | cenário | evento (vocabulário §1) | pool | base | prob | prioridade |
 |---|---|---|---|---|---|
@@ -35,9 +36,10 @@ menos um pool; `sleeping` (Modo jogo) é o 15.º preset.
 | `ocioso` | `status` idle | idle · wink | idle | 0.7 | 10 |
 | `dormir` | `status` idle no Modo jogo | sleeping | sleeping | 1 | 5 |
 
-`base` é o fallback quando a identidade **nenhum** preset do pool tem (identidades
-aleatórias r01..r12 só têm idle/working/success/error — aí `ferramenta` cai em
-`working`, `sucesso` em `success`, etc.).
+`base` é o fallback quando a identidade **nenhum** preset do pool tem. Com a biblioteca
+atual é rede de segurança, não caminho normal: as 20 identidades têm os 24 presets, logo
+todo o pool interseta (a situação antiga — aleatórias com só `idle`/`working`/`success`/
+`error`, em que `ferramenta` caía em `working` — deixou de existir em 2026-10-16).
 
 Eventos **sem** cenário (não mudam a cara): `question/answered`, `approval/decided`,
 `subagent/end`, `compaction` end, `usage`, `session/*`, `status` running.
