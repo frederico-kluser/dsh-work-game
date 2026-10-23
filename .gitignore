@@ -17,3 +17,7 @@ projects/.worktrees/
 # Ruído de sistema
 .DS_Store
 Thumbs.db
+
+# Artefactos do pnpm num projeto npm (o lockfile canónico é package-lock.json)
+pnpm-lock.yaml
+pnpm-workspace.yaml
